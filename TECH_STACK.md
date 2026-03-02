@@ -1,8 +1,9 @@
 # Vietnamese Tech Trend & Controversy Radar
 ## Tech Stack & System Architecture — Final Reference Document
 
-> **Phiên bản:** v2.0 — Cập nhật: Tháng 2/2026  
+> **Phiên bản:** v3.0 — Cập nhật: Tháng 3/2026  
 > **Trạng thái:** Phase 1 — Thiết kế & Thu thập dữ liệu  
+> **Thay đổi v3.0:** Bỏ MongoDB, thay PostgreSQL → ClickHouse + dbt  
 
 ---
 
@@ -38,16 +39,17 @@ Hệ thống theo kiến trúc **7 lớp phân tách rõ ràng**, vận hành tr
 ┌────────────────────────────▼────────────────────────────────────┐
 │                    DATA INGESTION LAYER                         │
 │         Requests/BS4 · Selenium · YouTube Data API v3           │
-│              Nguồn: VOZ · VnExpress Tech · YouTube              │
+│         Nguồn: VOZ · VnExpress Tech · YouTube                   │
+│         Write trực tiếp vào HDFS (JSON with Pydantic)           │
 └────────────────────────────┬────────────────────────────────────┘
-                             │ Raw JSON
+                             │ Raw JSON → HDFS
 ┌────────────────────────────▼────────────────────────────────────┐
 │                       STORAGE LAYER                             │
-│    MongoDB (Data Lake)  ──────────  HDFS (Raw/Intermediate)     │
-│         PostgreSQL (Data Warehouse / Dashboard queries)         │
-└──────────────┬──────────────────────────────┬───────────────────┘
-               │ Spark + Mongo Connector      │ Parquet / ORC
-┌──────────────▼──────────────────────────────▼───────────────────┐
+│              HDFS (Raw → Staged → Features)                     │
+│         ClickHouse (OLAP Warehouse / Dashboard queries)         │
+└────────────────────────────┬────────────────────────────────────┘
+                             │ Parquet / ORC
+┌────────────────────────────▼────────────────────────────────────┐
 │               BIG DATA PROCESSING LAYER                         │
 │                   Apache Spark 3.5+ (PySpark)                   │
 │    Dedup (LSH/MinHash) · PageRank/HITS · Count-Min Sketch       │
@@ -62,7 +64,13 @@ Hệ thống theo kiến trúc **7 lớp phân tách rõ ràng**, vận hành tr
 │            TREND & CRISIS DETECTION LAYER                       │
 │      Trend Score Engine · Rolling Mean · Anomaly Alerts         │
 └────────────────────────────┬────────────────────────────────────┘
-                             │ Aggregated Results → PostgreSQL
+                             │ Write to ClickHouse
+┌────────────────────────────▼────────────────────────────────────┐
+│                   DATA TRANSFORMATION LAYER                     │
+│                  dbt (SQL transformations)                      │
+│           Aggregations · Marts · Business Logic                 │
+└────────────────────────────┬────────────────────────────────────┘
+                             │ Analytical Tables
 ┌────────────────────────────▼────────────────────────────────────┐
 │                   VISUALIZATION LAYER                           │
 │                 Streamlit · Plotly · Matplotlib                 │
@@ -71,8 +79,17 @@ Hệ thống theo kiến trúc **7 lớp phân tách rõ ràng**, vận hành tr
 
 **Luồng dữ liệu chính:**
 ```
-Crawlers → MongoDB (raw) → HDFS (staged) → Spark (clean + compute)
-         → PhoBERT/BERTopic (NLP) → Trend/Crisis Score → PostgreSQL → Streamlit
+Crawlers → HDFS (raw JSON, partitioned by date)
+              ↓
+         Spark (clean + dedup LSH + compute)
+              ↓
+         HDFS (staged parquet) + PhoBERT/BERTopic (NLP)
+              ↓
+         Trend/Crisis Score → ClickHouse (staging tables)
+              ↓
+         dbt (transformations) → ClickHouse (marts)
+              ↓
+         Streamlit Dashboard
 ```
 
 ---
@@ -85,6 +102,8 @@ Crawlers → MongoDB (raw) → HDFS (staged) → Spark (clean + compute)
 | Dynamic crawling | `Selenium` + `undetected-chromedriver` | Trang render bằng JS, anti-bot |
 | API crawling | `YouTube Data API v3` | Comments & metadata video công nghệ |
 | Rate limiting | `time.sleep` + `rotating proxies` | Tránh bị block IP |
+| Data validation | `Pydantic` models | Schema validation trước khi write HDFS |
+| Output format | JSON/JSONL partitioned by date | `/data/raw/{source}/{date}/*.json` |
 | Scheduler | Apache Airflow DAG | Tự động hóa lịch crawl định kỳ |
 
 **Nguồn dữ liệu:**
@@ -99,61 +118,128 @@ Crawlers → MongoDB (raw) → HDFS (staged) → Spark (clean + compute)
 - Selenium cần `chromedriver` tương thích với phiên bản Chrome trên cluster.
 - VOZ có Cloudflare protection — cần `undetected-chromedriver` hoặc `cloudscraper`.
 - YouTube API có quota giới hạn **10,000 units/ngày** — thiết kế request hợp lý.
+- Crawlers validation: dùng Pydantic models để đảm bảo schema consistency.
+- HDFS write: partition theo ngày `/data/raw/{source}/date={YYYY-MM-DD}/`, dễ quản lý và overwrite.
 
 ---
 
 ## 3. Storage Layer
 
-### 3.1 MongoDB — Data Lake
+### 3.1 HDFS — Raw & Intermediate Storage
 
 ```yaml
-Vai trò: Lưu trữ dữ liệu thô dạng JSON, không cần schema cố định
-Version: MongoDB 7.x
-Collections:
-  - raw_voz_posts      # Bài đăng & comment VOZ
-  - raw_vnexpress      # Bài báo VnExpress
-  - raw_youtube        # Comment YouTube
-  - crawl_logs         # Log trạng thái crawl
-Index: created_at (TTL), source, topic_keyword
-```
-
-### 3.2 HDFS — Raw & Intermediate Storage
-
-```yaml
-Vai trò: Lưu trữ trung gian cho Spark, tối ưu cho đọc phân tán
-Format: JSON (ingress) → Parquet (sau cleaning)
+Vai trò: Single source of truth cho toàn bộ data pipeline
+Format: JSON (raw) → Parquet (staged) → Parquet (features)
 Thư mục:
-  /data/raw/           # Dữ liệu export từ MongoDB
-  /data/staged/        # Sau khi clean bằng Spark
-  /data/features/      # Feature vectors, embeddings
-  /data/results/       # Kết quả scoring
+  /data/raw/{source}/date={YYYY-MM-DD}/    # Crawlers write trực tiếp
+        ├── voz/
+        ├── vnexpress/
+        └── youtube/
+  /data/staged/                             # Clean data sau Spark
+  /data/features/                           # Feature vectors, embeddings
+  /data/results/                            # Kết quả scoring
+  /logs/crawl/date={YYYY-MM-DD}/            # Crawl logs (JSONL)
 ```
 
-> **Tại sao cần HDFS?** Spark đọc dữ liệu từ HDFS nhanh hơn MongoDB nhiều lần (tránh overhead network + BSON serialization). Dữ liệu được export từ MongoDB sang HDFS dạng Parquet trước khi Spark xử lý.
+**Tại sao HDFS là core storage:**
+- Spark đọc/ghi HDFS nhanh nhất (zero serialization overhead)
+- Partition theo date → dễ incremental processing
+- Append-only semantics phù hợp với batch pipeline
+- Replication tự động (đồ án dùng replication factor = 2)
 
-### 3.3 PostgreSQL — Data Warehouse
+**Crawlers → HDFS workflow:**
+```python
+# Example: VOZ crawler write vào HDFS
+from pydantic import BaseModel
+from datetime import datetime
+import json
+
+class VozPost(BaseModel):
+    post_id: str
+    title: str
+    content: str
+    author: str
+    timestamp: datetime
+    source: str = "voz"
+
+# Validate và write
+post = VozPost(**raw_data)
+hdfs_path = f"/data/raw/voz/date={post.timestamp.date()}/posts_{timestamp}.json"
+# Write via hdfs client hoặc spark.write
+```
+
+### 3.2 ClickHouse — OLAP Data Warehouse
 
 ```yaml
-Vai trò: Lưu kết quả đã xử lý, phục vụ dashboard query
-Version: PostgreSQL 16.x
+Vai trò: Analytical queries cho dashboard, thay thế PostgreSQL
+Version: ClickHouse 24.x
+Engine: MergeTree family (ReplicatedMergeTree cho HA, nhưng đồ án dùng MergeTree đơn giản)
 Tables:
-  - processed_posts     # Bài đăng đã clean + label sentiment
-  - trend_scores        # Điểm trend theo ngày/tuần
-  - crisis_alerts       # Cảnh báo bất thường
-  - topic_clusters      # Kết quả BERTopic/LDA
-  - influencer_scores   # PageRank/HITS scores
-Index: (source, date), (topic_id), (trend_score DESC)
+  # Staging tables (Spark write trực tiếp)
+  - stg_processed_posts      # Raw results từ Spark
+  - stg_sentiment_scores     # PhoBERT outputs
+  - stg_topic_labels         # BERTopic/LDA results
+  - stg_pagerank_scores      # PageRank outputs
+  
+  # Mart tables (dbt transformations)
+  - mart_trend_scores        # Aggregated trend scores
+  - mart_crisis_alerts       # Bất thường đã filter
+  - mart_topic_summary       # Topic stats by day/week
+  - mart_influencer_ranking  # Top influencers
+Partition Key: toYYYYMM(date)
+Order By: (source, date, topic_id)
 ```
 
-### 3.4 Kết nối Spark ↔ MongoDB
+**Tại sao ClickHouse > PostgreSQL:**
+- Queries nhanh hơn **10-100x** cho analytical workload (GROUP BY, time-series aggregations)
+- Column-oriented storage → compression tốt (tiết kiệm 5-10x disk)
+- Native support cho time-series functions (rolling mean, window functions)
+- Spark integration tốt qua JDBC driver
 
+**Kết nối Spark → ClickHouse:**
 ```python
-# Yêu cầu: mongo-spark-connector (phiên bản khớp Spark 3.5)
-# spark-submit --packages org.mongodb.spark:mongo-spark-connector_2.12:10.3.0
+df.write \
+    .format("jdbc") \
+    .option("url", "jdbc:clickhouse://storage-node:8123/nlp_db") \
+    .option("dbtable", "stg_processed_posts") \
+    .option("driver", "com.clickhouse.jdbc.ClickHouseDriver") \
+    .mode("append") \
+    .save()
+```
 
-df = spark.read.format("mongodb") \
-    .option("uri", "mongodb://localhost:27017/nlp_db.raw_voz_posts") \
-    .load()
+### 3.3 dbt — Data Transformation Layer
+
+```yaml
+Vai trò: Transform staging tables → analytical marts
+Version: dbt-core 1.7+ với dbt-clickhouse adapter
+Workflow:
+  1. Spark write raw results → ClickHouse staging tables
+  2. dbt runs transformations (SQL models)
+  3. dbt materializes marts (incremental or table)
+  4. Streamlit reads from marts
+
+Example dbt models:
+  - models/staging/stg_*.sql              # Light cleaning, aliasing
+  - models/marts/mart_trend_scores.sql    # Complex aggregations
+  - models/marts/mart_crisis_alerts.sql   # Filter + enrich anomalies
+```
+
+**Example dbt model:**
+```sql
+-- models/marts/mart_trend_scores.sql
+{{ config(materialized='incremental') }}
+
+SELECT
+    date,
+    topic_id,
+    topic_label,
+    sum(mention_count) as total_mentions,
+    avg(sentiment_score) as avg_sentiment,
+    max(trend_score) as peak_score
+FROM {{ ref('stg_processed_posts') }}
+WHERE date >= today() - INTERVAL 30 DAY
+GROUP BY date, topic_id, topic_label
+ORDER BY date DESC, peak_score DESC
 ```
 
 ---
@@ -193,7 +279,8 @@ spark = SparkSession.builder \
 | `pandas` | 2.x | Local processing, debug |
 | `numpy` | 1.26+ | Tính toán số học |
 | `pyarrow` | 14.x | Đọc/ghi Parquet |
-| `mongo-spark-connector` | 10.3.x | Kết nối MongoDB ↔ Spark |
+| `clickhouse-connect` | 0.7.x | Python client ClickHouse |
+| `pydantic` | 2.x | Schema validation crawlers |
 
 ---
 
@@ -497,14 +584,14 @@ Trang Crisis Monitor:
 Airflow DAG: daily_pipeline
   Schedule: 0 2 * * *  (chạy lúc 2:00 AM mỗi ngày)
 
-  Task 1: crawl_sources          (crawl VOZ, VnExpress, YouTube)
-  Task 2: export_mongo_to_hdfs   (export raw JSON → HDFS)
-  Task 3: spark_cleaning         (Spark job: clean + dedup LSH)
-  Task 4: spark_nlp              (Spark job: PhoBERT sentiment)
-  Task 5: topic_modeling         (BERTopic/LDA weekly)
-  Task 6: trend_scoring          (Tính TrendScore + PageRank)
-  Task 7: crisis_detection       (Isolation Forest check)
-  Task 8: load_to_postgres       (Write kết quả → PostgreSQL)
+  Task 1: crawl_sources          (crawl VOZ, VnExpress, YouTube → HDFS)
+  Task 2: spark_cleaning         (Spark job: clean + dedup LSH)
+  Task 3: spark_nlp              (Spark job: PhoBERT sentiment)
+  Task 4: topic_modeling         (BERTopic/LDA weekly)
+  Task 5: trend_scoring          (Tính TrendScore + PageRank)
+  Task 6: crisis_detection       (Isolation Forest check)
+  Task 7: load_to_clickhouse     (Write staging tables → ClickHouse)
+  Task 8: dbt_run                (dbt transformations → marts)
   Task 9: refresh_dashboard      (Notify Streamlit cache clear)
 ```
 
@@ -515,18 +602,22 @@ Airflow DAG: daily_pipeline
 ```yaml
 # docker-compose.yml (development environment)
 services:
-  mongodb:
-    image: mongo:7
-    ports: ["27017:27017"]
-  postgres:
-    image: postgres:16
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    ports: 
+      - "8123:8123"  # HTTP
+      - "9000:9000"  # Native
     environment:
-      POSTGRES_DB: nlp_db
+      CLICKHOUSE_DB: nlp_db
   airflow:
     image: apache/airflow:2.9.0
+    depends_on:
+      - clickhouse
   streamlit:
     build: ./dashboard
     ports: ["8501:8501"]
+    depends_on:
+      - clickhouse
 ```
 
 ### 9.3 Git Workflow
@@ -558,8 +649,8 @@ Ansible Playbooks:
   setup_java.yml        → Cài Java 8+ (cần cho VnCoreNLP)
   setup_spark.yml       → Cài Spark 3.5 trên tất cả nodes
   setup_hdfs.yml        → Cấu hình HDFS NameNode + DataNodes
-  setup_mongodb.yml     → Cài MongoDB trên storage node
-  setup_postgres.yml    → Cài PostgreSQL trên storage node
+  setup_clickhouse.yml  → Cài ClickHouse trên storage node
+  setup_dbt.yml         → Cài dbt-core + dbt-clickhouse
   setup_airflow.yml     → Cài Airflow trên master node
   deploy_app.yml        → Deploy Streamlit dashboard
 ```
@@ -569,12 +660,12 @@ Ansible Playbooks:
 ```
 Cluster: HPC Semi-Lab
   ├── Master Node (1 node)
-  │     └── HDFS NameNode, Spark Master, Airflow, Streamlit
+  │     └── HDFS NameNode, Spark Master, Airflow, Streamlit, dbt
   ├── Worker Nodes (3–4 nodes)
   │     └── HDFS DataNode, Spark Worker
   │     └── Chạy PhoBERT inference (nếu có GPU)
   └── Storage Node (1 node)
-        └── MongoDB, PostgreSQL
+        └── ClickHouse, HDFS DataNode
 ```
 
 | Node | RAM | CPU | Vai trò |
@@ -610,7 +701,9 @@ google-api-python-client==2.120.0
 # Big Data
 pyspark==3.5.1
 pyarrow==14.0.2
-pymongo==4.6.2
+clickhouse-connect==0.7.7
+clickhouse-driver==0.2.7  # JDBC alternative
+pydantic==2.6.3
 
 # NLP
 transformers==4.39.0
@@ -627,7 +720,7 @@ pandas==2.2.1
 mmh3==4.1.0                # Count-Min Sketch hashing
 
 # Database
-psycopg2-binary==2.9.9
+clickhouse-sqlalchemy==0.3.0  # Optional ORM support
 
 # Visualization
 streamlit==1.32.0
@@ -679,8 +772,8 @@ Thực nghiệm 2: Weak Scaling
 
 | Thành viên | Trách nhiệm chính | Deliverable |
 |---|---|---|
-| **Member 1** | Data Crawling (VOZ, VnExpress, YouTube) + MongoDB setup | Scripts crawler, raw dataset |
-| **Member 2** | Ansible + Spark environment + HDFS pipeline + LSH/MinHash | Playbooks, Spark cleaning job |
+| **Member 1** | Data Crawling (VOZ, VnExpress, YouTube) → HDFS với Pydantic validation | Scripts crawler, raw dataset trên HDFS |
+| **Member 2** | Ansible + Spark environment + HDFS pipeline + ClickHouse + dbt setup + LSH/MinHash | Playbooks, Spark cleaning job, dbt models |
 | **Member 3** | Topic Modeling (LDA + BERTopic) + Count-Min Sketch | Topic model, keyword frequency |
 | **Member 4** | PhoBERT fine-tuning + Sentiment pipeline + Isolation Forest | Model checkpoint, evaluation report |
 | **Member 5** | Trend Scoring + PageRank/HITS + Streamlit Dashboard | Score engine, dashboard app |
@@ -696,13 +789,12 @@ Thực nghiệm 2: Weak Scaling
 │ Crawling           │ Requests, BS4, Selenium │ Latest    │
 │                    │ YouTube Data API v3     │ v3        │
 ├──────────────────────────────────────────────────────────┤
-│ Storage            │ MongoDB                 │ 7.x       │
-│                    │ HDFS (Hadoop)           │ 3.3.x     │
-│                    │ PostgreSQL              │ 16.x      │
+│ Storage            │ HDFS (Hadoop)           │ 3.3.x     │
+│                    │ ClickHouse              │ 24.x      │
 ├──────────────────────────────────────────────────────────┤
 │ Big Data           │ Apache Spark (PySpark)  │ 3.5.x     │
 │                    │ GraphFrames             │ 0.12.0    │
-│                    │ mongo-spark-connector   │ 10.3.x    │
+│                    │ dbt-core + clickhouse   │ 1.7.x     │
 ├──────────────────────────────────────────────────────────┤
 │ NLP                │ VnCoreNLP / underthesea │ Latest    │
 │                    │ PhoBERT (HuggingFace)   │ base      │
@@ -733,3 +825,4 @@ Thực nghiệm 2: Weak Scaling
 |---|---|---|
 | v1.0 | 2026-02-01 | Bản khởi thảo ban đầu (README) |
 | v2.0 | 2026-02-25 | Bổ sung HDFS, CS246 algorithms, Ansible, Docker, Benchmarking plan, Java dependency, full requirements.txt |
+| v3.0 | 2026-03-02 | **Architecture simplification:** Bỏ MongoDB (crawlers write trực tiếp HDFS), thay PostgreSQL → ClickHouse + dbt cho OLAP performance và maintainability |
