@@ -1,0 +1,17 @@
+name: 'tech_trend_dbt'
+version: '1.0.0'
+config-version: 2
+
+profile: 'tech_trend_dbt'
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+seed-paths: ["seeds"]
+
+models:
+  tech_trend_dbt:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table
