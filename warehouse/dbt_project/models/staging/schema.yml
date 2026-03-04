@@ -1,0 +1,60 @@
+version: 2
+
+models:
+  - name: stg_posts
+    description: >
+      Staging view over dwh_prod.stg_posts. Adds derived time dimensions
+      (date, hour, day_of_week), reply flag, and body length. Filters out
+      empty bodies and data older than 90 days.
+    columns:
+      - name: doc_id
+        description: Unique document identifier
+        tests:
+          - not_null
+      - name: source
+        description: "Data source: voz, tinhte, vnexpress, youtube"
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['voz', 'tinhte', 'vnexpress', 'youtube']
+      - name: author
+        description: Author username
+        tests:
+          - not_null
+      - name: sentiment_label
+        description: "Sentiment classification: positive, negative, neutral"
+        tests:
+          - accepted_values:
+              values: ['positive', 'negative', 'neutral']
+      - name: created_at
+        description: Original post creation timestamp
+        tests:
+          - not_null
+
+  - name: stg_sentiments
+    description: >
+      Pivoted sentiment view for easy aggregation. One-hot encodes
+      sentiment_label into is_positive, is_negative, is_neutral boolean columns.
+    columns:
+      - name: doc_id
+        tests:
+          - not_null
+      - name: sentiment_label
+        tests:
+          - not_null
+
+  - name: stg_interactions
+    description: >
+      Interaction edges for the PageRank/HITS graph. Filters self-loops
+      and empty author names. Each row represents a reply, quote, or mention.
+    columns:
+      - name: source_author
+        tests:
+          - not_null
+      - name: target_author
+        tests:
+          - not_null
+      - name: interaction_type
+        tests:
+          - accepted_values:
+              values: ['reply', 'quote', 'mention']

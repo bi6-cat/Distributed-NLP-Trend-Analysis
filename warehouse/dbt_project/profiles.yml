@@ -1,0 +1,12 @@
+tech_trend_dbt:
+  target: dev
+  outputs:
+    dev:
+      type: clickhouse
+      driver: http
+      host: localhost
+      port: 8123
+      user: admin
+      password: clickhouse_secret
+      schema: dwh_prod
+      threads: 4
