@@ -12,9 +12,8 @@
 4. [Phương Pháp TF-IDF](#4-phương-pháp-tf-idf)
 5. [Phương Pháp LDA (Latent Dirichlet Allocation)](#5-phương-pháp-lda)
 6. [Phương Pháp BERTopic](#6-phương-pháp-bertopic)
-7. [So Sánh Thực Nghiệm](#7-so-sánh-thực-nghiệm)
-8. [Kết Luận và Hướng Phát Triển](#8-kết-luận)
-9. [Tài Liệu Tham Khảo](#9-tài-liệu-tham-khảo)
+7. [Kết Luận và Hướng Phát Triển](#8-kết-luận)
+8. [Tài Liệu Tham Khảo](#9-tài-liệu-tham-khảo)
 
 ---
 
@@ -307,99 +306,8 @@ Trong dữ liệu mạng xã hội, HDBSCAN thường tạo ra 20-40% outlier (t
 
 ---
 
-## 7. So Sánh Thực Nghiệm
 
-### 7.1 Dataset
-
-Thực nghiệm được thực hiện trên:
-
-| Dataset | Nguồn | Số documents | Thời gian |
-|---|---|---|---|
-| Facebook Comments | Pages tin tức lớn | 500,000 | Q1 2024 |
-| Twitter/X Posts | Trending hashtags VN | 200,000 | Q1 2024 |
-| YouTube Comments | Top channels VN | 150,000 | Q1 2024 |
-| Tổng cộng | | 850,000 | |
-
-### 7.2 Metrics Đánh Giá
-
-#### Topic Coherence (c_v Score)
-
-Đo lường sự liên kết ngữ nghĩa giữa các từ trong cùng một topic:
-
-$$C_V = \frac{1}{|T|} \sum_{t \in T} \frac{1}{\binom{|W_t|}{2}} \sum_{(w_i, w_j) \in W_t^{(2)}} \text{NPMI}(w_i, w_j) \cdot \text{similarity}(w_i, w_j)$$
-
-Score càng cao → topics càng coherent và có nghĩa.
-
-#### Topic Diversity
-
-$$\text{Diversity} = \frac{\text{số từ khóa unique}}{K \times |W_t|}$$
-
-Tránh topic overlap — các topics nên đại diện cho các chủ đề khác nhau.
-
-### 7.3 Kết Quả So Sánh
-
-```
-Điều kiện thực nghiệm:
-- Hardware: NVIDIA A100 40GB, 128GB RAM
-- Dataset: 500K Facebook comments
-- Số topics: K=20 (LDA, TF-IDF), auto (BERTopic → 23 topics)
-- Metrics: Average of 5 runs
-```
-
-| Metric | TF-IDF | LDA | BERTopic |
-|---|---|---|---|
-| **Coherence (c_v)** | 0.42 | 0.51 | **0.68** |
-| **Topic Diversity** | 0.71 | 0.64 | **0.79** |
-| **Inference Speed** | **<1ms/doc** | 5ms/doc | 80ms/doc |
-| **Training Time** | **2 min** | 45 min | 3 hours |
-| **Memory (GB)** | **0.5** | 2.1 | **12.4** |
-| **Outlier Rate** | N/A | N/A | 18.3% |
-| **Human Evaluation** | 3.1/5 | 3.6/5 | **4.3/5** |
-
-### 7.4 Phân Tích Định Tính
-
-**Ví dụ: Phân tích topic "Công nghệ AI" từ Facebook**
-
-```
-TF-IDF Keywords:
-→ trí tuệ, nhân tạo, AI, chatgpt, robot, học, máy, làm, việc, thay
-
-LDA Topic:
-→ chatgpt (0.045), AI (0.038), trí_tuệ_nhân_tạo (0.032), 
-  lập_trình (0.028), học_máy (0.025), code (0.021),
-  công_nghệ (0.019), tự_động (0.018), robot (0.015), ...
-
-BERTopic Topic:
-→ chatgpt (0.089), GPT-4 (0.076), AI_tạo_sinh (0.071),
-  Gemini (0.068), lập_trình_viên (0.063), GitHub_Copilot (0.058),
-  prompt_engineering (0.052), LLM (0.049), fine-tuning (0.044)
-
-Nhận xét:
-- BERTopic phân biệt được "AI tạo sinh" với "AI học máy tổng quát"
-- BERTopic nhận diện được tên model cụ thể nhờ semantic embeddings
-- LDA và TF-IDF trộn lẫn các sub-topic
-```
-
-### 7.5 Performance theo Độ Dài Văn Bản
-
-```
-Coherence Score (c_v) theo độ dài trung bình document:
-
-Độ dài (tokens) | TF-IDF | LDA  | BERTopic
-< 10            |  0.31  | 0.38 |   0.65
-10 - 30         |  0.40  | 0.49 |   0.67
-30 - 100        |  0.45  | 0.56 |   0.69
-> 100           |  0.48  | 0.61 |   0.70
-
-→ BERTopic ổn định nhất với short text
-→ LDA cần document dài để hoạt động tốt
-→ TF-IDF ít bị ảnh hưởng bởi độ dài (nhưng quality thấp)
-```
-
----
-
-
-## 8. Khi Nào Dùng Phương Pháp Nào
+## 7. Khi Nào Dùng Phương Pháp Nào
 
 ```
 Use Case Matrix:
@@ -421,9 +329,9 @@ Research/accuracy là ưu tiên      | BERTopic
 ---
 
 
-## 9. Kết Luận
+## 8. Kết Luận
 
-### 9.1 Tóm Tắt Phát Hiện Chính
+### 8.1 Tóm Tắt Phát Hiện Chính
 
 1. **BERTopic vượt trội** về chất lượng topic nhờ sử dụng PhoBERT captures semantic meaning của tiếng Việt.
 
@@ -434,7 +342,7 @@ Research/accuracy là ưu tiên      | BERTopic
 4. **Word segmentation là bottleneck** quan trọng nhất — lỗi ở bước này lan truyền qua toàn bộ pipeline.
 
 
-## 10. Tài Liệu Tham Khảo
+## 9. Tài Liệu Tham Khảo
 
 ### Papers Gốc
 
