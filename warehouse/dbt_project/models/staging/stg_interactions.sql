@@ -4,22 +4,17 @@
     )
 }}
 
-/*
-    Staging layer: interaction edges for PageRank/HITS graph.
-    Adds derived date columns and filters self-interactions.
-*/
-
 SELECT
-    source_author,
-    target_author,
+    source_author_id,
+    target_author_id,
     interaction_type,
     weight,
     source,
     created_at,
-    toDate(created_at)             AS interaction_date,
-    toStartOfHour(created_at)      AS interaction_hour
+    toDate(created_at)                 AS interaction_date,
+    toStartOfHour(created_at)          AS interaction_hour
 
-FROM dwh_prod.stg_interactions
-WHERE source_author != target_author   -- Remove self-loops
-  AND source_author != ''
-  AND target_author != ''
+FROM {{ source('dwh_prod', 'stg_interactions') }}
+WHERE source_author_id != target_author_id
+  AND source_author_id != ''
+  AND target_author_id != ''

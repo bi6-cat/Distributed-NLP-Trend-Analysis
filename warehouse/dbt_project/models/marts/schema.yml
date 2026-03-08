@@ -1,0 +1,47 @@
+version: 2
+
+models:
+  # ------ WIDE FACT ------
+  - name: fct_topic_activity
+    description: >
+      Wide fact table (grain: topic_id × source × hour_bucket).
+      Merges trend scoring + sentiment timeseries into ONE table.
+      source_type and topic_label are embedded — zero JOINs needed in dashboards.
+    columns:
+      - name: topic_id
+        tests:
+          - not_null
+      - name: trend_score
+        tests:
+          - not_null
+      - name: volume_zscore
+        description: Standard deviations from 7-day rolling mean (for anomaly detection)
+
+  # ------ CRISIS FACT ------
+  - name: fct_crisis_events
+    description: >
+      Crisis events from M4's anomaly detector, enriched with embedded topic labels.
+    columns:
+      - name: event_id
+        tests:
+          - unique
+          - not_null
+
+  # ------ DIMENSIONS ------
+  - name: dim_topics
+    description: >
+      Topic list for filter widgets. NOT joined on the main fact — labels are
+      pre-embedded in fct_topic_activity.
+    columns:
+      - name: topic_id
+        tests:
+          - unique
+          - not_null
+
+  - name: dim_influencers
+    description: >
+      Author influence scores (PageRank/HITS) + activity stats for the Influencer page.
+    columns:
+      - name: author_id
+        tests:
+          - not_null
