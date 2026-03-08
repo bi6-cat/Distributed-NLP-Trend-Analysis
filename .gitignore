@@ -1,3 +1,14 @@
+# ── Data files (không commit raw/fake data lên git) ──────────
+data/fake/
+data/raw/
+data/*.csv
+data/*.json
+data/*.parquet
+data/*.db
+# Giữ lại các file config trong data/ (stopwords, slang dict...)
+!data/stopwords_vi.txt
+!data/slang_dict.json
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
