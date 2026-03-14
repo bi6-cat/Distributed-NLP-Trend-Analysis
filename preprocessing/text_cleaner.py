@@ -36,8 +36,7 @@ class TextPreprocessor:
         slang_dict_path: str = "data/slang_dict.json",
         stopwords_path: str = "data/stopwords_vi.txt",
         use_vncorenlp: bool = True,
-        vncorenlp_host: str = "http://localhost",
-        vncorenlp_port: int = 9000,
+        vncorenlp_jar: str = "vncorenlp/VnCoreNLP-1.1.1.jar"
     ):
         # Slang normalizer
         self.slang_normalizer = SlangNormalizer(slang_dict_path)
@@ -45,9 +44,7 @@ class TextPreprocessor:
         # Tokenizer
         self.use_vncorenlp = use_vncorenlp
         if use_vncorenlp:
-            self.tokenizer = VnCoreNLPTokenizer(
-                host=vncorenlp_host, port=vncorenlp_port
-            )
+            self.tokenizer = VnCoreNLPTokenizer(jar_path=vncorenlp_jar)
         else:
             # Fallback: underthesea (thuần Python, dễ cài hơn)
             from underthesea import word_tokenize
@@ -94,7 +91,11 @@ class TextPreprocessor:
     def remove_emails(self, text: str) -> str:
         """Xóa email addresses."""
         return self._email_pattern.sub(" ", text)
-
+    
+    def remove_mentions(self, text: str) -> str:
+        """Xóa mentions."""
+        return re.sub(r"@\w+", " ", text)
+    
     def remove_emojis(self, text: str) -> str:
         """Xóa emojis."""
         return self._emoji_pattern.sub(" ", text)
@@ -129,6 +130,7 @@ class TextPreprocessor:
         text = self.remove_html(text)
         text = self.remove_urls(text)
         text = self.remove_emails(text)
+        text = self.remove_mentions(text)
         text = self.remove_emojis(text)
         text = self.normalize_unicode(text)
         text = self.slang_normalizer.normalize(text)
@@ -211,3 +213,4 @@ class TextPreprocessor:
         except FileNotFoundError:
             print(f"[TextPreprocessor] WARNING: Stopwords file not found: {path}")
             return set()
+    

@@ -36,7 +36,7 @@ class SlangNormalizer:
         # Build regex: match whole word only, sorted dài → ngắn (greedy)
         if self.slang_dict:
             sorted_keys = sorted(self.slang_dict.keys(), key=len, reverse=True)
-            escaped_keys = [re.escape(k) for k in sorted_keys]
+            escaped_keys = [re.escape(k) for k in sorted_keys] 
             self._pattern = re.compile(
                 r"\b(" + "|".join(escaped_keys) + r")\b",
                 flags=re.IGNORECASE,
