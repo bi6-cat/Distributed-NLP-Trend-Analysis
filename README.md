@@ -45,7 +45,7 @@ Member 4 (NLP Engineer)    →  Trả lời câu hỏi: "Người ta đang cảm
                                PhoBERT Sentiment + Crisis Detection
 
 Member 5 (Full-stack)      →  Biến tất cả thành thứ người thường nhìn vào hiểu được
-                               Trend Scoring + PageRank + Streamlit Dashboard
+                               Trend Scoring + Streamlit Dashboard
 ```
 
 ---
@@ -65,8 +65,7 @@ Member 5 (Full-stack)      →  Biến tất cả thành thứ người thườn
   Apache Spark 3.5 (PySpark)
    ├── LSH/MinHash  → loại bỏ trùng lặp
    ├── PhoBERT      → gán nhãn cảm xúc
-   ├── BERTopic/LDA → phân cụm chủ đề
-   └── PageRank     → xếp hạng influencer
+   └── BERTopic/LDA → phân cụm chủ đề
           │  result
           ▼
      PostgreSQL (structured results)
@@ -88,7 +87,6 @@ Member 5 (Full-stack)      →  Biến tất cả thành thứ người thườn
 |---|---|---|
 | **MinHash + LSH** | Loại bỏ bài đăng trùng lặp / gần giống nhau | M2 |
 | **Count-Min Sketch** | Đếm tần suất keyword mà không dùng hết RAM | M3 |
-| **PageRank / HITS** | Tìm ra ai đang là "influencer" trong mạng thảo luận | M5 |
 
 ---
 

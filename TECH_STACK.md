@@ -52,7 +52,7 @@ Hệ thống theo kiến trúc **7 lớp phân tách rõ ràng**, vận hành tr
 ┌────────────────────────────▼────────────────────────────────────┐
 │               BIG DATA PROCESSING LAYER                         │
 │                   Apache Spark 3.5+ (PySpark)                   │
-│    Dedup (LSH/MinHash) · PageRank/HITS · Count-Min Sketch       │
+│    Dedup (LSH/MinHash) · Count-Min Sketch                       │
 └────────────────────────────┬────────────────────────────────────┘
                              │ Clean DataFrame
 ┌────────────────────────────▼────────────────────────────────────┐
@@ -179,13 +179,11 @@ Tables:
   - stg_processed_posts      # Raw results từ Spark
   - stg_sentiment_scores     # PhoBERT outputs
   - stg_topic_labels         # BERTopic/LDA results
-  - stg_pagerank_scores      # PageRank outputs
   
   # Mart tables (dbt transformations)
   - mart_trend_scores        # Aggregated trend scores
   - mart_crisis_alerts       # Bất thường đã filter
   - mart_topic_summary       # Topic stats by day/week
-  - mart_influencer_ranking  # Top influencers
 Partition Key: toYYYYMM(date)
 Order By: (source, date, topic_id)
 ```
@@ -253,7 +251,6 @@ ORDER BY date DESC, peak_score DESC
 | Data cleaning | `Spark SQL / DataFrame API` | Loại bỏ null, normalize text, dedup |
 | Feature computation | `MLlib` | TF-IDF, feature vectors |
 | Distributed NLP | `mapPartitions` | Chạy PhoBERT song song trên từng partition |
-| Graph computation | `GraphX` (via Python wrapper) | PageRank / HITS trên mạng thảo luận |
 | Batch processing | `Spark Structured Batch` | Xử lý theo ngày/tuần |
 
 ### 4.2 Cấu hình Spark trên HPC Cluster
@@ -323,37 +320,7 @@ similar_pairs = model.approxSimilarityJoin(
 )
 ```
 
-### 5.2 PageRank / HITS (Influence Scoring)
-
-**Mục tiêu:** Xác định người dùng/nguồn có authority trong mạng thảo luận.
-
-```
-Xây dựng đồ thị:
-  Node: User ID hoặc Source URL
-  Edge: User A reply/quote User B → A → B (với weight = số lần)
-
-PageRank:
-  Damping factor: d = 0.85
-  Convergence threshold: 1e-6
-  Triển khai: graphframes.GraphFrame.pageRank()
-
-HITS (Hub & Authority):
-  Authority(v) = Σ Hub(u) cho mọi u → v
-  Hub(u) = Σ Authority(v) cho mọi v mà u → v
-  Iterations: 30
-```
-
-```python
-from graphframes import GraphFrame
-
-g = GraphFrame(vertices_df, edges_df)
-results = g.pageRank(resetProbability=0.15, tol=1e-6)
-influencers = results.vertices.orderBy("pagerank", ascending=False)
-```
-
-> **Yêu cầu:** `graphframes` JAR phải được thêm vào `spark-submit --packages`.
-
-### 5.3 Count-Min Sketch (Streaming Keyword Frequency)
+### 5.2 Count-Min Sketch (Streaming Keyword Frequency)
 
 **Mục tiêu:** Đếm tần suất từ khóa theo cửa sổ thời gian mà không lưu toàn bộ dữ liệu vào RAM.
 
@@ -519,14 +486,13 @@ spike_threshold = rolling_mean + 2 * rolling_std
 
 ### 7.1 Trend Score Formula
 
-$$\text{TrendScore}(t) = \alpha \cdot V(t) + \beta \cdot A(t) + \gamma \cdot E(t) + \delta \cdot I(t)$$
+$$\text{TrendScore}(t) = \alpha \cdot V(t) + \beta \cdot A(t) + \gamma \cdot E(t)$$
 
 | Ký hiệu | Ý nghĩa | Trọng số |
 |---|---|---|
-| $V(t)$ | Mention Velocity (số đề cập / giờ) | $\alpha = 0.35$ |
-| $A(t)$ | Acceleration (tốc độ tăng của V) | $\beta = 0.25$ |
-| $E(t)$ | Engagement Weight (like + share + comment) | $\gamma = 0.25$ |
-| $I(t)$ | Influencer Boost (PageRank score của tác giả) | $\delta = 0.15$ |
+| $V(t)$ | Mention Velocity (số đề cập / giờ) | $\alpha = 0.40$ |
+| $A(t)$ | Acceleration (tốc độ tăng của V) | $\beta = 0.30$ |
+| $E(t)$ | Engagement Weight (like + share + comment) | $\gamma = 0.30$ |
 
 > Trọng số trên là giá trị khởi đầu — điều chỉnh qua thực nghiệm.
 
@@ -555,10 +521,6 @@ Trang Trend Detail:
   - Word cloud từ khóa nổi bật
   - Danh sách bài đăng tiêu biểu
 
-Trang Influencer:
-  - Bảng xếp hạng PageRank / Authority score
-  - Network graph mạng thảo luận (subset)
-
 Trang Crisis Monitor:
   - Timeline các sự kiện bất thường
   - Anomaly score chart (Isolation Forest output)
@@ -572,7 +534,6 @@ Trang Crisis Monitor:
 | `plotly` | Interactive charts (time-series, bar, pie) |
 | `matplotlib` | Static charts cho báo cáo |
 | `wordcloud` | Word cloud từ khóa |
-| `networkx` | Vẽ network graph (influencer network) |
 
 ---
 
@@ -588,7 +549,7 @@ Airflow DAG: daily_pipeline
   Task 2: spark_cleaning         (Spark job: clean + dedup LSH)
   Task 3: spark_nlp              (Spark job: PhoBERT sentiment)
   Task 4: topic_modeling         (BERTopic/LDA weekly)
-  Task 5: trend_scoring          (Tính TrendScore + PageRank)
+  Task 5: trend_scoring          (Tính TrendScore)
   Task 6: crisis_detection       (Isolation Forest check)
   Task 7: load_to_clickhouse     (Write staging tables → ClickHouse)
   Task 8: dbt_run                (dbt transformations → marts)
@@ -776,7 +737,7 @@ Thực nghiệm 2: Weak Scaling
 | **Member 2** | Ansible + Spark environment + HDFS pipeline + ClickHouse + dbt setup + LSH/MinHash | Playbooks, Spark cleaning job, dbt models |
 | **Member 3** | Topic Modeling (LDA + BERTopic) + Count-Min Sketch | Topic model, keyword frequency |
 | **Member 4** | PhoBERT fine-tuning + Sentiment pipeline + Isolation Forest | Model checkpoint, evaluation report |
-| **Member 5** | Trend Scoring + PageRank/HITS + Streamlit Dashboard | Score engine, dashboard app |
+| **Member 5** | Trend Scoring + Streamlit Dashboard | Score engine, dashboard app |
 
 ---
 
@@ -793,7 +754,6 @@ Thực nghiệm 2: Weak Scaling
 │                    │ ClickHouse              │ 24.x      │
 ├──────────────────────────────────────────────────────────┤
 │ Big Data           │ Apache Spark (PySpark)  │ 3.5.x     │
-│                    │ GraphFrames             │ 0.12.0    │
 │                    │ dbt-core + clickhouse   │ 1.7.x     │
 ├──────────────────────────────────────────────────────────┤
 │ NLP                │ VnCoreNLP / underthesea │ Latest    │

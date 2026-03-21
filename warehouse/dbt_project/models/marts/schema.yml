@@ -38,10 +38,3 @@ models:
           - unique
           - not_null
 
-  - name: dim_influencers
-    description: >
-      Author influence scores (PageRank/HITS) + activity stats for the Influencer page.
-    columns:
-      - name: author_id
-        tests:
-          - not_null
