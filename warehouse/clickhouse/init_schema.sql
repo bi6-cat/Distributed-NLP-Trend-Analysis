@@ -19,19 +19,7 @@ CREATE TABLE IF NOT EXISTS dwh_prod.stg_posts (
 PARTITION BY toYYYYMM(created_at)
 ORDER BY (topic_id, created_at, source, post_id);
 
--- 2. stg_interactions: Reply/quote edges for PageRank graph
-CREATE TABLE IF NOT EXISTS dwh_prod.stg_interactions (
-    source_author_id    String,                  
-    target_author_id    String,                  
-    interaction_type LowCardinality(String),
-    weight           UInt32 DEFAULT 1,
-    source           LowCardinality(String),  
-    created_at       DateTime
-) ENGINE = MergeTree()
-PARTITION BY toYYYYMM(created_at)
-ORDER BY (source_author_id, target_author_id, created_at);
-
--- 3. stg_topics: Topic labels from LDA/BERTopic
+-- 2. stg_topics: Topic labels from LDA/BERTopic
 CREATE TABLE IF NOT EXISTS dwh_prod.stg_topics (
     topic_id        UInt32,
     label           String,
@@ -42,21 +30,7 @@ CREATE TABLE IF NOT EXISTS dwh_prod.stg_topics (
 ) ENGINE = ReplacingMergeTree(created_at)
 ORDER BY (topic_id, model_version);
 
--- 4. stg_influencers: PageRank/HITS scores per author
-CREATE TABLE IF NOT EXISTS dwh_prod.stg_influencers (
-    author_id          String,
-    author_name        String,
-    source          LowCardinality(String),
-    pagerank_score  Float32,
-    hub_score       Float32,
-    authority_score Float32,
-    total_posts     UInt32,
-    total_replies   UInt32,
-    computed_at     DateTime DEFAULT now()
-) ENGINE = ReplacingMergeTree(computed_at)
-ORDER BY (author_id, source);
-
--- 5. stg_keyword_freq: Count-Min Sketch keyword frequencies
+-- 3. stg_keyword_freq: Count-Min Sketch keyword frequencies
 CREATE TABLE IF NOT EXISTS dwh_prod.stg_keyword_freq (
     keyword         String,
     window_start    DateTime,
@@ -67,7 +41,7 @@ CREATE TABLE IF NOT EXISTS dwh_prod.stg_keyword_freq (
 PARTITION BY toYYYYMM(window_start)
 ORDER BY (keyword, window_start);
 
--- 6. stg_crisis_events: Anomaly detection output
+-- 4. stg_crisis_events: Anomaly detection output
 CREATE TABLE IF NOT EXISTS dwh_prod.stg_crisis_events (
     event_id           String,
     detected_at        DateTime,

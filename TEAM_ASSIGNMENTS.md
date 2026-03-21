@@ -9,7 +9,7 @@
 |---|---|---|---|---|---|
 | **Role** | Data Engineer | DevOps / Infra | ML Engineer | NLP Engineer | Full-stack |
 | **Layer** | Ingestion | Infrastructure + Big Data Core | Topic Modeling | Sentiment & Anomaly | Trend Scoring + Dashboard |
-| **Primary** | Crawlers → HDFS + Pydantic | Ansible + Spark + HDFS + ClickHouse + dbt + LSH | LDA + BERTopic + Count-Min Sketch | PhoBERT + Isolation Forest | TrendScore + PageRank + Streamlit |
+| **Primary** | Crawlers → HDFS + Pydantic | Ansible + Spark + HDFS + ClickHouse + dbt + LSH | LDA + BERTopic + Count-Min Sketch | PhoBERT + Isolation Forest | TrendScore + Streamlit |
 
 ---
 
@@ -236,9 +236,9 @@
 
 ---
 
-### 👤 Member 5 — Full-Stack (Trend Scoring + PageRank + Dashboard)
+### 👤 Member 5 — Full-Stack (Trend Scoring + Dashboard)
 
-**Trách nhiệm chính:** Tính toán điểm trend, xếp hạng influencer, và xây dựng toàn bộ giao diện dashboard.
+**Trách nhiệm chính:** Tính toán điểm trend và xây dựng toàn bộ giao diện dashboard.
 
 #### Nhiệm vụ theo Phase
 
@@ -249,7 +249,7 @@
 | 1.1 | Thiết kế schema toàn bộ ClickHouse (staging + mart tables) | `db/clickhouse_schema.sql` |
 | 1.2 | Phối hợp Member 2 setup ClickHouse trên storage node | Config file |
 | 1.3 | Prototype Streamlit dashboard với mock data | `dashboard/app_prototype.py` |
-| 1.4 | Xác định màu sắc, layout, các trang dashboard (Overview, Trend, Influencer, Crisis) | `dashboard/design_spec.md` |
+| 1.4 | Xác định màu sắc, layout, các trang dashboard (Overview, Trend, Crisis) | `dashboard/design_spec.md` |
 
 **Phase 2: Trend Scoring Engine**
 
@@ -262,17 +262,13 @@
 | 2.5 | Lưu `trend_scores` vào PostgreSQL theo ngày/tuần | `scripts/save_trends.py` |
 | 2.6 | Tích hợp TrendScorer vào Airflow DAG | Cập nhật DAG |
 
-**Phase 3: PageRank + Dashboard hoàn thiện**
+**Phase 3: Dashboard hoàn thiện**
 
 | Task | Mô tả | Output |
 |---|---|---|
-| 3.1 | **Xây dựng đồ thị thảo luận**: Node = user, Edge = reply/quote | `graph/build_graph.py` |
-| 3.2 | **Chạy PageRank** bằng GraphFrames trên Spark (damping=0.85) | `spark_jobs/pagerank_job.py` |
-| 3.3 | Lưu `stg_influencer_scores` (PageRank + Authority) vào ClickHouse | `scripts/save_influencers_ch.py` |
-| 3.4 | Hoàn thiện **Streamlit Dashboard** — tất cả 4 trang | `dashboard/app.py` |
-| 3.5 | Kết nối dashboard với ClickHouse (`clickhouse-connect`) | `dashboard/db_connector.py` |
-| 3.6 | Thêm Influencer Boost $I(t)$ vào TrendScore (dùng PageRank output) | Cập nhật `trend_scorer.py` |
-| 3.7 | Tích hợp với dbt: dashboard đọc từ mart tables thay vì staging | Cập nhật queries |
+| 3.1 | Hoàn thiện **Streamlit Dashboard** — tất cả 3 trang | `dashboard/app.py` |
+| 3.2 | Kết nối dashboard với ClickHouse (`clickhouse-connect`) | `dashboard/db_connector.py` |
+| 3.3 | Tích hợp với dbt: dashboard đọc từ mart tables thay vì staging | Cập nhật queries |
 
 **Phase 4: Hoàn thiện & Demo**
 
@@ -281,13 +277,12 @@
 | 4.1 | Demo dashboard với dữ liệu thật từ pipeline | Live demo |
 | 4.2 | Thêm `@st.cache_data` để tối ưu dashboard performance | Cập nhật `app.py` |
 | 4.3 | Export top trending topics CSV / PDF cho báo cáo | `reports/trend_results.csv` |
-| 4.4 | Viết phần báo cáo: Trend Scoring, PageRank/HITS, Visualization | Báo cáo cuối kỳ |
+| 4.4 | Viết phần báo cáo: Trend Scoring, Visualization | Báo cáo cuối kỳ |
 
 **Deliverables:**
-- [ ] Trend Score engine (4 components) hoạt động
-- [ ] PageRank job trên GraphFrames
-- [ ] Streamlit Dashboard (4 trang) kết nối ClickHouse
-- [ ] `stg_trend_scores` + `stg_influencer_scores` + dbt marts trong ClickHouse
+- [ ] Trend Score engine (3 components) hoạt động
+- [ ] Streamlit Dashboard (3 trang) kết nối ClickHouse
+- [ ] `stg_trend_scores` + dbt marts trong ClickHouse
 
 ---
 
@@ -308,10 +303,10 @@ Phase │ M1 (Crawl)        │ M2 (Infra)         │ M3 (Topic)        │ M4 
   2  │ Pydantic validate │ LSH/MinHash        │ Count-Min Sketch  │ Model evaluation   │ Engagement score
      │ 500K dataset      │ Strong Scaling exp │ CMS integration   │ Inference wrapper  │ Save to ClickHouse
 ─────┼───────────────────┼────────────────────┼───────────────────┼────────────────────┼────────────────
-     │ Giám sát crawler  │ Docker Compose     │ BERTopic setup    │ Spark sentiment    │ Build graph
-     │ Metadata update   │ dbt project setup  │ BERTopic tuning   │ Throughput test    │ PageRank job
-  3  │ Help M4 labeling  │ dbt models (marts) │ LDA vs BERTopic   │ Isolation Forest   │ Dashboard pages
-     │ Fix selectors     │ Weak Scaling exp   │ Save to ClickHouse│ Crisis detector    │ Connect to ClickHouse
+     │ Giám sát crawler  │ Docker Compose     │ BERTopic setup    │ Spark sentiment    │ Dashboard pages
+     │ Metadata update   │ dbt project setup  │ BERTopic tuning   │ Throughput test    │ Connect CH
+  3  │ Help M4 labeling  │ dbt models (marts) │ LDA vs BERTopic   │ Isolation Forest   │ dbt integration
+     │ Fix selectors     │ Weak Scaling exp   │ Save to ClickHouse│ Crisis detector    │ Polish UI
 ─────┼───────────────────┼────────────────────┼───────────────────┼────────────────────┼────────────────
      │ Dataset stats     │ Full benchmark     │ Final evaluation  │ Eval crisis detect │ Dashboard demo
   4  │ Write report      │ Write report       │ Write report      │ Write report       │ Export results
@@ -333,11 +328,11 @@ Phase │ M1 (Crawl)        │ M2 (Infra)         │ M3 (Topic)        │ M4 
                            │           │               │
               ┌────────────▼──┐   ┌────▼──────┐  ┌─────▼───────────┐
               │  M3 (Topic)   │   │ M4 (NLP)  │  │ M5 (Dashboard)  │
-              └───────┬───────┘   └─────┬─────┘  └─────────┬───────┘
-                      │                 │                  │
-              topic_id│                 │sentiment_scores  │pagerank_score
-              topic_lb│                 │crisis_alerts     │
-                      └────────────────►│◄─────────────────┘
+              └───────┬───────┘   └─────┬─────┘  └─────────────────┘
+                      │                 │
+              topic_id│                 │sentiment_scores
+              topic_lb│                 │crisis_alerts
+                      └────────────────►│
                                         │
                                    ┌────▼─────┐
                                    │ClickHouse│
@@ -366,7 +361,7 @@ Phase │ M1 (Crawl)        │ M2 (Infra)         │ M3 (Topic)        │ M4 
 | M5 | **M2** | ClickHouse trên storage node + dbt setup | Cuối Phase 1 | M5 dùng ClickHouse local (Docker), sync schema sau |
 | M5 | **M3** | `topic_id`, `topic_label` trong ClickHouse | Đầu Phase 3 | M5 dùng mock topic data, thay bằng real data sau |
 | M5 | **M4** | `sentiment_scores`, `crisis_alerts` trong ClickHouse | Giữa Phase 3 | M5 build dashboard với mock data trước |
-| M4 | **M5** | `pagerank_score` từ GraphFrames | Giữa Phase 3 | M4 bỏ qua Influencer Boost (δ=0), thêm sau |
+
 
 ---
 
@@ -405,7 +400,7 @@ Bước 3: Ping người nhận trên nhóm chat, confirm họ đã chạy test 
 | Cuối Phase 2 | M2 | M5 | dbt project ready | `dbt_project/` với staging & mart models |
 | Đầu Phase 3 | M3 | M5 | Topic clusters trong ClickHouse | `nlp_db.stg_topic_clusters` |
 | Giữa Phase 3 | M4 | M5 | Sentiment scores + crisis alerts | `nlp_db.stg_processed_posts`, `nlp_db.stg_crisis_alerts` |
-| Giữa Phase 3 | M5 | M4 | PageRank scores | `nlp_db.stg_influencer_scores` |
+
 
 
 ---
@@ -446,8 +441,7 @@ Distributed-NLP-Trend-Analysis/
 │   ├── cleaning_job.py
 │   ├── dedup_lsh.py
 │   ├── lda_job.py
-│   ├── sentiment_job.py
-│   └── pagerank_job.py
+│   └── sentiment_job.py
 ├── preprocessing/
 │   ├── text_cleaner.py
 │   └── vncorenlp_test.py
@@ -479,8 +473,7 @@ Distributed-NLP-Trend-Analysis/
 │   │   └── marts/
 │   │       ├── mart_trend_scores.sql
 │   │       ├── mart_crisis_alerts.sql
-│   │       ├── mart_topic_summary.sql
-│   │       └── mart_influencer_ranking.sql
+│   │       └── mart_topic_summary.sql
 │   └── tests/
 ├── dashboard/
 │   ├── app.py
@@ -490,7 +483,6 @@ Distributed-NLP-Trend-Analysis/
 ├── scripts/
 │   ├── save_topics_to_ch.py
 │   ├── save_trends_ch.py
-│   ├── save_influencers_ch.py
 │   └── crisis_detector.py
 ├── data/
 │   ├── stopwords_vi.txt
@@ -533,7 +525,7 @@ Distributed-NLP-Trend-Analysis/
 - [ ] Full pipeline chạy end-to-end: crawl → clean → NLP → score → ClickHouse → dbt → dashboard (tất cả)
 - [ ] BERTopic tốt hơn hoặc ngang LDA về coherence (M3)
 - [ ] Crisis alerts hoạt động (M4)
-- [ ] Dashboard 4 trang kết nối live ClickHouse + đọc từ dbt marts (M5)
+- [ ] Dashboard 3 trang kết nối live ClickHouse + đọc từ dbt marts (M5)
 
 ### ✅ Phase 4 Done khi:
 - [ ] Benchmarking report hoàn chỉnh (M2)

@@ -41,18 +41,3 @@ models:
         tests:
           - not_null
 
-  - name: stg_interactions
-    description: >
-      Interaction edges for PageRank/HITS graph. Filters self-loops
-      and empty author IDs.
-    columns:
-      - name: source_author_id
-        tests:
-          - not_null
-      - name: target_author_id
-        tests:
-          - not_null
-      - name: interaction_type
-        tests:
-          - accepted_values:
-              values: ['reply', 'quote', 'mention']

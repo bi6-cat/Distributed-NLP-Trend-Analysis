@@ -21,11 +21,10 @@
     Grain: topic_id × source × hour_bucket
 
     Trend Score formula:
-        TrendScore(t) = α·V(t) + β·A(t) + γ·E(t) + δ·I(t)
-          V = Velocity (mentions/hour)        α = 0.35
-          A = Acceleration (ΔV/Δt)            β = 0.25
-          E = Normalized engagement           γ = 0.25
-          I = Influencer boost (avg PageRank) δ = 0.15
+        TrendScore(t) = α·V(t) + β·A(t) + γ·E(t)
+          V = Velocity (mentions/hour)        α = 0.40
+          A = Acceleration (ΔV/Δt)            β = 0.30
+          E = Normalized engagement           γ = 0.30
 */
 
 WITH hourly AS (
@@ -82,23 +81,6 @@ with_rolling AS (
         ) AS mention_7d_stddev
 
     FROM with_engagement_norm
-),
-
--- Avg PageRank per topic/source/hour from stg_influencers
--- Note: we use src-level avg as a proxy (avoids querying stg_posts view which is recursive)
-with_influencer AS (
-    SELECT
-        r.*,
-        coalesce(avg_pr.avg_pagerank, 0.0)  AS influencer_score
-    FROM with_rolling AS r
-    LEFT JOIN (
-        SELECT
-            source,
-            avg(pagerank_score)             AS avg_pagerank
-        FROM dwh_prod.stg_influencers
-        GROUP BY source
-    ) AS avg_pr
-        ON r.source = avg_pr.source
 )
 
 SELECT
@@ -129,16 +111,15 @@ SELECT
     velocity,
     acceleration,
     engagement_normalized,
-    influencer_score,
 
     -- Trend Score
-    {{ trend_score_calc('velocity', 'acceleration', 'engagement_normalized', 'influencer_score') }}
+    {{ trend_score_calc('velocity', 'acceleration', 'engagement_normalized') }}
         AS trend_score,
 
     -- Rank within this hour (for Top-N queries)
     row_number() OVER (
         PARTITION BY hour_bucket
-        ORDER BY {{ trend_score_calc('velocity', 'acceleration', 'engagement_normalized', 'influencer_score') }} DESC
+        ORDER BY {{ trend_score_calc('velocity', 'acceleration', 'engagement_normalized') }} DESC
     ) AS trend_rank,
 
     -- Sentiment distribution
@@ -163,5 +144,5 @@ SELECT
 
     now() AS computed_at
 
-FROM with_influencer
+FROM with_rolling
 ORDER BY hour_bucket DESC, trend_score DESC
