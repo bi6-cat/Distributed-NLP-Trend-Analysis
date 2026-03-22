@@ -1,0 +1,8 @@
+# Dashboard dependencies
+streamlit>=1.32.0
+plotly>=5.20.0
+pandas>=2.2.0
+numpy>=1.26.0
+clickhouse-connect>=0.7.7
+wordcloud>=1.9.3
+matplotlib>=3.8.0
