@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  # ClickHouse cho M5 test Dashboard / dbt local
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    container_name: nlp_clickhouse
+    ports:
+      - "8123:8123" # HTTP API
+      - "9000:9000" # Native client
+    environment:
+      CLICKHOUSE_DB: dwh_prod
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+
+  # Airflow cho M2 lên lịch test local
+  airflow-init:
+    image: apache/airflow:2.9.0
+    container_name: nlp_airflow_init
+    command: version
+    environment:
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+
+  airflow-webserver:
+    image: apache/airflow:2.9.0
+    container_name: nlp_airflow_web
+    command: webserver
+    ports:
+      - "8080:8080"
+    environment:
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+    depends_on:
+      - airflow-init
+
+  airflow-scheduler:
+    image: apache/airflow:2.9.0
+    container_name: nlp_airflow_scheduler
+    command: scheduler
+    environment:
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=sqlite:////opt/airflow/airflow.db
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+    depends_on:
+      - airflow-init
+
+volumes:
+  clickhouse_data:
