@@ -1,0 +1,27 @@
+---
+# Master Playbook để chạy toàn bộ cấu hình cụm
+
+- name: Setup Common Requirements (Java, Python)
+  hosts: all
+  roles:
+    - common
+
+- name: Setup Hadoop / HDFS
+  hosts: hadoop_cluster
+  roles:
+    - hadoop
+
+- name: Setup Spark
+  hosts: spark_cluster
+  roles:
+    - spark
+
+- name: Setup ClickHouse
+  hosts: storage
+  roles:
+    - clickhouse
+
+- name: Setup Airflow
+  hosts: master
+  roles:
+    - airflow
