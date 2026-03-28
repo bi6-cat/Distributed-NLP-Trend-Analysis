@@ -1,0 +1,69 @@
+---
+- name: Cài đặt và cấu hình Spark Standalone Cluster
+  hosts: all
+  become: yes
+  vars:
+    spark_version: "3.5.1"
+    hadoop_profile: "hadoop3"
+    spark_url: "https://dlcdn.apache.org/spark/spark-{{ spark_version }}/spark-{{ spark_version }}-bin-{{ hadoop_profile }}.tgz"
+    install_dir: "/opt/spark"
+
+  tasks:
+    - name: Cài đặt dependencies
+      apt:
+        name: wget
+        state: present
+
+    - name: Tải Apache Spark
+      get_url:
+        url: "{{ spark_url }}"
+        dest: "/tmp/spark-{{ spark_version }}.tgz"
+      
+    - name: Giải nén Spark archive
+      unarchive:
+        src: "/tmp/spark-{{ spark_version }}.tgz"
+        dest: "/opt/"
+        remote_src: yes
+        creates: "/opt/spark-{{ spark_version }}-bin-{{ hadoop_profile }}"
+
+    - name: Tạo symlink
+      file:
+        src: "/opt/spark-{{ spark_version }}-bin-{{ hadoop_profile }}"
+        dest: "{{ install_dir }}"
+        state: link
+
+    - name: Cấp quyền sở hữu thư mục
+      file:
+        path: "/opt/spark-{{ spark_version }}-bin-{{ hadoop_profile }}"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        recurse: true
+
+    - name: Cấu hình file spark-env.sh
+      copy:
+        dest: "{{ install_dir }}/conf/spark-env.sh"
+        content: |
+          #!/usr/bin/env bash
+          export SPARK_MASTER_HOST={{ hostvars[groups['master'][0]]['ansible_host'] | default(groups['master'][0]) }}
+          export SPARK_MASTER_PORT=7077
+          # Bạn có thể điều chỉnh cấu hình này dựa vào VM thực tế 
+          export SPARK_WORKER_CORES=2
+          export SPARK_WORKER_MEMORY=4g
+        mode: '0755'
+        owner: "{{ ansible_user }}"
+
+    - name: Cấu hình workers (trên Master)
+      copy:
+        dest: "{{ install_dir }}/conf/workers"
+        content: |
+          {% for host in groups['workers'] %}
+          {{ hostvars[host]['ansible_host'] | default(host) }}
+          {% endfor %}
+        owner: "{{ ansible_user }}"
+      when: inventory_hostname in groups['master']
+
+    - name: Cập nhật biến môi trường SPARK_HOME
+      lineinfile:
+        path: /etc/profile.d/spark.sh
+        line: "export SPARK_HOME={{ install_dir }}\nexport PATH=$PATH:$SPARK_HOME/bin:$SPARK_HOME/sbin"
+        create: yes

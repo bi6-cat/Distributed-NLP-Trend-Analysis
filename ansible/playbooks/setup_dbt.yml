@@ -1,0 +1,28 @@
+---
+- name: Cài đặt dbt-core và dbt-clickhouse trên master node
+  hosts: master
+  become: yes
+  vars:
+    conda_env: "nlp-trend"
+    conda_dir: "/opt/miniconda"
+
+  tasks:
+    - name: Đảm bảo tồn tại conda environment
+      stat:
+        path: "{{ conda_dir }}/envs/{{ conda_env }}"
+      register: env_check
+
+    - name: Tạm dừng nếu Conda env chưa được cài đặt
+      fail:
+        msg: "Vui lòng chạy playbook setup_conda.yml trước!"
+      when: not env_check.stat.exists
+
+    - name: Cài đặt dbt thông qua pip (bên trong nlp-trend env)
+      shell: "{{ conda_dir }}/envs/{{ conda_env }}/bin/pip install dbt-core dbt-clickhouse"
+        
+    - name: Phân quyền lại thư mục cho chắc chắn
+      file:
+        path: "{{ conda_dir }}"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        recurse: yes
