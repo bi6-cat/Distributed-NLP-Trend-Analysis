@@ -1,0 +1,38 @@
+---
+- name: Cài đặt Miniconda và tạo môi trường phân tích nlp-trend
+  hosts: all
+  become: yes
+  vars:
+    miniconda_url: "https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh"
+    install_dir: "/opt/miniconda"
+    env_name: "nlp-trend"
+
+  tasks:
+    - name: Tải Miniconda script
+      get_url:
+        url: "{{ miniconda_url }}"
+        dest: "/tmp/miniconda.sh"
+        mode: '0755'
+
+    - name: Cài đặt Miniconda
+      shell: "/tmp/miniconda.sh -b -p {{ install_dir }}"
+      args:
+        creates: "{{ install_dir }}"
+
+    - name: Thêm biến môi trường PATH
+      lineinfile:
+        path: /etc/profile.d/conda.sh
+        line: "export PATH={{ install_dir }}/bin:$PATH"
+        create: yes
+
+    - name: Init môi trường Conda 'nlp-trend' với Python 3.10
+      shell: "{{ install_dir }}/bin/conda create -y -n {{ env_name }} python=3.10"
+      args:
+        creates: "{{ install_dir }}/envs/{{ env_name }}"
+
+    - name: Cấp quyền sở hữu thư mục Miniconda cho user
+      file:
+        path: "{{ install_dir }}"
+        owner: "{{ ansible_user }}"
+        group: "{{ ansible_user }}"
+        recurse: yes

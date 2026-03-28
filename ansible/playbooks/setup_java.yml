@@ -1,0 +1,27 @@
+---
+- name: Cài đặt Java JDK 11
+  hosts: all
+  become: yes
+  tasks:
+    - name: Cập nhật apt cache
+      apt:
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+      ignore_errors: yes
+
+    - name: Cài đặt OpenJDK 11
+      apt:
+        name: openjdk-11-jdk
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Phân quyền thu mục java cho JAVA_HOME
+      lineinfile:
+        path: /etc/environment
+        line: 'JAVA_HOME="/usr/lib/jvm/java-11-openjdk-amd64"'
+        state: present
+
+    - name: Kích hoạt biến môi trường
+      shell: "source /etc/environment"
+      args:
+        executable: /bin/bash

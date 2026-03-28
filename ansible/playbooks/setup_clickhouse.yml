@@ -1,0 +1,40 @@
+---
+- name: Cài đặt ClickHouse Server và Client
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Đảm bảo apt-transport-https được cài
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      with_items:
+        - apt-transport-https
+        - ca-certificates
+        - dirmngr
+
+    - name: Thêm GPG key của thư viện ClickHouse
+      apt_key:
+        keyserver: hkp://keyserver.ubuntu.com:80
+        id: 8919F6BD2B48D754
+      ignore_errors: yes
+
+    - name: Thêm repository
+      apt_repository:
+        repo: "deb https://packages.clickhouse.com/deb stable main"
+        state: present
+
+    - name: Tải và cài đặt ClickHouse
+      apt:
+        name: "{{ item }}"
+        state: present
+        update_cache: yes
+      with_items:
+        - clickhouse-server
+        - clickhouse-client
+
+    - name: Đảm bảo dịch vụ ClickHouse đang chạy
+      systemd:
+        name: clickhouse-server
+        state: started
+        enabled: yes
