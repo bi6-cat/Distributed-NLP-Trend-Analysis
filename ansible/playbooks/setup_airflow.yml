@@ -1,0 +1,37 @@
+---
+- name: Cài đặt Apache Airflow 2.9 trên master node
+  hosts: master
+  become: yes
+  become_user: "{{ ansible_user }}"
+  vars:
+    conda_env: "nlp-trend"
+    conda_dir: "/opt/miniconda"
+    airflow_version: "2.9.0"
+    python_version: "3.10"
+    constraint_url: "https://raw.githubusercontent.com/apache/airflow/constraints-{{ airflow_version }}/constraints-{{ python_version }}.txt"
+    airflow_home: "/home/{{ ansible_user }}/airflow"
+
+  tasks:
+    - name: Thiết lập AIRFLOW_HOME
+      lineinfile:
+        path: "/home/{{ ansible_user }}/.bashrc"
+        line: "export AIRFLOW_HOME={{ airflow_home }}"
+        create: yes
+
+    - name: Cài đặt Airflow 2.9 (trong môi trường nlp-trend)
+      shell: "AIRFLOW_HOME={{ airflow_home }} {{ conda_dir }}/envs/{{ conda_env }}/bin/pip install 'apache-airflow=={{ airflow_version }}' --constraint '{{ constraint_url }}'"
+      
+    - name: Khởi tạo Airflow DB
+      shell: "AIRFLOW_HOME={{ airflow_home }} {{ conda_dir }}/envs/{{ conda_env }}/bin/airflow db migrate"
+      ignore_errors: yes
+
+    - name: Tạo Airflow Admin user
+      shell: >
+        AIRFLOW_HOME={{ airflow_home }} {{ conda_dir }}/envs/{{ conda_env }}/bin/airflow users create 
+        --username admin 
+        --password admin 
+        --firstname Admin 
+        --lastname User 
+        --role Admin 
+        --email admin@nlp-trend.local
+      ignore_errors: yes
