@@ -54,7 +54,7 @@ Nếu bạn muốn dùng chính máy Master (`192.168.56.11`) để điều khi�
 5. Đưa folder dự án lên Master và chạy lệnh playbook từ đó.
 
 > [!TIP]
-> **Thêm Workers**: Bạn có thể thêm bao nhiêu máy ảo (worker) tùy ý bằng cách thêm IP của chúng vào block `[workers]` trong file `inventory/hosts.ini`. Tự động hoá qua Ansible sẽ lo phần còn lại.
+> **Thêm Workers**: Bạn có thể thêm bao nhiêu máy ảo (worker) tùy ý bằng cách thêm IP của chúng vào block `[workers]` trong file `inventory/hosts.ini` (nhớ cập nhật cả tệp `Vagrantfile`). Tự động hoá qua Ansible sẽ lo phần còn lại.
 
 ## 2. Kiến trúc tổng quan
 
