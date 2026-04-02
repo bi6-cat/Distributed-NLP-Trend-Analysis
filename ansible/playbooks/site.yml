@@ -1,27 +1,29 @@
 ---
-# Master Playbook để chạy toàn bộ cấu hình cụm
+# Master Playbook để chạy toàn cụm (Sử dụng Roles)
 
-- name: Setup Common Requirements (Java, Python)
+- name: Nhóm 1 - Hạ tầng cơ bản (Java, Conda)
   hosts: all
+  become: yes
   roles:
-    - common
+    - java
+    - conda
 
-- name: Setup Hadoop / HDFS
-  hosts: hadoop_cluster
+- name: Nhóm 2 - Lõi Big Data (HDFS, Spark)
+  hosts: all
+  become: yes
   roles:
     - hadoop
-
-- name: Setup Spark
-  hosts: spark_cluster
-  roles:
     - spark
 
-- name: Setup ClickHouse
+- name: Nhóm 3 - Data Warehouse (ClickHouse)
   hosts: storage
+  become: yes
   roles:
     - clickhouse
 
-- name: Setup Airflow
+- name: Nhóm 4 - Quản lý và Điều phối (dbt, Airflow)
   hosts: master
+  become: yes
   roles:
+    - dbt
     - airflow

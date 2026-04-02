@@ -1,0 +1,6 @@
+---
+- name: Bước 3 - Cài đặt Hadoop HDFS Cluster
+  hosts: all
+  become: yes
+  roles:
+    - hadoop
