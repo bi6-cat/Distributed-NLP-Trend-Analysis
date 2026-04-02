@@ -16,6 +16,13 @@
     line: "export PATH={{ install_dir }}/bin:$PATH"
     create: yes
 
+- name: Chấp nhận Điều khoản sử dụng (TOS) của Anaconda
+  shell: "{{ install_dir }}/bin/conda tos accept --override-channels --channel {{ item }}"
+  loop:
+    - "https://repo.anaconda.com/pkgs/main"
+    - "https://repo.anaconda.com/pkgs/r"
+  ignore_errors: yes
+
 - name: Init môi trường Conda '{{ env_name }}' với Python {{ python_version }}
   shell: "{{ install_dir }}/bin/conda create -y -n {{ env_name }} python={{ python_version }}"
   args:
