@@ -1,0 +1,36 @@
+---
+- name: Đảm bảo apt-transport-https được cài
+  apt:
+    name: "{{ item }}"
+    state: present
+    update_cache: yes
+  with_items:
+    - apt-transport-https
+    - ca-certificates
+    - dirmngr
+
+- name: Thêm GPG key của thư viện ClickHouse
+  apt_key:
+    keyserver: "{{ clickhouse_keyserver }}"
+    id: "{{ clickhouse_gpg_id }}"
+  ignore_errors: yes
+
+- name: Thêm repository ClickHouse
+  apt_repository:
+    repo: "{{ clickhouse_repo_url }}"
+    state: present
+
+- name: Tải và cài đặt ClickHouse
+  apt:
+    name: "{{ item }}"
+    state: present
+    update_cache: yes
+  with_items:
+    - clickhouse-server
+    - clickhouse-client
+
+- name: Đảm bảo dịch vụ ClickHouse đang chạy
+  systemd:
+    name: clickhouse-server
+    state: started
+    enabled: yes

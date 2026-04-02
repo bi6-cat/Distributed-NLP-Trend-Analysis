@@ -1,0 +1,20 @@
+---
+- name: Đảm bảo tồn tại conda environment cho dbt
+  stat:
+    path: "{{ conda_dir }}/envs/{{ conda_env }}"
+  register: env_check
+
+- name: Tạm dừng nếu Conda env chưa được cài đặt
+  fail:
+    msg: "Vui lòng chạy role conda trước!"
+  when: not env_check.stat.exists
+
+- name: Cài đặt dbt thông qua pip (bên trong {{ conda_env }} env)
+  shell: "{{ conda_dir }}/envs/{{ conda_env }}/bin/pip install {{ dbt_packages }}"
+
+- name: Cấp quyền sở hữu thư mục Conda cho '{{ ansible_user }}'
+  file:
+    path: "{{ conda_dir }}"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    recurse: yes
