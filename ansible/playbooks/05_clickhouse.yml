@@ -1,0 +1,6 @@
+---
+- name: Bước 5 - Cài đặt ClickHouse Server & Client
+  hosts: storage
+  become: yes
+  roles:
+    - clickhouse

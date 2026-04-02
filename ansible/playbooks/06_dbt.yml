@@ -1,0 +1,6 @@
+---
+- name: Bước 6 - Cấu hình dbt-core & dbt-clickhouse
+  hosts: master
+  become: yes
+  roles:
+    - dbt

@@ -1,0 +1,6 @@
+---
+- name: Bước 1 - Cấu hình Java (JRE/JDK) trên toàn bộ cụm
+  hosts: all
+  become: yes
+  roles:
+    - java
