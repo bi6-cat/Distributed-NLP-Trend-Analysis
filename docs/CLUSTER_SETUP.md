@@ -13,9 +13,9 @@ Tài liệu này hướng dẫn cách deploy hệ thống Big Data cho dự án 
 
 ## 2. Kiến trúc tổng quan
 
-* **Master Node** (`192.168.56.10`): HDFS NameNode, Spark Master, Airflow, dbt-core.
-* **Worker Nodes** (`192.168.56.11-13...`): HDFS DataNodes, Spark Workers. (Scale không giới hạn).
-* **Storage Node** (`192.168.56.20`): ClickHouse Server.
+* **Master Node** (`192.168.56.11`): HDFS NameNode, Spark Master, Airflow, dbt-core.
+* **Worker Nodes** (`192.168.56.12-13`): HDFS DataNodes, Spark Workers.
+* **Storage Node** (`192.168.56.14`): ClickHouse Server.
 
 *(Tất cả IPs cấu hình trong `inventory/hosts.ini`, bạn có thể thay đổi để phù hợp với IP máy ảo của bạn).*
 
@@ -43,12 +43,12 @@ ansible-playbook playbooks/04_spark.yml
 ```
 
 _Sau khi xong, thử truy cập:_
-* HDFS UI: `http://192.168.56.10:9870`
-* Spark UI: `http://192.168.56.10:8080`
+* HDFS UI: `http://192.168.56.11:9870`
+* Spark UI: `http://192.168.56.11:8080`
 
 ### Bước 3: Dựng Data Warehouse (ClickHouse)
 
-Cài đặt cơ sở dữ liệu xử lý cột ClickHouse trên Node Storage (`192.168.56.20`).
+Cài đặt cơ sở dữ liệu xử lý cột ClickHouse trên Node Storage (`192.168.56.14`).
 ```bash
 ansible-playbook playbooks/05_clickhouse.yml
 ```
@@ -69,10 +69,10 @@ M2 phải đảm bảo hệ thống đã sẵn sàng cho M1 (Data Engineer - Ing
 Bạn có thể xác thực bằng cách ssh vào máy Master và chạy lệnh đếm số pi của Spark:
 
 ```bash
-ssh zett@192.168.56.10
+ssh zett@192.168.56.11
 source /etc/profile.d/spark.sh
 spark-submit --class org.apache.spark.examples.SparkPi \
-    --master spark://192.168.56.10:7077 \
+    --master spark://192.168.56.11:7077 \
     $SPARK_HOME/examples/jars/spark-examples_2.12-3.5.1.jar 10
 ```
 
