@@ -6,13 +6,15 @@
   with_items:
     - wget
     - rsync
+    - unzip
+    - tar
 
 - name: Tải Apache Hadoop (nếu chưa có)
   get_url:
     url: "{{ hadoop_url }}"
     dest: "/tmp/hadoop-{{ hadoop_version }}.tar.gz"
 
-- name: Giải nén Hadoop archive
+- name: Giải nén Hadoop archive sang tất cả các node
   unarchive:
     src: "/tmp/hadoop-{{ hadoop_version }}.tar.gz"
     dest: "/opt/"
@@ -101,3 +103,15 @@
     path: /etc/profile.d/hadoop.sh
     line: "export HADOOP_HOME={{ install_dir }}\nexport PATH=$PATH:$HADOOP_HOME/bin:$HADOOP_HOME/sbin"
     create: yes
+
+- name: Khởi động NameNode (chì Master)
+  become: yes
+  become_user: "{{ ansible_user }}"
+  shell: "nohup {{ install_dir }}/bin/hdfs --daemon start namenode > /dev/null 2>&1 &"
+  when: inventory_hostname in groups['master']
+
+- name: Khởi động DataNode (chì Workers)
+  become: yes
+  become_user: "{{ ansible_user }}"
+  shell: "nohup {{ install_dir }}/bin/hdfs --daemon start datanode > /dev/null 2>&1 &"
+  when: inventory_hostname in groups['workers']
