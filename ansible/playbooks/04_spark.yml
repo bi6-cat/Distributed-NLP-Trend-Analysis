@@ -1,0 +1,6 @@
+---
+- name: Bước 4 - Cài đặt Spark Standalone Cluster
+  hosts: all
+  become: yes
+  roles:
+    - spark

@@ -1,0 +1,6 @@
+---
+- name: Bước 1 - Cài đặt Java JDK 11 cho toàn cụm
+  hosts: all
+  become: yes
+  roles:
+    - java

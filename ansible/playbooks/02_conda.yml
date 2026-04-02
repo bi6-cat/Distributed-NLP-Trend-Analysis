@@ -1,0 +1,6 @@
+---
+- name: Bước 2 - Cài đặt Miniconda và môi trường Python
+  hosts: all
+  become: yes
+  roles:
+    - conda
