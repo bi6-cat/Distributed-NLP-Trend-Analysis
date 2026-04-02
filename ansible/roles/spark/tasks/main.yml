@@ -9,7 +9,7 @@
     url: "{{ spark_url }}"
     dest: "/tmp/spark-{{ spark_version }}.tgz"
 
-- name: Giải nén Spark archive
+- name: Giải nén Spark archive sang tất cả các node
   unarchive:
     src: "/tmp/spark-{{ spark_version }}.tgz"
     dest: "/opt/"
@@ -57,3 +57,15 @@
     path: /etc/profile.d/spark.sh
     line: "export SPARK_HOME={{ install_dir }}\nexport PATH=$PATH:$SPARK_HOME/bin:$SPARK_HOME/sbin"
     create: yes
+
+- name: Khởi động Spark Master (chì Master)
+  become: yes
+  become_user: "{{ ansible_user }}"
+  shell: "{{ install_dir }}/sbin/start-master.sh"
+  when: inventory_hostname in groups['master']
+
+- name: Khởi động Spark Worker (chì Workers)
+  become: yes
+  become_user: "{{ ansible_user }}"
+  shell: "{{ install_dir }}/sbin/start-worker.sh spark://{{ hostvars[groups['master'][0]]['ansible_host'] | default(groups['master'][0]) }}:{{ spark_master_port }}"
+  when: inventory_hostname in groups['workers']

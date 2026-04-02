@@ -6,7 +6,10 @@
     create: yes
 
 - name: Cài đặt Airflow {{ airflow_version }} (trong môi trường {{ conda_env }})
-  shell: "AIRFLOW_HOME={{ airflow_home }} {{ conda_dir }}/envs/{{ conda_env }}/bin/pip install 'apache-airflow=={{ airflow_version }}' --constraint '{{ constraint_url }}'"
+  shell: "AIRFLOW_HOME={{ airflow_home }} {{ conda_dir }}/envs/{{ conda_env }}/bin/pip install --upgrade 'apache-airflow[fab]=={{ airflow_version }}' --constraint '{{ constraint_url }}'"
+
+- name: Sửa lỗi dependency typing-extensions cho Airflow (Sentinel error)
+  shell: "{{ conda_dir }}/envs/{{ conda_env }}/bin/pip install --upgrade 'typing-extensions>=4.8.0'"
 
 - name: Khởi tạo Airflow DB
   shell: "AIRFLOW_HOME={{ airflow_home }} {{ conda_dir }}/envs/{{ conda_env }}/bin/airflow db migrate"
@@ -22,3 +25,13 @@
     --role Admin 
     --email {{ airflow_admin_email }}
   ignore_errors: yes
+
+- name: Khởi động Airflow Webserver (daemon mode)
+  shell: "AIRFLOW_HOME={{ airflow_home }} {{ conda_dir }}/envs/{{ conda_env }}/bin/airflow webserver --port {{ airflow_port }} -D"
+  async: 60
+  poll: 0
+
+- name: Khởi động Airflow Scheduler (daemon mode)
+  shell: "AIRFLOW_HOME={{ airflow_home }} {{ conda_dir }}/envs/{{ conda_env }}/bin/airflow scheduler -D"
+  async: 60
+  poll: 0

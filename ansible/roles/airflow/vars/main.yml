@@ -12,3 +12,4 @@ airflow_admin_password: "admin"
 airflow_admin_firstname: "Admin"
 airflow_admin_lastname: "User"
 airflow_admin_email: "admin@nlp-trend.local"
+airflow_port: 8081
