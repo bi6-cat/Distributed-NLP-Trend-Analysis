@@ -11,11 +11,10 @@ Hệ thống được thiết kế theo mô hình **Phân tán (Distributed)** c
 ```mermaid
 graph TD
     subgraph "HPC Cluster (Khối Xử lý Phân tán)"
-        M[Master Node<br>192.168.56.10<br>8-16GB RAM]
-        W1[Worker Node 1<br>192.168.56.11<br>8GB RAM]
-        W2[Worker Node 2<br>192.168.56.12<br>8GB RAM]
-        W3[Worker Node 3<br>192.168.56.13<br>8GB RAM]
-        S[Database Node<br>192.168.56.20<br>8GB RAM]
+        M[Master Node<br>192.168.56.11<br>8-16GB RAM]
+        W1[Worker Node 1<br>192.168.56.12<br>8-16GB RAM]
+        W2[Worker Node 2<br>192.168.56.13<br>8-16GB RAM]
+        S[Database Node<br>192.168.56.14<br>8-16GB RAM]
     end
 
     %% Các thành phần con trong Master
@@ -26,8 +25,8 @@ graph TD
     M -->|Hiển thị UI| GUI[Streamlit UI]
 
     %% Các thành phần con trong Worker
-    W1 & W2 & W3 -->|Lưu trữ Raw/Parquet| DN[HDFS DataNode]
-    W1 & W2 & W3 -->|Tính toán| SW[Spark Worker]
+    W1 & W2 -->|Lưu trữ Raw/Parquet| DN[HDFS DataNode]
+    W1 & W2 -->|Tính toán| SW[Spark Worker]
 
     %% Các thành phần con trong Storage
     S -->|Kho Dữ Liệu| CH[(ClickHouse OLAP)]
@@ -39,9 +38,9 @@ graph TD
 ```
 
 ### Chức Năng Từng Node:
-- **Master Node (192.168.56.10):** Não bộ của cụm. Chạy **Airflow**, **Spark Master**, **HDFS NameNode**, **dbt Core** và **Streamlit**. Là nơi điều phối và quản trị chính.
-- **Worker Nodes (192.168.56.11-13):** Bao gồm 3 Node worker (mặc định) thực hiện nhiệm vụ lưu trữ vật lý (HDFS DataNode) và tính toán song song (Spark Worker).
-- **Storage Node (192.168.56.20):** Máy chủ chuyên biệt chạy **ClickHouse** (OLAP) để lưu trữ và truy vấn dữ liệu hiệu năng cao.
+- **Master Node (192.168.56.11):** Não bộ của cụm. Chạy **Airflow**, **Spark Master**, **HDFS NameNode**, **dbt Core** và **Streamlit**. Là nơi điều phối và quản trị chính.
+- **Worker Nodes (192.168.56.12-13):** Bao gồm 2 Node worker thực hiện nhiệm vụ lưu trữ vật lý (HDFS DataNode) và tính toán song song (Spark Worker).
+- **Storage Node (192.168.56.14):** Máy chủ chuyên biệt chạy **ClickHouse** (OLAP) để lưu trữ và truy vấn dữ liệu hiệu năng cao.
 
 ---
 
