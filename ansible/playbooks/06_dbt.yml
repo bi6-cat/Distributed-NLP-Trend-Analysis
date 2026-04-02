@@ -1,5 +1,5 @@
 ---
-- name: Bước 6 - Cài đặt dbt-core & dbt-clickhouse
+- name: Bước 6 - Cấu hình dbt-core & dbt-clickhouse
   hosts: master
   become: yes
   roles:

@@ -1,5 +1,5 @@
 ---
-- name: Bước 1 - Cài đặt Java JDK 11 cho toàn cụm
+- name: Bước 1 - Cấu hình Java (JRE/JDK) trên toàn bộ cụm
   hosts: all
   become: yes
   roles:
