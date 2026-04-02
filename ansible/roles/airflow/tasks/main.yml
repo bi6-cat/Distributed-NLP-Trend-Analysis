@@ -1,0 +1,24 @@
+---
+- name: Thiết lập AIRFLOW_HOME trong .bashrc
+  lineinfile:
+    path: "/home/{{ ansible_user }}/.bashrc"
+    line: "export AIRFLOW_HOME={{ airflow_home }}"
+    create: yes
+
+- name: Cài đặt Airflow {{ airflow_version }} (trong môi trường {{ conda_env }})
+  shell: "AIRFLOW_HOME={{ airflow_home }} {{ conda_dir }}/envs/{{ conda_env }}/bin/pip install 'apache-airflow=={{ airflow_version }}' --constraint '{{ constraint_url }}'"
+
+- name: Khởi tạo Airflow DB
+  shell: "AIRFLOW_HOME={{ airflow_home }} {{ conda_dir }}/envs/{{ conda_env }}/bin/airflow db migrate"
+  ignore_errors: yes
+
+- name: Tạo Airflow Admin user
+  shell: >
+    AIRFLOW_HOME={{ airflow_home }} {{ conda_dir }}/envs/{{ conda_env }}/bin/airflow users create 
+    --username {{ airflow_admin_user }} 
+    --password {{ airflow_admin_password }} 
+    --firstname {{ airflow_admin_firstname }} 
+    --lastname {{ airflow_admin_lastname }} 
+    --role Admin 
+    --email {{ airflow_admin_email }}
+  ignore_errors: yes
