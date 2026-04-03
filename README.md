@@ -66,7 +66,7 @@ Dự án triển khai thực tế 3 thuật toán trọng tâm của môn học:
 |---|---|
 | **Ingestion** | Python (Requests, BS4, Selenium, YouTube API), Airflow |
 | **Storage** | **HDFS** (Raw & Staged files), **ClickHouse** (OLAP Data Warehouse) |
-| **Processing** | **Apache Spark 3.5** (Distributed Computing) |
+| **Processing** | **Apache Spark 3.5.8** (Distributed Computing) |
 | **Analytics** | **dbt** (SQL modeling), Pydantic (Validation) |
 | **NLP/ML** | **PhoBERT** (Sentiment), BERTopic/LDA (Topic), Isolation Forest (Anomaly) |
 | **Visuals** | **Streamlit**, Plotly, NetworkX |
@@ -98,21 +98,16 @@ Dự án triển khai thực tế 3 thuật toán trọng tâm của môn học:
 Dự án đã được đóng gói sẵn các lệnh quản trị qua `Makefile`:
 
 ```bash
-# 1. Clone dự án
+# 1. Clone dự án và xem thông tin kỹ thuật
 git clone https://github.com/<org>/Distributed-NLP-Trend-Analysis.git
+# Xem tài liệu hướng dẫn thiết lập cho team
+# [LOCAL_GUIDE.md](LOCAL_GUIDE.md)
 
 # 2. Khởi động môi trường Dev (ClickHouse + Airflow local)
 make dev
 
-# 3. Cài đặt thư viện Python (Mọi thành viên)
-make install
-
-# 4. Kiểm tra code (Lint & Test)
-make lint
-make test
-
-# 5. Cài đặt cụm VMs qua Ansible (Dành cho Member 2)
-cd ansible && ansible-playbook -i inventory/local_vms.ini playbooks/site.yml
+# 3. Một lệnh duy nhất để triển khai cụm Cluster (Spark/HDFS/ClickHouse)
+.\deploy_cluster.ps1
 ```
 
 ---

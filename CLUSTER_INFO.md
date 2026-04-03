@@ -39,8 +39,8 @@ Hệ thống lưu trữ phân tán dùng để lưu trữ dữ liệu lớn (Big
 
 Nền tảng tính toán phân tán cho xử lý NLP.
 
-- **Phiên bản**: `3.5.1` (Build với Hadoop 3)
-- **Vị trí cài đặt**: `/opt/spark` (Symlink của `/opt/spark-3.5.1-bin-hadoop3`)
+- **Phiên bản**: `3.5.8` (Build với Hadoop 3)
+- **Vị trí cài đặt**: `/opt/spark` (Symlink của `/opt/spark-3.5.8-bin-hadoop3`)
 - **Tài nguyên Worker**: 2 Cores / 4GB RAM mỗi node.
 
 | Thành phần | URL / Connection String | Cổng mặc định |

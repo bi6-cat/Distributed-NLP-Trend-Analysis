@@ -1,18 +1,17 @@
 ---
 - name: Cài đặt dependencies cho Hadoop
   apt:
-    name: "{{ item }}"
+    name: ['wget', 'rsync', 'unzip', 'tar']
     state: present
-  with_items:
-    - wget
-    - rsync
-    - unzip
-    - tar
 
 - name: Tải Apache Hadoop (nếu chưa có)
   get_url:
     url: "{{ hadoop_url }}"
     dest: "/tmp/hadoop-{{ hadoop_version }}.tar.gz"
+  register: download_hadoop
+  until: download_hadoop is succeeded
+  retries: 5
+  delay: 10
 
 - name: Giải nén Hadoop archive sang tất cả các node
   unarchive:
@@ -81,6 +80,10 @@
         <name>dfs.datanode.data.dir</name>
         <value>file://{{ datanode_dir }}</value>
       </property>
+      <property>
+        <name>dfs.namenode.datanode.registration.ip-hostname-check</name>
+        <value>false</value>
+      </property>
 
 - name: Cấu hình workers (DataNodes) trên Master
   copy:
@@ -95,6 +98,8 @@
   become: yes
   become_user: "{{ ansible_user }}"
   shell: "echo 'Y' | {{ install_dir }}/bin/hdfs namenode -format -force"
+  args:
+    creates: "{{ namenode_dir }}/current/VERSION"
   when: inventory_hostname in groups['master']
   ignore_errors: yes
 
