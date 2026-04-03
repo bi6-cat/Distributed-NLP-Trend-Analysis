@@ -1,0 +1,9 @@
+{
+  "optimal_k_cv": 25,
+  "best_cv_score": 0.3801915536392835,
+  "optimal_k_umass": 15,
+  "n_good_topics": 5,
+  "n_medium_topics": 14,
+  "n_weak_topics": 6,
+  "mean_per_topic_cv": 0.39040244497674087
+}
