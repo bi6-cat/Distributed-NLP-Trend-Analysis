@@ -7,6 +7,10 @@
 
 - name: Cài đặt Airflow {{ airflow_version }} (trong môi trường {{ conda_env }})
   shell: "AIRFLOW_HOME={{ airflow_home }} {{ conda_dir }}/envs/{{ conda_env }}/bin/pip install --upgrade 'apache-airflow[fab]=={{ airflow_version }}' --constraint '{{ constraint_url }}'"
+  register: pip_result
+  until: pip_result is succeeded
+  retries: 5
+  delay: 10
 
 - name: Sửa lỗi dependency typing-extensions cho Airflow (Sentinel error)
   shell: "{{ conda_dir }}/envs/{{ conda_env }}/bin/pip install --upgrade 'typing-extensions>=4.8.0'"
