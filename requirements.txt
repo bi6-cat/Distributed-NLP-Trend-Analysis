@@ -6,7 +6,7 @@ undetected-chromedriver==3.5.5
 google-api-python-client==2.120.0
 
 # Big Data (M2)
-pyspark==3.5.1
+pyspark==3.5.8
 pyarrow==14.0.2
 clickhouse-connect==0.7.7
 pydantic==2.6.3

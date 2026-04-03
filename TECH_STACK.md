@@ -200,7 +200,7 @@ Order By: (source, date, topic_id)
 ```python
 df.write \
     .format("jdbc") \
-    .option("url", "jdbc:clickhouse://storage-node:8123/nlp_db") \
+    .option("url", "jdbc:clickhouse://192.168.56.14:8123/nlp_db") \
     .option("dbtable", "stg_processed_posts") \
     .option("driver", "com.clickhouse.jdbc.ClickHouseDriver") \
     .mode("append") \
