@@ -4,6 +4,10 @@
     url: "{{ miniconda_url }}"
     dest: "/tmp/miniconda.sh"
     mode: '0755'
+  register: download_conda
+  until: download_conda is succeeded
+  retries: 5
+  delay: 10
 
 - name: Cài đặt Miniconda
   shell: "/tmp/miniconda.sh -b -p {{ install_dir }}"
