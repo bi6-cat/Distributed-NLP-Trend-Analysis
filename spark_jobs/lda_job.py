@@ -33,9 +33,9 @@ Cách chạy:
         --output-path hdfs:///data/results/lda/ \\
         --k 20 --max-iter 50
 
-    # Local dev/test (đọc CSV từ data/fake/)
+    # Local dev/test (đọc CSV từ data/real/ hoặc data/fake/)
     spark-submit spark_jobs/lda_job.py --local \\
-        --input-path data/fake/ \\
+        --input-path data/real/ \\
         --output-path output/lda/ \\
         --k 10 --max-iter 20
 
@@ -46,6 +46,7 @@ Phụ thuộc:
 """
 
 import argparse
+import csv
 import json
 import logging
 import math
@@ -59,6 +60,7 @@ from pyspark.sql import functions as F
 from pyspark.sql.types import ArrayType, StringType
 from pyspark.ml.feature import CountVectorizer, CountVectorizerModel, IDF
 from pyspark.ml.clustering import LDA
+from pyspark.ml.functions import vector_to_array
 
 # ============================================================================
 # CẤU HÌNH LOGGING
@@ -69,15 +71,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger("lda_job")
 
+# Cache tokenizer tại process hiện tại để tránh import lặp lại.
+_VI_TOKENIZER = None
+# Cache reusable preprocessor từ module preprocessing (nếu import được).
+_TEXT_PREPROCESSOR = None
+
 # ============================================================================
 # HẰNG SỐ MẶC ĐỊNH
 # ============================================================================
-DEFAULT_K: int = 20              # Số topics (thử nghiệm 15-25 theo TECH_STACK)
-DEFAULT_MAX_ITER: int = 50       # Số vòng lặp EM (Blei et al., 2003)
+DEFAULT_K: int = 10              # Tune trên data/preprocessed/result.csv (coherence tốt)
+DEFAULT_MAX_ITER: int = 60       # Tăng nhẹ để hội tụ ổn định hơn trên local processed data
 DEFAULT_OPTIMIZER: str = "em"    # "em" ổn định hơn "online" cho batch
-DEFAULT_VOCAB_SIZE: int = 10_000 # Kích thước từ vựng tối đa
-DEFAULT_MIN_DF: int = 5          # Document frequency tối thiểu
+DEFAULT_VOCAB_SIZE: int = 4_000  # Giảm nhiễu từ hiếm trên tập processed hiện tại
+DEFAULT_MIN_DF: int = 3          # Giữ đủ từ khóa quan trọng khi corpus còn nhỏ
 MAX_TERMS_PER_TOPIC: int = 15    # Số từ hiển thị cho mỗi topic
+DEFAULT_EVAL_MAX_DOCS: int = 5000
 
 # Đường dẫn tài nguyên NLP (Member 3 — Phase 1 deliverables)
 STOPWORDS_PATH: str = "data/stopwords_vi.txt"
@@ -178,28 +186,52 @@ def create_preprocessing_udf(stopwords_bc, slang_dict_bc):
     @F.udf(returnType=ArrayType(StringType()))
     def preprocess_vietnamese(text: Optional[str]) -> List[str]:
         """Tiền xử lý 1 văn bản tiếng Việt → danh sách token sạch."""
-        if not text or not isinstance(text, str):
-            return []
+        return preprocess_vietnamese_text(
+            text,
+            stopwords_bc.value,
+            slang_dict_bc.value,
+        )
 
-        # Import underthesea bên trong UDF vì:
-        # - Module không serializable qua pickle
-        # - Cần import tại mỗi executor (worker) riêng biệt
-        from underthesea import word_tokenize as vi_tokenize
+    return preprocess_vietnamese
 
-        _stopwords: Set[str] = stopwords_bc.value
-        _slang_dict: Dict[str, str] = slang_dict_bc.value
 
+def preprocess_vietnamese_text(
+    text: Optional[str],
+    stopwords: Set[str],
+    slang_dict: Dict[str, str],
+) -> List[str]:
+    """Tiền xử lý tiếng Việt thuần Python cho cả UDF và local fallback."""
+    global _VI_TOKENIZER
+    global _TEXT_PREPROCESSOR
+
+    if not text or not isinstance(text, str):
+        return []
+
+    # Ưu tiên tái sử dụng pipeline chuẩn trong preprocessing/text_cleaner.py
+    # để tránh duplicated logic giữa các job.
+    if _TEXT_PREPROCESSOR is None:
+        try:
+            from preprocessing.text_cleaner import TextPreprocessor
+
+            _TEXT_PREPROCESSOR = TextPreprocessor(use_vncorenlp=False)
+            logger.info("Using shared TextPreprocessor from preprocessing/.")
+        except Exception as exc:
+            logger.warning(f"Shared TextPreprocessor unavailable, fallback internal: {exc}")
+            _TEXT_PREPROCESSOR = False
+
+    if _TEXT_PREPROCESSOR:
+        try:
+            normalized_text = _TEXT_PREPROCESSOR.preprocess(text, remove_stopwords=False)
+            tokens = normalized_text.split()
+        except Exception:
+            tokens = text.split()
+    else:
         # ① Lowercase — chuẩn hóa chữ hoa/thường
-        # Lý do: "Việt Nam" và "việt nam" phải là cùng entity
-        # Ref: Manning et al. (2008), Chương 2.2.1
         text = text.lower()
 
         # ② Loại bỏ nhiễu HTML/URL/emoji/ký tự đặc biệt
-        # Lý do: Dữ liệu crawl từ VOZ, VnExpress chứa HTML tags, URLs
-        # Ref: Vijayarani et al. (2015), "Preprocessing Techniques for Text Mining"
-        text = re.sub(r"<[^>]+>", " ", text)                # HTML tags
-        text = re.sub(r"https?://\S+|www\.\S+", " ", text)  # URLs
-        # Giữ lại chữ cái tiếng Việt (có dấu), số, và khoảng trắng
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"https?://\S+|www\.\S+", " ", text)
         text = re.sub(
             r"[^\w\sàáảãạăắằẳẵặâấầẩẫậèéẻẽẹêếềểễệ"
             r"ìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữự"
@@ -209,36 +241,32 @@ def create_preprocessing_udf(stopwords_bc, slang_dict_bc):
         )
 
         # ③ Chuẩn hóa teencode/slang
-        # Lý do: Mạng xã hội VN chứa rất nhiều teencode ("ko"→"không")
-        # Ref: Nguyen et al. (2018), UIT-VSFC, KSE 2018
         words = text.split()
-        words = [_slang_dict.get(w, w) for w in words]
+        words = [slang_dict.get(w, w) for w in words]
         text = " ".join(words)
 
-        # ④ Word segmentation — underthesea (BiLSTM-CRF)
-        # Lý do: Tiếng Việt là ngôn ngữ đơn lập, ranh giới từ không rõ ràng
-        # "học sinh" → "học_sinh" (1 từ ghép, không phải 2 từ đơn)
-        # Ref: Vu T. Nguyen et al. (2018), VnCoreNLP, NAACL 2018
+        # ④ Word segmentation — import lazy để giảm overhead
+        if _VI_TOKENIZER is None:
+            from underthesea import word_tokenize as vi_tokenize
+
+            _VI_TOKENIZER = vi_tokenize
+
         try:
-            tokens = vi_tokenize(text, format="text").split()
+            tokens = _VI_TOKENIZER(text, format="text").split()
         except Exception:
-            # Fallback: split đơn giản nếu underthesea gặp lỗi
+            # Fallback: split đơn giản nếu underthesea gặp lỗi runtime
             tokens = text.split()
 
-        # ⑤ Stopword removal + lọc token ngắn/số
-        # Lý do: Từ chức năng ("của", "và", "là") không mang ngữ nghĩa topic
-        # Ref: Manning et al. (2008), Chương 2.2.2
-        cleaned: List[str] = [
-            t
-            for t in tokens
-            if t not in _stopwords  # Loại 1,942 stopwords
-            and not t.isdigit()     # Loại token toàn số
-            and len(t) >= 2         # Loại token quá ngắn (1 ký tự)
-        ]
+    # ⑤ Stopword removal + lọc token ngắn/số
+    cleaned: List[str] = [
+        t
+        for t in tokens
+        if t not in stopwords
+        and not t.isdigit()
+        and len(t) >= 2
+    ]
 
-        return cleaned
-
-    return preprocess_vietnamese
+    return cleaned
 
 
 # ============================================================================
@@ -268,7 +296,23 @@ def create_spark_session(
 
     if local:
         logger.info("Mode: LOCAL (dev/test)")
+
+        # Windows thường map lệnh `python` sang Microsoft Store alias,
+        # khiến Spark Python worker không connect lại driver.
+        # Ép cả driver/worker dùng đúng interpreter của venv hiện tại.
+        python_exec = sys.executable
+        os.environ["PYSPARK_PYTHON"] = python_exec
+        os.environ["PYSPARK_DRIVER_PYTHON"] = python_exec
+
         builder = builder.master("local[*]")
+        builder = (
+            builder
+            .config("spark.pyspark.python", python_exec)
+            .config("spark.pyspark.driver.python", python_exec)
+            .config("spark.python.worker.reuse", "false")
+            .config("spark.python.worker.faulthandler.enabled", "true")
+            .config("spark.sql.execution.pyspark.udf.faulthandler.enabled", "true")
+        )
     else:
         # TODO [Member 2]: Cấu hình master URL từ spark_config.py
         # Mặc định dùng cấu hình từ spark-submit --master
@@ -279,6 +323,7 @@ def create_spark_session(
         .config("spark.executor.memory", "8g")
         .config("spark.driver.memory", "4g")
         .config("spark.sql.shuffle.partitions", "200")
+        .config("spark.sql.ansi.enabled", "false")
         .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
         .getOrCreate()
     )
@@ -305,7 +350,9 @@ def load_data(
         Schema kỳ vọng: [post_id, title, content, source, date, ...]
 
     Local mode:
-        Đọc CSV từ data/fake/ (posts_5k.csv + comments_5k.csv)
+        Đọc CSV từ data/real/ hoặc data/fake/
+            - Ưu tiên: voz_posts.csv + voz_comments.csv (data/real)
+            - Fallback: posts_5k.csv + comments_5k.csv (data/fake)
         Dùng cho dev/test khi chưa có HDFS
         → Workaround cho Hard Blocker từ Member 1 & 2
 
@@ -315,21 +362,75 @@ def load_data(
         local: True nếu chạy local mode.
 
     Returns:
-        DataFrame với cột 'text' chứa nội dung văn bản gốc.
+        DataFrame với schema canonical:
+            - post_id (str)
+            - source (str)
+            - author (str)
+            - created_at (long, unix timestamp)
+            - url (str)
+            - text (str)
+            - preprocessed_text (str, optional)
     """
+    def _pick_col_or_lit(df: DataFrame, candidates: List[str], default: str = ""):
+        """Chọn cột đầu tiên tồn tại trong candidates, nếu không có thì trả literal."""
+        for c in candidates:
+            if c in df.columns:
+                return F.col(c)
+        return F.lit(default)
+
+    def _build_created_at_expr(df: DataFrame):
+        """Chuẩn hóa thời gian về unix timestamp (giây) nếu có thể parse."""
+        if "created_at" in df.columns:
+            return F.col("created_at").cast("long")
+        if "time" in df.columns:
+            # Ví dụ: "Feb 23, 2026 at 4:00 PM"
+            return F.unix_timestamp(F.col("time"), "MMM d, yyyy 'at' h:mm a").cast("long")
+        if "time_post" in df.columns:
+            # Ví dụ: "Feb 13, 2026"
+            return F.unix_timestamp(F.col("time_post"), "MMM d, yyyy").cast("long")
+        return F.lit(None).cast("long")
+
+    def _build_id_expr(df: DataFrame, candidates: List[str], prefix: str):
+        for c in candidates:
+            if c in df.columns:
+                return F.col(c).cast("string")
+        return F.concat(F.lit(prefix), F.monotonically_increasing_id().cast("string"))
+
     if local:
-        # ── LOCAL MODE: đọc CSV từ data/fake/ ──
+        # ── LOCAL MODE: đọc CSV từ data/real hoặc data/fake ──
         logger.info(f"Reading CSV from local: {input_path}")
         dfs: List[DataFrame] = []
 
-        # Đọc posts
-        posts_path = os.path.join(input_path, "posts_5k.csv")
-        if os.path.exists(posts_path):
+        # Ưu tiên đọc file đã processed (schema unified).
+        processed_path = os.path.join(input_path, "result.csv")
+        if os.path.exists(processed_path):
+            processed_df = spark.read.csv(processed_path, header=True, inferSchema=True)
+            logger.info(f"  result.csv: {processed_df.count():,} rows")
+            processed_df = processed_df.select(
+                _build_id_expr(processed_df, ["post_id", "id_post", "thread_id"], "r_").alias("post_id"),
+                _pick_col_or_lit(processed_df, ["source"], "voz").cast("string").alias("source"),
+                _pick_col_or_lit(processed_df, ["author", "author_name", "user"], "unknown").cast("string").alias("author"),
+                _build_created_at_expr(processed_df).alias("created_at"),
+                _pick_col_or_lit(processed_df, ["url"], "").cast("string").alias("url"),
+                _pick_col_or_lit(processed_df, ["content", "text", "noi_dung"], "").cast("string").alias("text"),
+                _pick_col_or_lit(processed_df, ["clean_text"], "").cast("string").alias("preprocessed_text"),
+            )
+            dfs.append(processed_df)
+
+        # Đọc posts (ưu tiên data/real)
+        posts_path = None
+        for filename in ["posts_preprocessed.csv", "voz_posts.csv", "posts_5k.csv"]:
+            candidate = os.path.join(input_path, filename)
+            if os.path.exists(candidate):
+                posts_path = candidate
+                break
+
+        if posts_path and os.path.exists(posts_path):
             posts_df = spark.read.csv(posts_path, header=True, inferSchema=True)
-            logger.info(f"  posts_5k.csv: {posts_df.count():,} rows")
+            logger.info(f"  {os.path.basename(posts_path)}: {posts_df.count():,} rows")
             # Ghép các cột text có thể có (tieu_de, noi_dung, title, content)
             text_cols = [
-                c for c in ["tieu_de", "noi_dung", "title", "content"]
+                c for c in ["title_clean", "tieu_de", "noi_dung", "title", "content"]
                 if c in posts_df.columns
             ]
             if text_cols:
@@ -340,26 +441,50 @@ def load_data(
                         *[F.coalesce(F.col(c), F.lit("")) for c in text_cols],
                     ),
                 )
-                dfs.append(posts_df.select("text"))
+                posts_df = posts_df.select(
+                    _build_id_expr(posts_df, ["id_post", "post_id", "thread_id"], "p_").alias("post_id"),
+                    F.lit("voz").alias("source"),
+                    _pick_col_or_lit(posts_df, ["author_name", "author", "user"], "unknown").cast("string").alias("author"),
+                    _build_created_at_expr(posts_df).alias("created_at"),
+                    _pick_col_or_lit(posts_df, ["url"], "").cast("string").alias("url"),
+                    F.col("text").cast("string").alias("text"),
+                    F.lit(None).cast("string").alias("preprocessed_text"),
+                )
+                dfs.append(posts_df)
 
-        # Đọc comments
-        comments_path = os.path.join(input_path, "comments_5k.csv")
-        if os.path.exists(comments_path):
+        # Đọc comments (ưu tiên data/real)
+        comments_path = None
+        for filename in ["comments_preprocessed.csv", "voz_comments.csv", "comments_5k.csv"]:
+            candidate = os.path.join(input_path, filename)
+            if os.path.exists(candidate):
+                comments_path = candidate
+                break
+
+        if comments_path and os.path.exists(comments_path):
             comments_df = spark.read.csv(
                 comments_path, header=True, inferSchema=True
             )
-            logger.info(f"  comments_5k.csv: {comments_df.count():,} rows")
+            logger.info(f"  {os.path.basename(comments_path)}: {comments_df.count():,} rows")
             comment_col = next(
                 (
                     c
-                    for c in ["comment", "noi_dung", "content"]
+                    for c in ["comment_clean", "comment", "noi_dung", "content"]
                     if c in comments_df.columns
                 ),
                 None,
             )
             if comment_col:
                 comments_df = comments_df.withColumn("text", F.col(comment_col))
-                dfs.append(comments_df.select("text"))
+                comments_df = comments_df.select(
+                    _build_id_expr(comments_df, ["comment_id", "post_id", "id_post"], "c_").alias("post_id"),
+                    F.lit("voz").alias("source"),
+                    _pick_col_or_lit(comments_df, ["user", "author", "author_name"], "unknown").cast("string").alias("author"),
+                    _build_created_at_expr(comments_df).alias("created_at"),
+                    _pick_col_or_lit(comments_df, ["url"], "").cast("string").alias("url"),
+                    F.col("text").cast("string").alias("text"),
+                    F.lit(None).cast("string").alias("preprocessed_text"),
+                )
+                dfs.append(comments_df)
 
         if not dfs:
             logger.error(f"No CSV files found in {input_path}")
@@ -392,6 +517,16 @@ def load_data(
             )
             sys.exit(1)
 
+        df = df.select(
+            _pick_col_or_lit(df, ["post_id", "thread_id", "videoId", "id_post"]).cast("string").alias("post_id"),
+            _pick_col_or_lit(df, ["source"], "unknown").cast("string").alias("source"),
+            _pick_col_or_lit(df, ["author", "username", "authorDisplayName", "user"], "unknown").cast("string").alias("author"),
+            _build_created_at_expr(df).alias("created_at"),
+            _pick_col_or_lit(df, ["url", "video_url", "article_url"], "").cast("string").alias("url"),
+            F.col("text").cast("string").alias("text"),
+            F.lit(None).cast("string").alias("preprocessed_text"),
+        )
+
     # Loại bỏ rows rỗng
     df = df.filter(F.col("text").isNotNull() & (F.trim(F.col("text")) != ""))
     row_count = df.count()
@@ -402,6 +537,56 @@ def load_data(
         sys.exit(1)
 
     return df
+
+
+def infer_post_topic_assignment(
+    lda_model,
+    tfidf_df: DataFrame,
+    topics: List[Dict],
+) -> DataFrame:
+    """
+    Gán topic tốt nhất cho từng document sau khi train LDA.
+
+    Output columns:
+        post_id, source, author, content, created_at, url,
+        topic_id, topic_label, topic_prob
+    """
+    transformed = lda_model.transform(tfidf_df)
+
+    topic_label_map: Dict[int, str] = {
+        int(t["topic_id"]): str(t["topic_label"]) for t in topics
+    }
+
+    if topic_label_map:
+        map_items = []
+        for k, v in topic_label_map.items():
+            map_items.extend([F.lit(int(k)), F.lit(v)])
+        label_expr = F.create_map(*map_items)
+    else:
+        label_expr = F.create_map(F.lit(-1), F.lit("unknown"))
+
+    assignments = (
+        transformed
+        .withColumn("topic_probs", vector_to_array(F.col("topicDistribution")))
+        .withColumn("topic_prob", F.array_max(F.col("topic_probs")))
+        .withColumn(
+            "topic_id",
+            (F.array_position(F.col("topic_probs"), F.col("topic_prob")) - F.lit(1)).cast("int"),
+        )
+        .withColumn("topic_label", label_expr[F.col("topic_id")])
+        .select(
+            F.col("post_id"),
+            F.col("source"),
+            F.col("author"),
+            F.col("text").alias("content"),
+            F.col("created_at"),
+            F.col("url"),
+            F.col("topic_id"),
+            F.coalesce(F.col("topic_label"), F.lit("unknown")).alias("topic_label"),
+            F.col("topic_prob"),
+        )
+    )
+    return assignments
 
 
 # ============================================================================
@@ -474,7 +659,7 @@ def build_tfidf_features(
 # ============================================================================
 
 def train_lda(
-    tfidf_df: DataFrame,
+    features_df: DataFrame,
     k: int = DEFAULT_K,
     max_iter: int = DEFAULT_MAX_ITER,
     optimizer: str = DEFAULT_OPTIMIZER,
@@ -503,7 +688,7 @@ def train_lda(
         → Giá trị tối ưu xác định qua coherence score (Task 2.2).
 
     Args:
-        tfidf_df: DataFrame chứa cột 'tfidf_features'.
+        features_df: DataFrame chứa cột 'tf_features'.
         k: Số topics (khuyến nghị 15-25).
         max_iter: Số vòng lặp tối đa.
         optimizer: "em" hoặc "online".
@@ -519,26 +704,108 @@ def train_lda(
     lda = LDA(
         k=k,
         maxIter=max_iter,
-        featuresCol="tfidf_features",
+        featuresCol="tf_features",
         optimizer=optimizer,
         seed=seed,
         # subsamplingRate chỉ áp dụng cho "online" optimizer
         subsamplingRate=0.05 if optimizer == "online" else 1.0,
     )
 
-    lda_model = lda.fit(tfidf_df)
+    lda_model = lda.fit(features_df)
 
     # Đánh giá nội tại (intrinsic evaluation)
     # Log-Likelihood: cao hơn → model fit data tốt hơn
     # Log-Perplexity: thấp hơn → model dự đoán tốt hơn
-    ll = lda_model.logLikelihood(tfidf_df)
-    lp = lda_model.logPerplexity(tfidf_df)
+    ll = lda_model.logLikelihood(features_df)
+    lp = lda_model.logPerplexity(features_df)
 
     logger.info(f"  Log-Likelihood:  {ll:,.2f}")
     logger.info(f"  Log-Perplexity:  {lp:.4f}")
     logger.info("LDA training complete.")
 
     return lda_model, ll, lp
+
+
+def evaluate_k_sweep(
+    features_df: DataFrame,
+    vocabulary: List[str],
+    token_texts: List[List[str]],
+    k_values: List[int],
+    max_iter: int,
+    optimizer: str,
+    output_path: str,
+) -> None:
+    """Chạy sweep k và lưu metrics (LL/Perplexity/Coherence) ra CSV."""
+    if not k_values:
+        return
+
+    coherence_ready = bool(token_texts)
+    dictionary = None
+    corpus = None
+    if coherence_ready:
+        try:
+            from gensim.corpora import Dictionary
+
+            dictionary = Dictionary(token_texts)
+            corpus = [dictionary.doc2bow(t) for t in token_texts]
+        except Exception as exc:
+            logger.warning(f"Coherence disabled (gensim unavailable/error): {exc}")
+            coherence_ready = False
+
+    metrics_rows: List[Dict[str, object]] = []
+    for k in k_values:
+        logger.info(f"[EVAL] Running k={k}")
+        lda_model, ll, lp = train_lda(
+            features_df,
+            k=k,
+            max_iter=max_iter,
+            optimizer=optimizer,
+        )
+        topics = extract_topics(lda_model, vocabulary)
+
+        row: Dict[str, object] = {
+            "k": k,
+            "log_likelihood": float(ll),
+            "log_perplexity": float(lp),
+            "coherence_c_v": None,
+            "coherence_u_mass": None,
+        }
+
+        if coherence_ready and dictionary is not None and corpus is not None:
+            try:
+                from gensim.models import CoherenceModel
+
+                topic_words = [[kw["word"] for kw in t["keywords"]] for t in topics]
+                cv = CoherenceModel(
+                    topics=topic_words,
+                    texts=token_texts,
+                    dictionary=dictionary,
+                    coherence="c_v",
+                ).get_coherence()
+                umass = CoherenceModel(
+                    topics=topic_words,
+                    corpus=corpus,
+                    dictionary=dictionary,
+                    coherence="u_mass",
+                ).get_coherence()
+                row["coherence_c_v"] = float(cv)
+                row["coherence_u_mass"] = float(umass)
+            except Exception as exc:
+                logger.warning(f"[EVAL] Coherence failed for k={k}: {exc}")
+
+        metrics_rows.append(row)
+
+    os.makedirs(output_path, exist_ok=True)
+    csv_path = os.path.join(output_path, "lda_k_sweep_metrics.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=["k", "log_likelihood", "log_perplexity", "coherence_c_v", "coherence_u_mass"],
+        )
+        writer.writeheader()
+        writer.writerows(metrics_rows)
+
+    logger.info(f"[EVAL] Saved k-sweep metrics → {csv_path}")
 
 
 # ============================================================================
@@ -607,6 +874,7 @@ def save_results(
     spark: SparkSession,
     lda_model,
     topics: List[Dict],
+    assignments_df: DataFrame,
     output_path: str,
     local: bool = False,
 ) -> None:
@@ -621,6 +889,7 @@ def save_results(
     Local mode:
         - LDA model → local: {output_path}/lda_model/
         - Topics JSON → local: {output_path}/topics.json
+        - Post-topic CSV → local: {output_path}/post_topic_assignment.csv
 
     Args:
         spark: SparkSession.
@@ -629,19 +898,31 @@ def save_results(
         output_path: Thư mục output.
         local: True nếu local mode.
     """
-    # ── Lưu LDA model (Spark MLlib format) ──
-    model_path = os.path.join(output_path, "lda_model")
-    logger.info(f"Saving LDA model → {model_path}")
-    lda_model.write().overwrite().save(model_path)
-
     if local:
+        # Trên Windows không có winutils.exe, thao tác ghi Spark model có thể lỗi.
+        model_path = os.path.join(output_path, "lda_model")
+        try:
+            logger.info(f"Saving LDA model → {model_path}")
+            lda_model.write().overwrite().save(model_path)
+        except Exception as exc:
+            logger.warning(f"Skipping LDA model save in local mode: {exc}")
+
         # ── Local: lưu topics JSON ──
         topics_path = os.path.join(output_path, "topics.json")
         os.makedirs(output_path, exist_ok=True)
         with open(topics_path, "w", encoding="utf-8") as f:
             json.dump(topics, f, ensure_ascii=False, indent=2)
         logger.info(f"Saving topics → {topics_path}")
+
+        assignment_path = os.path.join(output_path, "post_topic_assignment.csv")
+        assignments_df.toPandas().to_csv(assignment_path, index=False, encoding="utf-8")
+        logger.info(f"Saving post-topic assignments → {assignment_path}")
     else:
+        # ── Lưu LDA model (Spark MLlib format) ──
+        model_path = os.path.join(output_path, "lda_model")
+        logger.info(f"Saving LDA model → {model_path}")
+        lda_model.write().overwrite().save(model_path)
+
         # ── Cluster: lưu topics Parquet trên HDFS ──
         topics_flat: List[Dict] = []
         for t in topics:
@@ -656,6 +937,10 @@ def save_results(
         topics_parquet_path = os.path.join(output_path, "topics")
         topics_df.write.mode("overwrite").parquet(topics_parquet_path)
         logger.info(f"Saving topics Parquet → {topics_parquet_path}")
+
+        assignment_parquet_path = os.path.join(output_path, "post_topic_assignment")
+        assignments_df.write.mode("overwrite").parquet(assignment_parquet_path)
+        logger.info(f"Saving post-topic assignments Parquet → {assignment_parquet_path}")
 
         # TODO [Member 2/5]: Ghi vào ClickHouse stg_topic_labels
         # Cần ClickHouse JDBC driver cấu hình trong Spark (Task 2.2 Member 2)
@@ -689,18 +974,25 @@ def save_vocabulary(
         output_path: Thư mục output.
         local: True nếu local mode.
     """
-    # Lưu Spark CountVectorizerModel
-    cv_path = os.path.join(output_path, "cv_model")
-    logger.info(f"Saving CountVectorizerModel → {cv_path}")
-    cv_model.write().overwrite().save(cv_path)
-
-    # Lưu vocabulary JSON (tiện cho notebook evaluation)
     if local:
         os.makedirs(output_path, exist_ok=True)
+
+        cv_path = os.path.join(output_path, "cv_model")
+        try:
+            logger.info(f"Saving CountVectorizerModel → {cv_path}")
+            cv_model.write().overwrite().save(cv_path)
+        except Exception as exc:
+            logger.warning(f"Skipping CountVectorizerModel save in local mode: {exc}")
+
         vocab_json_path = os.path.join(output_path, "vocabulary.json")
         with open(vocab_json_path, "w", encoding="utf-8") as f:
             json.dump(list(cv_model.vocabulary), f, ensure_ascii=False, indent=2)
         logger.info(f"Saving vocabulary JSON → {vocab_json_path}")
+    else:
+        # Lưu Spark CountVectorizerModel
+        cv_path = os.path.join(output_path, "cv_model")
+        logger.info(f"Saving CountVectorizerModel → {cv_path}")
+        cv_model.write().overwrite().save(cv_path)
 
 
 # ============================================================================
@@ -717,7 +1009,7 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
-        "--input-path", type=str, default="data/fake/",
+        "--input-path", type=str, default="data/real/",
         help="Đường dẫn dữ liệu đầu vào (HDFS hoặc local dir).",
     )
     parser.add_argument(
@@ -747,7 +1039,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--local", action="store_true",
-        help="Chạy local mode (dev/test với data/fake/).",
+        help="Chạy local mode (dev/test với data/real/ hoặc data/fake/).",
     )
     parser.add_argument(
         "--stopwords-path", type=str, default=STOPWORDS_PATH,
@@ -756,6 +1048,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--slang-dict-path", type=str, default=SLANG_DICT_PATH,
         help="Đường dẫn file slang dictionary.",
+    )
+    parser.add_argument(
+        "--eval-k-values", type=str, default="",
+        help="Danh sách k để sweep, ví dụ: '10,12,15,18,20,25'.",
+    )
+    parser.add_argument(
+        "--eval-max-docs", type=int, default=DEFAULT_EVAL_MAX_DOCS,
+        help="Số documents tối đa dùng để tính coherence trong k-sweep.",
     )
     return parser.parse_args()
 
@@ -798,9 +1098,64 @@ def main() -> None:
 
         # 4. Tiền xử lý tiếng Việt
         logger.info("Preprocessing Vietnamese text...")
-        preprocess_udf = create_preprocessing_udf(stopwords_bc, slang_dict_bc)
-        df = df.withColumn("tokens", preprocess_udf(F.col("text")))
-        df = df.filter(F.size(F.col("tokens")) > 0)
+        if args.local:
+            # Local fallback: dùng hoàn toàn Spark SQL built-in để tránh
+            # crash Python worker trên Windows.
+            logger.info("Using Spark SQL local preprocessing path (no Python UDF workers).")
+            has_preprocessed = "preprocessed_text" in df.columns
+            if has_preprocessed:
+                preprocessed_count = df.filter(
+                    F.col("preprocessed_text").isNotNull()
+                    & (F.trim(F.col("preprocessed_text")) != "")
+                ).count()
+            else:
+                preprocessed_count = 0
+
+            if preprocessed_count > 0:
+                logger.info(
+                    f"Using preprocessed_text directly for tokenization ({preprocessed_count:,} docs)."
+                )
+                df = (
+                    df
+                    .withColumn("preprocessed_text", F.lower(F.col("preprocessed_text")))
+                    .withColumn("tokens", F.split(F.trim(F.col("preprocessed_text")), r"\s+"))
+                    .withColumn(
+                        "tokens",
+                        F.expr("filter(tokens, x -> length(x) >= 2 AND NOT x rlike '^[0-9]+$')"),
+                    )
+                    .filter(F.size(F.col("tokens")) > 0)
+                )
+            else:
+                stopwords_lit = F.array(*[F.lit(w) for w in sorted(stopwords)])
+                df = (
+                    df
+                    .withColumn("clean_text", F.lower(F.col("text")))
+                    .withColumn("clean_text", F.regexp_replace(F.col("clean_text"), r"<[^>]+>", " "))
+                    .withColumn("clean_text", F.regexp_replace(F.col("clean_text"), r"https?://\S+|www\.\S+", " "))
+                    .withColumn(
+                        "clean_text",
+                        F.regexp_replace(
+                            F.col("clean_text"),
+                            r"[^\w\sàáảãạăắằẳẵặâấầẩẫậèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵđ_]",
+                            " ",
+                        ),
+                    )
+                    .withColumn("words", F.split(F.trim(F.col("clean_text")), r"\s+"))
+                    .withColumn("_stopwords", stopwords_lit)
+                    .withColumn(
+                        "tokens",
+                        F.expr(
+                            "filter(words, x -> length(x) >= 2 AND NOT x rlike '^[0-9]+$' AND NOT array_contains(_stopwords, x))"
+                        ),
+                    )
+                    .drop("clean_text", "words", "_stopwords")
+                    .filter(F.size(F.col("tokens")) > 0)
+                )
+        else:
+            preprocess_udf = create_preprocessing_udf(stopwords_bc, slang_dict_bc)
+            df = df.withColumn("tokens", preprocess_udf(F.col("text")))
+            df = df.filter(F.size(F.col("tokens")) > 0)
+
         doc_count = df.count()
         logger.info(f"  Documents after preprocessing: {doc_count:,}")
         df.cache()
@@ -813,7 +1168,7 @@ def main() -> None:
             min_df=args.min_df,
         )
 
-        # 6. Huấn luyện LDA
+        # 6. Huấn luyện LDA (train trên TF counts)
         lda_model, ll, lp = train_lda(
             tfidf_df,
             k=args.k,
@@ -825,13 +1180,51 @@ def main() -> None:
         logger.info("Extracting topic descriptions:")
         topics = extract_topics(lda_model, vocabulary)
 
-        # 8. Lưu kết quả
-        save_results(spark, lda_model, topics, args.output_path, local=args.local)
+        # 8. Gán topic cho từng bài viết/comment
+        logger.info("Inferring best topic per document...")
+        assignments_df = infer_post_topic_assignment(lda_model, tfidf_df, topics)
+
+        # 8.5 Sweep k tự động (nếu được bật)
+        if args.eval_k_values.strip():
+            try:
+                k_values = [int(x.strip()) for x in args.eval_k_values.split(",") if x.strip()]
+                k_values = sorted(set(k_values))
+            except ValueError:
+                logger.error("Invalid --eval-k-values format. Example: 10,12,15,18")
+                k_values = []
+
+            token_rows = (
+                df.select("tokens")
+                .limit(max(1, int(args.eval_max_docs)))
+                .collect()
+            )
+            token_texts: List[List[str]] = [r["tokens"] for r in token_rows if r["tokens"]]
+
+            evaluate_k_sweep(
+                tfidf_df,
+                vocabulary,
+                token_texts,
+                k_values,
+                args.max_iter,
+                args.optimizer,
+                args.output_path,
+            )
+
+        # 9. Lưu kết quả
+        save_results(
+            spark,
+            lda_model,
+            topics,
+            assignments_df,
+            args.output_path,
+            local=args.local,
+        )
         save_vocabulary(cv_model, args.output_path, local=args.local)
 
         logger.info("=" * 70)
         logger.info("LDA PIPELINE COMPLETE!")
         logger.info(f"  Topics: {len(topics)}")
+        logger.info(f"  Post-topic rows: {assignments_df.count():,}")
         logger.info(f"  Log-Likelihood: {ll:,.2f}")
         logger.info(f"  Log-Perplexity: {lp:.4f}")
         logger.info(f"  Output: {args.output_path}")
