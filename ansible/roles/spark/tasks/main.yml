@@ -8,6 +8,10 @@
   get_url:
     url: "{{ spark_url }}"
     dest: "/tmp/spark-{{ spark_version }}.tgz"
+  register: download_spark
+  until: download_spark is succeeded
+  retries: 5
+  delay: 10
 
 - name: Giải nén Spark archive sang tất cả các node
   unarchive:
