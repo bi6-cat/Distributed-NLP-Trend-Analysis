@@ -1,0 +1,41 @@
+---
+- name: Tải Miniconda script
+  get_url:
+    url: "{{ miniconda_url }}"
+    dest: "/home/{{ ansible_user }}/miniconda.sh"
+    mode: '0755'
+  register: download_conda
+  until: download_conda is succeeded
+  retries: 5
+  delay: 10
+
+- name: Cài đặt Miniconda
+  shell: "/home/{{ ansible_user }}/miniconda.sh -b -p {{ install_dir }}"
+  args:
+    creates: "{{ install_dir }}"
+
+- name: Thêm biến môi trường PATH vào /etc/profile.d/conda.sh
+  lineinfile:
+    path: /etc/profile.d/conda.sh
+    line: "export PATH={{ install_dir }}/bin:$PATH"
+    create: yes
+
+- name: Chấp nhận Điều khoản sử dụng (TOS) của Anaconda
+  shell: "{{ install_dir }}/bin/conda tos accept --override-channels --channel {{ item }}"
+  loop:
+    - "https://repo.anaconda.com/pkgs/main"
+    - "https://repo.anaconda.com/pkgs/r"
+  ignore_errors: yes
+  changed_when: false
+
+- name: Init môi trường Conda '{{ env_name }}' với Python {{ python_version }}
+  shell: "{{ install_dir }}/bin/conda create -y -n {{ env_name }} python={{ python_version }}"
+  args:
+    creates: "{{ install_dir }}/envs/{{ env_name }}"
+
+- name: Cấp quyền sở hữu thư mục Miniconda cho user '{{ ansible_user }}'
+  file:
+    path: "{{ install_dir }}"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    recurse: yes

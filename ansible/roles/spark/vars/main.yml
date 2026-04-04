@@ -1,0 +1,8 @@
+---
+spark_version: "3.5.8"
+hadoop_profile: "hadoop3"
+spark_url: "https://dlcdn.apache.org/spark/spark-{{ spark_version }}/spark-{{ spark_version }}-bin-{{ hadoop_profile }}.tgz"
+install_dir: "/opt/spark"
+spark_master_port: 7077
+spark_worker_cores: 2
+spark_worker_memory: "4g"

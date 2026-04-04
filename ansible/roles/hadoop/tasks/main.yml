@@ -1,0 +1,148 @@
+---
+- name: Sửa file /etc/hosts để tránh lỗi loopback (0 Live Nodes)
+  lineinfile:
+    path: /etc/hosts
+    regexp: "^127\\.0\\.[012]\\.1\\s+{{ item.name }}"
+    state: absent
+  loop:
+    - { name: "master" }
+    - { name: "worker1" }
+    - { name: "worker2" }
+    - { name: "storage" }
+
+- name: Thêm mapping IP cho các node trong /etc/hosts
+  lineinfile:
+    path: /etc/hosts
+    line: "{{ hostvars[item]['ansible_host'] | default(item) }} {{ item }}"
+    state: present
+  loop: "{{ groups['all'] }}"
+
+- name: Cài đặt dependencies cho Hadoop
+  apt:
+    name: ['wget', 'rsync', 'unzip', 'tar']
+    state: present
+
+- name: Tải Apache Hadoop (nếu chưa có)
+  get_url:
+    url: "{{ hadoop_url }}"
+    dest: "/home/{{ ansible_user }}/hadoop-{{ hadoop_version }}.tar.gz"
+  register: download_hadoop
+  until: download_hadoop is succeeded
+  retries: 5
+  delay: 10
+
+- name: Giải nén Hadoop archive sang tất cả các node
+  unarchive:
+    src: "/home/{{ ansible_user }}/hadoop-{{ hadoop_version }}.tar.gz"
+    dest: "/opt/"
+    remote_src: yes
+    creates: "/opt/hadoop-{{ hadoop_version }}"
+
+- name: Tạo symlink
+  file:
+    src: "/opt/hadoop-{{ hadoop_version }}"
+    dest: "{{ install_dir }}"
+    state: link
+
+- name: Cấp quyền sở hữu thư mục cho user '{{ ansible_user }}'
+  file:
+    path: "/opt/hadoop-{{ hadoop_version }}"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    recurse: true
+
+- name: Định nghĩa thư mục NameNode (chỉ trên master)
+  file:
+    path: "{{ namenode_dir }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+  when: inventory_hostname in groups['master']
+
+- name: Định nghĩa thư mục DataNode (trên workers)
+  file:
+    path: "{{ datanode_dir }}"
+    state: directory
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    mode: '0755'
+  when: inventory_hostname in groups['workers']
+
+- name: Cấu hình core-site.xml
+  blockinfile:
+    path: "{{ install_dir }}/etc/hadoop/core-site.xml"
+    marker: "<!-- {mark} ANSIBLE MANAGED BLOCK CORE -->"
+    insertafter: "<configuration>"
+    block: |
+      <property>
+        <name>fs.defaultFS</name>
+        <value>hdfs://{{ hostvars[groups['master'][0]]['ansible_host'] | default(groups['master'][0]) }}:{{ hadoop_rpc_port }}</value>
+      </property>
+
+- name: Cấu hình hdfs-site.xml
+  blockinfile:
+    path: "{{ install_dir }}/etc/hadoop/hdfs-site.xml"
+    marker: "<!-- {mark} ANSIBLE MANAGED BLOCK HDFS -->"
+    insertafter: "<configuration>"
+    block: |
+      <property>
+        <name>dfs.replication</name>
+        <value>{{ groups['workers'] | length }}</value>
+      </property>
+      <property>
+        <name>dfs.namenode.name.dir</name>
+        <value>file://{{ namenode_dir }}</value>
+      </property>
+      <property>
+        <name>dfs.datanode.data.dir</name>
+        <value>file://{{ datanode_dir }}</value>
+      </property>
+      <property>
+        <name>dfs.namenode.rpc-address</name>
+        <value>{{ hostvars[groups['master'][0]]['ansible_host'] | default(groups['master'][0]) }}:{{ hadoop_rpc_port }}</value>
+      </property>
+      <property>
+        <name>dfs.namenode.http-address</name>
+        <value>{{ hostvars[groups['master'][0]]['ansible_host'] | default(groups['master'][0]) }}:9870</value>
+      </property>
+      <property>
+        <name>dfs.namenode.datanode.registration.ip-hostname-check</name>
+        <value>false</value>
+      </property>
+
+- name: Cấu hình workers (DataNodes) trên Master
+  copy:
+    dest: "{{ install_dir }}/etc/hadoop/workers"
+    content: |
+      {% for host in groups['workers'] %}
+      {{ hostvars[host]['ansible_host'] | default(host) }}
+      {% endfor %}
+  when: inventory_hostname in groups['master']
+
+- name: Format NameNode (Lần đầu duy nhất)
+  become: yes
+  become_user: "{{ ansible_user }}"
+  shell: "echo 'Y' | {{ install_dir }}/bin/hdfs namenode -format -force"
+  args:
+    creates: "{{ namenode_dir }}/current/VERSION"
+  when: inventory_hostname in groups['master']
+  ignore_errors: yes
+
+- name: Cập nhật biến môi trường HADOOP_HOME
+  lineinfile:
+    path: /etc/profile.d/hadoop.sh
+    line: "export HADOOP_HOME={{ install_dir }}\nexport PATH=$PATH:$HADOOP_HOME/bin:$HADOOP_HOME/sbin"
+    create: yes
+
+- name: Khởi động NameNode (chì Master)
+  become: yes
+  become_user: "{{ ansible_user }}"
+  shell: "nohup {{ install_dir }}/bin/hdfs --daemon start namenode > /dev/null 2>&1 &"
+  when: inventory_hostname in groups['master']
+
+- name: Khởi động DataNode (chì Workers)
+  become: yes
+  become_user: "{{ ansible_user }}"
+  shell: "nohup {{ install_dir }}/bin/hdfs --daemon start datanode > /dev/null 2>&1 &"
+  when: inventory_hostname in groups['workers']

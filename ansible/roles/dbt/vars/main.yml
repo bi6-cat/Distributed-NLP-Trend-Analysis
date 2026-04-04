@@ -1,0 +1,4 @@
+---
+conda_env: "nlp-trend"
+conda_dir: "/opt/miniconda"
+dbt_packages: "dbt-core dbt-clickhouse"
