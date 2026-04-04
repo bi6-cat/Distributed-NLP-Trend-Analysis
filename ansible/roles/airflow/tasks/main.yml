@@ -32,10 +32,14 @@
 
 - name: Khởi động Airflow Webserver (daemon mode)
   shell: "AIRFLOW_HOME={{ airflow_home }} {{ conda_dir }}/envs/{{ conda_env }}/bin/airflow webserver --port {{ airflow_port }} -D"
+  args:
+    creates: "{{ airflow_home }}/airflow-webserver.pid"
   async: 60
   poll: 0
 
 - name: Khởi động Airflow Scheduler (daemon mode)
   shell: "AIRFLOW_HOME={{ airflow_home }} {{ conda_dir }}/envs/{{ conda_env }}/bin/airflow scheduler -D"
+  args:
+    creates: "{{ airflow_home }}/airflow-scheduler.pid"
   async: 60
   poll: 0
