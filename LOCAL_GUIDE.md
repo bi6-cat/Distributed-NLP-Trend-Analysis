@@ -7,11 +7,11 @@ Chào mừng các bạn đến với dự án Phân tích xu hướng NLP phân 
 ##  1. Yêu cầu Hệ thống (Hardware)
 
 Do cluster chạy đồng thời 4 máy ảo (VM), máy tính của bạn cần cấu hình tối thiểu:
-*   **RAM**: Ít nhất 16GB (Khuyên dùng **32GB**). 
-    *   *Master Node*: 8GB
+*   **RAM**: Khuyến nghị 16GB. 
+    *   *Master Node*: 4GB
     *   *Worker Nodes*: 4GB x 2
     *   *Storage Node*: 4GB
-*   **CPU**: Tối thiểu 8 cores (Cluster chiếm 10 vCPUs).
+*   **CPU**: Tối thiểu 6 cores (Cluster chiếm 6 vCPUs).
 *   **Disk**: Ổ cứng SSD trống ít nhất 40GB.
 
 ---
@@ -59,7 +59,27 @@ Sau khi cài đặt xong, bạn có thể truy cập các giao diện quản lý
 
 ---
 
-##  5. Cấu trúc Dự án quan trọng
+##  5. Tắt máy và Khởi động lại (Stop & Start)
+
+Khi không dùng đến nữa, bạn không nên tắt thẳng máy ảo qua VirtualBox. Hãy làm theo cách sau:
+
+### Cách tắt cụm máy ảo (Halt)
+Mở PowerShell tại thư mục dự án:
+```powershell
+vagrant halt
+```
+Tất cả 4 máy ảo sẽ được lưu lại trạng thái và tắt an toàn.
+
+### Cách bật lại và chạy ứng dụng (Start)
+Các ứng dụng Big Data (Hadoop, Spark, Airflow) không tự động chạy lúc boot máy tính để tiết kiệm tài nguyên. **Để tự động bật lại cụm máy và chạy các dịch vụ này**, bạn chỉ cần chạy lại file cài đặt ban đầu:
+```powershell
+.\deploy_cluster.ps1
+```
+Script đã được tối ưu để tính toán tự động bỏ qua (skip) các bước cài đặt và chỉ kích hoạt lại những ứng dụng chưa chạy. Bạn sẽ chỉ tốn khoảng 1-2 phút thay vì phải chờ nguyên quá trình tải về như lần đầu.
+
+---
+
+##  6. Cấu trúc Dự án quan trọng
 
 *   `/ansible/roles/`: Chứa kịch bản cài đặt cho từng component.
 *   `/ansible/inventory/hosts.ini`: Danh sách các node và IP tương ứng.

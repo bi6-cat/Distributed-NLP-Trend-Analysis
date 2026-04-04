@@ -2,7 +2,7 @@
 - name: Tải Miniconda script
   get_url:
     url: "{{ miniconda_url }}"
-    dest: "/tmp/miniconda.sh"
+    dest: "/home/{{ ansible_user }}/miniconda.sh"
     mode: '0755'
   register: download_conda
   until: download_conda is succeeded
@@ -10,7 +10,7 @@
   delay: 10
 
 - name: Cài đặt Miniconda
-  shell: "/tmp/miniconda.sh -b -p {{ install_dir }}"
+  shell: "/home/{{ ansible_user }}/miniconda.sh -b -p {{ install_dir }}"
   args:
     creates: "{{ install_dir }}"
 
@@ -26,6 +26,7 @@
     - "https://repo.anaconda.com/pkgs/main"
     - "https://repo.anaconda.com/pkgs/r"
   ignore_errors: yes
+  changed_when: false
 
 - name: Init môi trường Conda '{{ env_name }}' với Python {{ python_version }}
   shell: "{{ install_dir }}/bin/conda create -y -n {{ env_name }} python={{ python_version }}"
