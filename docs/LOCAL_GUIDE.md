@@ -1,6 +1,6 @@
 #  Distributed NLP Trend Analysis - Hub Hướng Dẫn Kỹ Thuật (Local)
 
-Chào mừng các bạn đến với dự án Phân tích xu hướng NLP phân tán. Đây là tài liệu hướng dẫn nhanh để giúp các thành viên mới (mems) thiết lập môi trường cluster Big Data nhanh nhất trên máy cá nhân.
+Đây là tài liệu hướng dẫn nhanh để giúp các thành viên mới thiết lập môi trường cluster Big Data nhanh nhất trên máy cá nhân.
 
 ---
 

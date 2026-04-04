@@ -11,7 +11,7 @@ Hệ thống hiện tại bao gồm các node trên dải mạng `192.168.56.x`:
 | **Master** | `192.168.56.11` | Chạy NameNode (Hadoop), Spark Master và điều phối cụm. |
 | **Workers 1** | `192.168.56.12` | Chạy DataNode (Hadoop) và Spark Worker. |
 | **Workers 2** | `192.168.56.13` | Chạy DataNode (Hadoop) và Spark Worker. |
-| **Storage** | `192.168.56.14` | Node chuyên dụng cho mục đích lưu trữ phụ trợ. |
+| **Storage** | `192.168.56.14` | Chạy ClickHouse (OLAP Database) và DataNode (Hadoop). |
 
 > [!NOTE]
 > Người dùng quản trị (Ansible): `zett` (có quyền sudo).
@@ -47,6 +47,34 @@ Nền tảng tính toán phân tán cho xử lý NLP.
 | :--- | :--- | :--- |
 | **Spark Master Web UI** | [http://192.168.56.11:8080](http://192.168.56.11:8080) | `8080` |
 | **Spark Master Submit** | `spark://192.168.56.11:7077` | `7077` |
+
+---
+
+## ⏳ Apache Airflow
+
+Hệ thống lập lịch và điều phối Data Pipeline.
+
+- **Phiên bản**: `2.9.0`
+- **Môi trường**: Chạy trong Conda env `nlp-trend`.
+
+| Thành phần | URL / Connection String | Cổng mặc định |
+| :--- | :--- | :--- |
+| **Airflow Web UI** | [http://192.168.56.11:8081](http://192.168.56.11:8081) | `8081` |
+
+> [!NOTE]
+> Username / Password mặc định của Airflow là: `admin` / `admin`
+
+---
+
+## 📊 ClickHouse
+
+Cơ sở dữ liệu OLAP dạng cột cho Analytics và Dashboard.
+Được cấu hình trên Storage Node (192.168.56.14).
+
+| Thành phần | URL / Connection String | Cổng mặc định |
+| :--- | :--- | :--- |
+| **HTTP Interface** | `192.168.56.14:8123` | `8123` |
+| **Native Client** | `192.168.56.14:9000` | `9000` |
 
 ---
 
