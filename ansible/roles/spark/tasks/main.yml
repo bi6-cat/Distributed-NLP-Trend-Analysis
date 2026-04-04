@@ -7,7 +7,7 @@
 - name: Tải Apache Spark
   get_url:
     url: "{{ spark_url }}"
-    dest: "/tmp/spark-{{ spark_version }}.tgz"
+    dest: "/home/{{ ansible_user }}/spark-{{ spark_version }}.tgz"
   register: download_spark
   until: download_spark is succeeded
   retries: 5
@@ -15,7 +15,7 @@
 
 - name: Giải nén Spark archive sang tất cả các node
   unarchive:
-    src: "/tmp/spark-{{ spark_version }}.tgz"
+    src: "/home/{{ ansible_user }}/spark-{{ spark_version }}.tgz"
     dest: "/opt/"
     remote_src: yes
     creates: "/opt/spark-{{ spark_version }}-bin-{{ hadoop_profile }}"
@@ -66,10 +66,14 @@
   become: yes
   become_user: "{{ ansible_user }}"
   shell: "{{ install_dir }}/sbin/start-master.sh"
+  register: spark_master_start
+  failed_when: spark_master_start.rc != 0 and "running as process" not in spark_master_start.stdout
   when: inventory_hostname in groups['master']
 
 - name: Khởi động Spark Worker (chì Workers)
   become: yes
   become_user: "{{ ansible_user }}"
   shell: "{{ install_dir }}/sbin/start-worker.sh spark://{{ hostvars[groups['master'][0]]['ansible_host'] | default(groups['master'][0]) }}:{{ spark_master_port }}"
+  register: spark_worker_start
+  failed_when: spark_worker_start.rc != 0 and "running as process" not in spark_worker_start.stdout
   when: inventory_hostname in groups['workers']
