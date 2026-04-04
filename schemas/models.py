@@ -17,7 +17,7 @@ from typing import List, Optional
 from pydantic import BaseModel, field_validator, model_validator
 
 
-VALID_SOURCES    = {"voz", "vnexpress", "youtube", "tinhte"}
+VALID_SOURCES    = {"voz", "vnexpress", "youtube", "tinhte", "vatvo"}
 VALID_POST_TYPES = {"post", "comment", "reply", "article", "video"}
 
 
