@@ -661,7 +661,7 @@ Ansible Playbooks:
 Cluster: HPC Semi-Lab
   ├── Master Node (1 node)
   │     └── HDFS NameNode, Spark Master, Airflow, Streamlit, dbt
-  ├── Worker Nodes (3–4 nodes)
+  ├── Worker Nodes (2 nodes)
   │     └── HDFS DataNode, Spark Worker
   │     └── Chạy PhoBERT inference (nếu có GPU)
   └── Storage Node (1 node)

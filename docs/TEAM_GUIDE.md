@@ -43,7 +43,26 @@ git pull origin develop
 
 ---
 
-## 2. Quy tắc đặt tên Branch
+## 2. Cấu trúc Thư mục Dự án & Phân chia Code
+
+Để dễ dàng làm việc chung, dự án đã được khởi tạo sẵn các thư mục tương ứng với từng nhiệm vụ. Vui lòng **đặt code của bạn đúng thư mục** phân công:
+
+| Thư mục | Dành cho ai | Chứa nội dung gì |
+|---------|-------------|------------------|
+| `crawlers/` | Member 1 (Data Eng) | Code cào dữ liệu (VOZ, VnExpress, YouTube) |
+| `schemas/` | Member 1 (Data Eng) | Pydantic Models để validate dữ liệu đầu vào |
+| `spark_jobs/` | Member 2 & 3 | Code chạy phân tán trên Spark (Cleaning, LSH, LDA, PageRank) |
+| `preprocessing/` | Member 4 (NLP Eng) | Code tiền xử lý NLP (VnCoreNLP, text cleaner) |
+| `dags/` | Member 2 & 5 | Các luồng Airflow để lập lịch chạy Data Pipeline |
+| `dashboard/` | Member 5 (Full-stack)| Giao diện Streamlit báo cáo xu hướng |
+| `data/` | All Members | Dữ liệu tĩnh như stopwords, từ điển slang |
+| `tests/` | All Members | Các file pytest (unit tests) cho từng module |
+
+> **Lưu ý quan trọng**: Khi khởi tạo branch mới, hãy sử dụng các file `.py` được cung cấp sẵn (placeholder) trong các thư mục trên làm điểm bắt đầu để tránh conflict trúc trắc sau này.
+
+---
+
+## 3. Quy tắc đặt tên Branch
 
 ### Format: `<type>/<mô-tả-ngắn>`
 
@@ -60,7 +79,7 @@ git pull origin develop
 
 ---
 
-## 3. Commit Convention
+## 4. Commit Convention
 
 ### Format: `<type>(<scope>): <mô tả>`
 
@@ -92,7 +111,7 @@ docs(readme): update setup guide
 
 ---
 
-## 4. Pull Request (PR) Process
+## 5. Pull Request (PR) Process
 
 ### Khi tạo PR:
 
@@ -151,7 +170,7 @@ git branch -d feature/old-branch
 
 ---
 
-## 5. Các lệnh Git thường dùng
+## 6. Các lệnh Git thường dùng
 
 ### Branch operations
 ```bash
