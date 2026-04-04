@@ -2,8 +2,8 @@
 - name: Cập nhật apt cache
   apt:
     update_cache: yes
+    cache_valid_time: 36000
   when: ansible_os_family == "Debian"
-  ignore_errors: yes
 
 - name: Cài đặt Java Package
   apt:
@@ -21,3 +21,4 @@
   shell: "source /etc/environment"
   args:
     executable: /bin/bash
+  changed_when: false

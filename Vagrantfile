@@ -30,8 +30,8 @@ Vagrant.configure("2") do |config|
     master.vm.network "private_network", ip: "192.168.56.11"
     master.vm.provider "virtualbox" do |vb|
       vb.name = "nlp-master"
-      vb.memory = "8192"  # 8GB RAM do gánh nhiều dịch vụ nhất
-      vb.cpus = 4
+      vb.memory = "4096"  # Reduced from 8GB to fit 16GB host RAM
+      vb.cpus = 2
     end
   end
 
