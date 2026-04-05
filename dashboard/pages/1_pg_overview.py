@@ -1,6 +1,15 @@
 """
-Page 1 — Overview
+Page 1 — Overview (Top Trending)
 10-second situation awareness: "What's hot right now?"
+
+Visuals:
+  • KPI banner (mentions, authors, sentiment split)
+  • Crisis alert banner (conditional)
+  • Top 10 Leaderboard dataframe
+  • Velocity vs Engagement grouped bar chart
+  • Sentiment donut
+  • Volume timeline by source
+  • Source breakdown bar
 """
 from __future__ import annotations
 
@@ -12,9 +21,10 @@ from components.sidebar import render_sidebar
 from components.kpi_row import render_kpi_row
 from components.chart_theme import (
     POSITIVE, NEGATIVE, NEUTRAL, SOURCE_COLORS,
-    SENTIMENT_COLORS, PRIMARY, ACCENT_PURPLE, apply_chart_style,
+    SENTIMENT_COLORS, PRIMARY, ACCENT_BLUE, ACCENT_PURPLE,
+    apply_chart_style,
 )
-from data.queries import get_topic_activity, get_crisis_events, get_keyword_frequencies
+from data.queries import get_topic_activity, get_crisis_events
 
 # ── Sidebar ─────────────────────────────────────────────────────
 filters = render_sidebar()
@@ -38,9 +48,10 @@ if not df.empty:
     today = df[df["bucket_date"] == df["bucket_date"].max()]
     total_mentions = int(today["mention_count"].sum())
     total_authors = int(today["unique_authors"].sum())
-    pos_pct = today["pos_count"].sum() / max(today["mention_count"].sum(), 1) * 100
-    neg_pct = today["neg_count"].sum() / max(today["mention_count"].sum(), 1) * 100
-    neu_pct = today["neu_count"].sum() / max(today["mention_count"].sum(), 1) * 100
+    total_posts = int(today["mention_count"].sum()) or 1
+    pos_pct = today["pos_count"].sum() / total_posts * 100
+    neg_pct = today["neg_count"].sum() / total_posts * 100
+    neu_pct = today["neu_count"].sum() / total_posts * 100
 else:
     total_mentions = total_authors = 0
     pos_pct = neg_pct = neu_pct = 0
@@ -48,29 +59,109 @@ else:
 render_kpi_row([
     {"label": "📝 Total Mentions", "value": f"{total_mentions:,}"},
     {"label": "👥 Unique Authors", "value": f"{total_authors:,}"},
-    {"label": "🟢 Positive", "value": f"{pos_pct:.1f}%"},
-    {"label": "🔴 Negative", "value": f"{neg_pct:.1f}%", "delta_color": "inverse"},
-    {"label": "⚪ Neutral", "value": f"{neu_pct:.1f}%", "delta_color": "off"},
+    {"label": "🟢 Positive",       "value": f"{pos_pct:.1f}%"},
+    {"label": "🔴 Negative",       "value": f"{neg_pct:.1f}%", "delta_color": "inverse"},
+    {"label": "⚪ Neutral",        "value": f"{neu_pct:.1f}%", "delta_color": "off"},
 ])
 
 st.divider()
 
-# ── Row 2: Top Trending + Sentiment Donut ───────────────────────
-col_trend, col_donut = st.columns([3, 2], gap="large")
+# ── Row 1: Top 10 Leaderboard + Velocity vs Engagement ─────────
+col_board, col_compare = st.columns([2, 3], gap="large")
 
-with col_trend:
-    st.markdown("#### 🔥 Top 10 Trending Topics")
+with col_board:
+    st.markdown("#### 🏆 Top 10 Trending Topics")
     if not df.empty:
         latest_hour = df["hour_bucket"].max()
         top_df = (
             df[df["hour_bucket"] == latest_hour]
             .groupby(["topic_id", "topic_label"], as_index=False)
-            .agg(trend_score=("trend_score", "max"), mentions=("mention_count", "sum"))
+            .agg(
+                trend_score=("trend_score", "max"),
+                velocity=("velocity", "sum"),
+                engagement_sum=("engagement_sum", "sum"),
+                mentions=("mention_count", "sum"),
+            )
+            .nlargest(10, "trend_score")
+            .sort_values("trend_score", ascending=False)
+            .reset_index(drop=True)
+        )
+        top_df.index = top_df.index + 1
+        top_df.index.name = "Rank"
+
+        st.dataframe(
+            top_df[["topic_label", "trend_score", "velocity", "engagement_sum", "mentions"]],
+            use_container_width=True,
+            column_config={
+                "topic_label": st.column_config.TextColumn("Topic", width="medium"),
+                "trend_score": st.column_config.ProgressColumn(
+                    "Trend Score",
+                    format="%.1f",
+                    min_value=0,
+                    max_value=float(top_df["trend_score"].max()) * 1.1 if not top_df.empty else 100,
+                ),
+                "velocity": st.column_config.NumberColumn("Velocity", format="%d /h"),
+                "engagement_sum": st.column_config.NumberColumn("Engagement", format="%,d"),
+                "mentions": st.column_config.NumberColumn("Mentions", format="%,d"),
+            },
+        )
+    else:
+        st.info("No data available for the selected filters.")
+
+with col_compare:
+    st.markdown("#### ⚡ Velocity vs Engagement — Top 10")
+    if not df.empty and not top_df.empty:
+        # Prepare data for grouped bar chart
+        chart_df = top_df.sort_values("trend_score", ascending=True).copy()
+
+        fig_compare = go.Figure()
+        fig_compare.add_trace(go.Bar(
+            y=chart_df["topic_label"],
+            x=chart_df["velocity"],
+            name="Velocity (mentions/h)",
+            orientation="h",
+            marker_color=ACCENT_BLUE,
+            text=chart_df["velocity"],
+            texttemplate="%{text:,}",
+            textposition="outside",
+        ))
+        fig_compare.add_trace(go.Bar(
+            y=chart_df["topic_label"],
+            x=chart_df["engagement_sum"],
+            name="Engagement",
+            orientation="h",
+            marker_color=ACCENT_PURPLE,
+            text=chart_df["engagement_sum"],
+            texttemplate="%{text:,}",
+            textposition="outside",
+        ))
+        fig_compare.update_layout(
+            barmode="group",
+            yaxis_title="",
+            xaxis_title="Value",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        )
+        st.plotly_chart(apply_chart_style(fig_compare, height=460), use_container_width=True)
+    else:
+        st.info("Not enough data for comparison chart.")
+
+st.divider()
+
+# ── Row 2: Trend Score Bar + Sentiment Donut ────────────────────
+col_trend, col_donut = st.columns([3, 2], gap="large")
+
+with col_trend:
+    st.markdown("#### 🔥 Trend Score — Top 10")
+    if not df.empty:
+        bar_df = (
+            df[df["hour_bucket"] == df["hour_bucket"].max()]
+            .groupby(["topic_id", "topic_label"], as_index=False)
+            .agg(trend_score=("trend_score", "max"))
             .nlargest(10, "trend_score")
             .sort_values("trend_score", ascending=True)
         )
         fig_bar = px.bar(
-            top_df,
+            bar_df,
             x="trend_score",
             y="topic_label",
             orientation="h",
@@ -90,7 +181,7 @@ with col_trend:
         )
         st.plotly_chart(apply_chart_style(fig_bar, height=420), use_container_width=True)
     else:
-        st.info("No data available for the selected filters.")
+        st.info("No data available.")
 
 with col_donut:
     st.markdown("#### 💬 Sentiment Overview")
@@ -98,7 +189,7 @@ with col_donut:
         sentiment_totals = {
             "Positive": int(df["pos_count"].sum()),
             "Negative": int(df["neg_count"].sum()),
-            "Neutral": int(df["neu_count"].sum()),
+            "Neutral":  int(df["neu_count"].sum()),
         }
         fig_donut = go.Figure(go.Pie(
             labels=list(sentiment_totals.keys()),
@@ -166,41 +257,3 @@ with col_src:
         fig_src.update_traces(texttemplate="%{text:,}", textposition="outside")
         fig_src.update_layout(showlegend=False, xaxis_title="Total Mentions", yaxis_title="")
         st.plotly_chart(apply_chart_style(fig_src, height=380), use_container_width=True)
-
-st.divider()
-
-# ── Row 4: Keyword Cloud ───────────────────────────────────────
-st.markdown("#### 🔑 Trending Keywords")
-kw_df = get_keyword_frequencies()
-if not kw_df.empty:
-    kw_agg = kw_df.groupby("keyword", as_index=False)["estimated_count"].sum()
-    try:
-        from wordcloud import WordCloud
-        import matplotlib.pyplot as plt
-
-        wc_dict = dict(zip(kw_agg["keyword"], kw_agg["estimated_count"]))
-        wc = WordCloud(
-            width=1200, height=300,
-            background_color="#0F0F23",
-            colormap="cool",
-            max_words=50,
-            prefer_horizontal=0.8,
-        ).generate_from_frequencies(wc_dict)
-
-        fig_wc, ax = plt.subplots(figsize=(12, 3))
-        ax.imshow(wc, interpolation="bilinear")
-        ax.axis("off")
-        fig_wc.patch.set_facecolor("#0F0F23")
-        st.pyplot(fig_wc, use_container_width=True)
-        plt.close(fig_wc)
-    except ImportError:
-        # Fallback: show as tag chips
-        tags_html = " ".join(
-            f"<span style='background:#1A1A2E;padding:4px 12px;border-radius:16px;"
-            f"margin:4px;display:inline-block;border:1px solid #4A5568;'>"
-            f"{row['keyword']} <b>({row['estimated_count']:,})</b></span>"
-            for _, row in kw_agg.nlargest(30, "estimated_count").iterrows()
-        )
-        st.markdown(tags_html, unsafe_allow_html=True)
-else:
-    st.info("No keyword data available.")

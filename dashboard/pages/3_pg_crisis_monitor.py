@@ -1,6 +1,13 @@
 """
 Page 3 — Crisis Monitor
 Anomaly detection dashboard: "Is something blowing up right now?"
+
+Visuals:
+  • KPI row (HIGH / MEDIUM / LOW counts + avg anomaly score)
+  • Crisis event timeline (bubble scatter)
+  • Volume Z-Score heatmap
+  • Negative ratio vs baseline threshold line chart
+  • Styled crisis event log table with expandable details
 """
 from __future__ import annotations
 
@@ -16,7 +23,7 @@ from components.chart_theme import (
     NEGATIVE, NEUTRAL, ACCENT_BLUE, PRIMARY,
     apply_chart_style,
 )
-from data.queries import get_crisis_events, get_topic_activity, get_dim_topics
+from data.queries import get_crisis_events, get_topic_activity
 
 # ── Sidebar ─────────────────────────────────────────────────────
 filters = render_sidebar()
@@ -32,7 +39,7 @@ with fcol1:
     severity_filter = st.multiselect(
         "Severity",
         options=["HIGH", "MEDIUM", "LOW"],
-        default=["HIGH", "MEDIUM", "LOW"],
+        default=["HIGH", "MEDIUM"],
     )
 
 with fcol2:
@@ -49,24 +56,25 @@ crisis_df = get_crisis_events(window_hours=window_hours, severities=severity_fil
 activity_df = get_topic_activity(filters.start_date, filters.end_date, filters.sources)
 
 # ── KPI Row ─────────────────────────────────────────────────────
-high_count  = len(crisis_df[crisis_df["severity"] == "HIGH"])  if not crisis_df.empty else 0
+high_count  = len(crisis_df[crisis_df["severity"] == "HIGH"])   if not crisis_df.empty else 0
 med_count   = len(crisis_df[crisis_df["severity"] == "MEDIUM"]) if not crisis_df.empty else 0
-low_count   = len(crisis_df[crisis_df["severity"] == "LOW"])   if not crisis_df.empty else 0
-avg_anomaly = crisis_df["anomaly_score"].mean() if not crisis_df.empty else 0
+low_count   = len(crisis_df[crisis_df["severity"] == "LOW"])    if not crisis_df.empty else 0
+avg_anomaly = crisis_df["anomaly_score"].mean()                 if not crisis_df.empty else 0
 
 render_kpi_row([
-    {"label": "🔴 HIGH",    "value": str(high_count)},
-    {"label": "🟡 MEDIUM",  "value": str(med_count)},
-    {"label": "🟢 LOW",     "value": str(low_count)},
+    {"label": "🔴 HIGH",              "value": str(high_count)},
+    {"label": "🟡 MEDIUM",            "value": str(med_count)},
+    {"label": "🟢 LOW",               "value": str(low_count)},
     {"label": "📉 Avg Anomaly Score", "value": f"{avg_anomaly:.2f}"},
 ])
 
 st.divider()
 
-# ── Chart 1: Crisis Event Timeline (Scatter) ───────────────────
+# ── Chart 1: Crisis Event Timeline (Bubble Scatter) ────────────
 st.markdown("#### ⏱️ Crisis Event Timeline")
 
 if not crisis_df.empty:
+    crisis_df = crisis_df.copy()
     crisis_df["severity_y"] = crisis_df["severity"].map({"HIGH": 3, "MEDIUM": 2, "LOW": 1})
     crisis_df["topics_str"] = crisis_df["affected_topic_labels"].apply(
         lambda x: ", ".join(x) if isinstance(x, list) else str(x)
@@ -203,7 +211,7 @@ with col_neg:
 
 st.divider()
 
-# ── Crisis Event Log (Table) ───────────────────────────────────
+# ── Crisis Event Log (Styled Table) ────────────────────────────
 st.markdown("#### 📋 Crisis Event Log")
 
 if not crisis_df.empty:
@@ -267,9 +275,9 @@ if not crisis_df.empty:
                 for t in topics:
                     st.markdown(f"- {t}")
 
-                evidence = row.get("evidence_doc_ids", [])
+                evidence = row.get("evidence_post_ids", [])
                 if evidence and isinstance(evidence, list):
                     st.markdown("**Evidence Posts:**")
-                    st.code(", ".join(evidence[:5]))
+                    st.code(", ".join(str(e) for e in evidence[:5]))
 else:
     st.success("✅ No crisis events in the selected window.")

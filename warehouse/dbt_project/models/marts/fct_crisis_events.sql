@@ -1,85 +1,61 @@
 {{
     config(
-        materialized='table'
+        materialized='table',
+        engine='MergeTree()',
+        order_by=['detected_date', 'event_id']
     )
 }}
 
-/*
-    FACT: Crisis Events
-
-    Enriches raw crisis events with embedded topic labels and severity rank.
-    Grain: event_id
-
-    ClickHouse note: arrayMap lambda cannot reference outer-scope variables
-    inside a correlated subquery. We resolve labels by joining on the expanded
-    array (arrayJoin) and re-aggregating with groupArray.
-*/
-
-WITH exploded AS (
-    -- Expand each affected_topic into one row for label lookup
+WITH exploded_topics AS (
+    -- Split array of topic IDs into separate rows
     SELECT
-        e.event_id,
-        e.detected_at,
-        e.severity,
-        e.anomaly_score,
-        e.trigger_conditions,
-        e.neg_ratio,
-        e.mention_velocity,
-        e.evidence_doc_ids,
-        e.affected_topics,
-        arrayJoin(e.affected_topics)            AS tid
-    FROM dwh_prod.stg_crisis_events AS e
+        event_id,
+        arrayJoin(affected_topics) AS tid
+    FROM {{ source('tech_radar', 'stg_crisis_events') }}
 ),
 
 with_labels AS (
+    -- Join with topics table to get topic labels
     SELECT
         ex.event_id,
-        ex.detected_at,
-        ex.severity,
-        ex.anomaly_score,
-        ex.trigger_conditions,
-        ex.neg_ratio,
-        ex.mention_velocity,
-        ex.evidence_doc_ids,
-        ex.affected_topics,
         ex.tid,
         coalesce(t.label, concat('topic_', toString(ex.tid))) AS tid_label
-    FROM exploded AS ex
-    LEFT JOIN dwh_prod.stg_topics AS t ON ex.tid = t.topic_id
+    FROM exploded_topics AS ex
+    LEFT JOIN {{ source('tech_radar', 'stg_topics') }} AS t 
+        ON ex.tid = t.topic_id
+),
+
+collapsed_labels AS (
+    -- Collapse topic labels back into an array per event
+    SELECT
+        event_id,
+        groupArray(tid_label) AS affected_topic_labels
+    FROM with_labels
+    GROUP BY event_id
 )
 
 SELECT
-    event_id,
-    detected_at,
-    toDate(detected_at)                             AS detected_date,
-    severity,
-    anomaly_score,
-    trigger_conditions,
-    neg_ratio,
-    mention_velocity,
-    evidence_doc_ids,
-    affected_topics,
+    e.event_id,
+    e.detected_at,
+    toDate(e.detected_at) AS detected_date,
+    e.severity,
+    e.anomaly_score,
+    e.trigger_conditions,
+    e.neg_ratio,
+    e.mention_velocity,
+    e.evidence_post_ids,
+    e.affected_topics,
 
-    -- Re-aggregate per-event, preserving array order via rowNumberInAllBlocks grouping
-    groupArray(tid_label)                           AS affected_topic_labels,
+    c.affected_topic_labels,
 
+    -- Rank for sorting on Dashboard
     multiIf(
-        severity = 'HIGH',   3,
-        severity = 'MEDIUM', 2,
-        severity = 'LOW',    1,
+        e.severity = 'HIGH',   3,
+        e.severity = 'MEDIUM', 2,
+        e.severity = 'LOW',    1,
         0
-    )                                               AS severity_rank
+    ) AS severity_rank
 
-FROM with_labels
-GROUP BY
-    event_id,
-    detected_at,
-    severity,
-    anomaly_score,
-    trigger_conditions,
-    neg_ratio,
-    mention_velocity,
-    evidence_doc_ids,
-    affected_topics
-
-ORDER BY detected_at DESC
+FROM {{ source('tech_radar', 'stg_crisis_events') }} AS e
+LEFT JOIN collapsed_labels AS c
+    ON e.event_id = c.event_id
