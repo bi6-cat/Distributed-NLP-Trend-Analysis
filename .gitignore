@@ -9,6 +9,10 @@ data/*.db
 !data/stopwords_vi.txt
 !data/slang_dict.json
 
+# ── Vagrant & Tutorial work ──────────
+.vagrant/
+tutorial_work/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
