@@ -1,13 +1,78 @@
 version: 2
 
+sources:
+  - name: tech_radar
+    description: >
+      ClickHouse staging tables — 3 decoupled landing zones loaded independently
+      by Spark jobs (M2, M3, M4), plus supporting reference tables.
+    database: tech_radar
+    tables:
+      - name: stg_posts_core
+        description: >
+          Core post data with atomic engagement metrics. Loaded by M2 (flatten+clean+dedup).
+        columns:
+          - name: post_id
+            description: Canonical PK across all stages
+            tests:
+              - not_null
+              - unique
+          - name: source
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ['voz', 'tinhte', 'vnexpress', 'youtube']
+
+      - name: stg_posts_nlp
+        description: >
+          PhoBERT sentiment labels. Loaded by M4.
+          ReplacingMergeTree ensures latest prediction wins on reruns.
+        columns:
+          - name: post_id
+            tests:
+              - not_null
+
+      - name: stg_post_topics
+        description: >
+          LDA/BERTopic topic assignments. Loaded by M3.
+          ReplacingMergeTree ensures latest assignment wins on weekly reruns.
+        columns:
+          - name: post_id
+            tests:
+              - not_null
+
+      - name: stg_topics
+        description: >
+          Topic lookup table — human-readable labels and keywords. Loaded by M3.
+        columns:
+          - name: topic_id
+            tests:
+              - not_null
+              - unique
+
+      - name: stg_keyword_freq
+        description: >
+          Count-Min Sketch keyword frequencies per sliding window. Loaded by M3.
+
+      - name: stg_crisis_events
+        description: >
+          Isolation Forest anomaly detection output. Loaded by M4.
+        columns:
+          - name: event_id
+            tests:
+              - not_null
+              - unique
+
 models:
   - name: stg_posts
     description: >
-      Staging view over dwh_prod.stg_posts. Adds derived time dimensions
-      and body_length. Filters empty bodies and data older than 90 days.
+      Unified staging VIEW — the core ELT responsibility. JOINs the 3 decoupled
+      landing tables (stg_posts_core, stg_posts_nlp, stg_post_topics) and computes
+      engagement from atomic metrics. LEFT JOINs ensure posts without NLP/topic
+      labels still appear (graceful partial pipeline handling).
     columns:
       - name: post_id
-        description: Unique post identifier
+        description: Canonical post identifier
         tests:
           - not_null
       - name: source
@@ -15,29 +80,20 @@ models:
         tests:
           - not_null
           - accepted_values:
-              values: ['voz', 'tinhte', 'vnexpress', 'youtube']
-      - name: author_id
-        description: Author identifier
-        tests:
-          - not_null
+              arguments:
+                values: ['voz', 'tinhte', 'vnexpress', 'youtube']
+      - name: engagement
+        description: >
+          Weighted engagement score computed by dbt from atomic metrics:
+          reaction_count + comment_count × 2 + coalesce(view_count, 0) / 100
       - name: sentiment_label
-        description: "Sentiment classification: positive, negative, neutral"
+        description: "PhoBERT sentiment: positive, negative, neutral (nullable — LEFT JOIN)"
+      - name: source_type
+        description: "Derived platform type: forum, news, video"
         tests:
           - accepted_values:
-              values: ['positive', 'negative', 'neutral', '']
+              arguments:
+                values: ['forum', 'news', 'video', 'unknown']
       - name: created_at
         tests:
           - not_null
-
-  - name: stg_sentiments
-    description: >
-      Pivoted sentiment view with one-hot columns (is_positive, is_negative,
-      is_neutral) for easy SUM aggregation.
-    columns:
-      - name: post_id
-        tests:
-          - not_null
-      - name: sentiment_label
-        tests:
-          - not_null
-

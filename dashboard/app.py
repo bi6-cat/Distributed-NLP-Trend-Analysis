@@ -14,9 +14,9 @@ st.set_page_config(
 )
 
 # ── Define pages ────────────────────────────────────────────────
-overview_page = st.Page("pages/1_📊_Overview.py",       title="Overview",        icon="📊", default=True)
-trends_page   = st.Page("pages/2_🔥_Trend_Explorer.py", title="Trend Explorer",  icon="🔥")
-crisis_page   = st.Page("pages/3_🚨_Crisis_Monitor.py", title="Crisis Monitor",  icon="🚨")
+overview_page = st.Page("pages/1_pg_overview.py",          title="Overview",        icon="📊", default=True)
+trends_page   = st.Page("pages/2_pg_trend_explorer.py",    title="Trend Explorer",  icon="🔥")
+crisis_page   = st.Page("pages/3_pg_crisis_monitor.py",    title="Crisis Monitor",  icon="🚨")
 
 pg = st.navigation([overview_page, trends_page, crisis_page])
 pg.run()

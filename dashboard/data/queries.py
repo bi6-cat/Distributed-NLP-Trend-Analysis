@@ -1,15 +1,17 @@
 """
 ClickHouse query layer for the Tech Trend Radar dashboard.
 
-If ClickHouse is unreachable the module falls back to synthetic demo data
-so the dashboard can always be previewed.
+RULES
+  • Zero JOIN — every query hits a single pre-denormalized Gold table.
+  • Every public fetch function uses @st.cache_data(ttl=900).
+  • If ClickHouse is unreachable the module falls back to synthetic demo data
+    so the dashboard can always be previewed.
 """
 from __future__ import annotations
 
 import datetime as _dt
 import hashlib
 import math
-import random
 from typing import Optional
 
 import numpy as np
@@ -31,7 +33,7 @@ _CONN_PARAMS: dict = {
 def _get_client():
     """Return a clickhouse-connect client or None when unavailable."""
     try:
-        import clickhouse_connect  # noqa: F811
+        import clickhouse_connect
         return clickhouse_connect.get_client(**_CONN_PARAMS)
     except Exception:
         return None
@@ -56,18 +58,18 @@ _RNG = np.random.RandomState(42)
 
 DEMO_SOURCES = ["voz", "vnexpress", "youtube", "tinhte"]
 DEMO_TOPICS = [
-    (1, "iPhone 16 Pro Max", ["iphone", "apple", "camera", "giá", "review"]),
-    (2, "NVIDIA RTX 5090", ["gpu", "nvidia", "rtx", "gaming", "hiệu năng"]),
-    (3, "AI trong giáo dục", ["ai", "chatgpt", "giáo dục", "học sinh", "trường"]),
-    (4, "VinFast VF9", ["vinfast", "ô tô điện", "vf9", "giá", "đánh giá"]),
-    (5, "Samsung Galaxy S26", ["samsung", "galaxy", "s26", "snapdragon", "ai"]),
-    (6, "Laptop sinh viên 2026", ["laptop", "sinh viên", "giá rẻ", "ram", "ssd"]),
-    (7, "5G Việt Nam", ["5g", "viettel", "mobifone", "tốc độ", "phủ sóng"]),
-    (8, "Robot hút bụi", ["robot", "hút bụi", "xiaomi", "ecovacs", "giá"]),
-    (9, "Bảo mật dữ liệu", ["bảo mật", "hack", "lộ dữ liệu", "vpn", "password"]),
-    (10, "Gemini vs ChatGPT", ["gemini", "chatgpt", "so sánh", "ai", "google"]),
-    (11, "Đồng hồ thông minh", ["smartwatch", "apple watch", "samsung", "garmin", "sức khỏe"]),
-    (12, "Máy ảnh mirrorless", ["máy ảnh", "sony", "canon", "mirrorless", "nhiếp ảnh"]),
+    (1,  "iPhone 16 Pro Max",     ["iphone", "apple", "camera", "giá", "review"]),
+    (2,  "NVIDIA RTX 5090",       ["gpu", "nvidia", "rtx", "gaming", "hiệu năng"]),
+    (3,  "AI trong giáo dục",     ["ai", "chatgpt", "giáo dục", "học sinh", "trường"]),
+    (4,  "VinFast VF9",           ["vinfast", "ô tô điện", "vf9", "giá", "đánh giá"]),
+    (5,  "Samsung Galaxy S26",    ["samsung", "galaxy", "s26", "snapdragon", "ai"]),
+    (6,  "Laptop sinh viên 2026", ["laptop", "sinh viên", "giá rẻ", "ram", "ssd"]),
+    (7,  "5G Việt Nam",           ["5g", "viettel", "mobifone", "tốc độ", "phủ sóng"]),
+    (8,  "Robot hút bụi",         ["robot", "hút bụi", "xiaomi", "ecovacs", "giá"]),
+    (9,  "Bảo mật dữ liệu",      ["bảo mật", "hack", "lộ dữ liệu", "vpn", "password"]),
+    (10, "Gemini vs ChatGPT",     ["gemini", "chatgpt", "so sánh", "ai", "google"]),
+    (11, "Đồng hồ thông minh",    ["smartwatch", "apple watch", "samsung", "garmin", "sức khỏe"]),
+    (12, "Máy ảnh mirrorless",    ["máy ảnh", "sony", "canon", "mirrorless", "nhiếp ảnh"]),
 ]
 
 
@@ -101,7 +103,6 @@ def _make_fct_topic_activity(days: int = 30) -> pd.DataFrame:
                 ts = round(0.40 * vel + 0.30 * acc + 0.30 * eng_norm * 100, 2)
 
                 neg_ratio = round(neg / max(mc, 1), 4)
-                pos_ratio = round(pos / max(mc, 1), 4)
 
                 rows.append({
                     "topic_id": tid,
@@ -114,6 +115,9 @@ def _make_fct_topic_activity(days: int = 30) -> pd.DataFrame:
                     "mention_count": mc,
                     "unique_authors": max(1, int(mc * 0.7)),
                     "engagement_sum": eng,
+                    "reaction_sum": int(eng * 0.5),
+                    "comment_sum": int(eng * 0.3),
+                    "view_sum": int(eng * 5),
                     "velocity": vel,
                     "acceleration": acc,
                     "engagement_normalized": eng_norm,
@@ -123,16 +127,14 @@ def _make_fct_topic_activity(days: int = 30) -> pd.DataFrame:
                     "neg_count": neg,
                     "neu_count": neu,
                     "neg_ratio": neg_ratio,
-                    "pos_ratio": pos_ratio,
-                    "avg_sentiment_confidence": round(_RNG.uniform(0.6, 0.95), 3),
                     "neg_ratio_24h_avg": round(neg_ratio + _RNG.normal(0, 0.02), 4),
                     "mention_7d_avg": round(base_mentions * src_factor, 2),
                     "mention_7d_stddev": round(abs(_RNG.normal(4, 1.5)), 2),
                     "volume_zscore": round(_RNG.normal(0, 1.2), 3),
+                    "z_score_neg_ratio": round(_RNG.normal(0, 1.0), 3),
                     "computed_at": _dt.datetime.now(),
                 })
     df = pd.DataFrame(rows)
-    # Assign trend_rank per hour_bucket
     df["trend_rank"] = df.groupby("hour_bucket")["trend_score"] \
         .rank(ascending=False, method="first").astype(int)
     return df
@@ -158,7 +160,7 @@ def _make_fct_crisis_events() -> pd.DataFrame:
             "trigger_conditions": conds,
             "neg_ratio": round(_RNG.uniform(0.25, 0.75), 2),
             "mention_velocity": round(_RNG.uniform(20, 400), 1),
-            "evidence_doc_ids": [f"post_{_RNG.randint(1000,9999)}" for _ in range(3)],
+            "evidence_post_ids": [f"post_{_RNG.randint(1000,9999)}" for _ in range(3)],
             "affected_topics": tids,
             "affected_topic_labels": labels,
             "severity_rank": {"HIGH": 3, "MEDIUM": 2, "LOW": 1}[sev],
@@ -176,43 +178,23 @@ def _make_dim_topics() -> pd.DataFrame:
             "coherence_score": round(_RNG.uniform(0.3, 0.7), 3),
             "model_version": "bertopic-v1",
             "total_mentions": _RNG.randint(5000, 80000),
-            "unique_authors": _RNG.randint(500, 8000),
             "first_seen": _dt.date.today() - _dt.timedelta(days=_RNG.randint(20, 60)),
             "last_seen": _dt.date.today(),
-            "active_days": _RNG.randint(15, 60),
         })
     return pd.DataFrame(rows)
 
 
-def _make_keyword_freq() -> pd.DataFrame:
-    words = [
-        "iPhone", "Samsung", "AI", "ChatGPT", "Gemini", "laptop", "GPU",
-        "VinFast", "5G", "robot", "camera", "giá rẻ", "đánh giá", "so sánh",
-        "pin", "hiệu năng", "bảo mật", "hack", "Snapdragon", "OLED",
-        "gaming", "RAM", "SSD", "sạc nhanh", "cập nhật",
-    ]
-    rows = []
-    for w in words:
-        for src in DEMO_SOURCES:
-            rows.append({
-                "keyword": w,
-                "source": src,
-                "estimated_count": _RNG.randint(50, 5000),
-            })
-    return pd.DataFrame(rows)
-
-
 # ---------------------------------------------------------------------------
-# Public query functions  (all @st.cache_data)
+# Public query functions  (all @st.cache_data with ttl=900)
 # ---------------------------------------------------------------------------
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def get_topic_activity(
     start_date: _dt.date | None = None,
     end_date: _dt.date | None = None,
     sources: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Return fct_topic_activity, filtered."""
+    """Return fct_topic_activity, filtered.  ZERO JOINs."""
     if start_date is None:
         start_date = _dt.date.today() - _dt.timedelta(days=30)
     if end_date is None:
@@ -239,12 +221,12 @@ def get_topic_activity(
     return df
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def get_crisis_events(
     window_hours: int = 168,
     severities: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Return fct_crisis_events, filtered."""
+    """Return fct_crisis_events, filtered.  ZERO JOINs."""
     sev_clause = ""
     if severities:
         sev_list = ", ".join(f"'{s}'" for s in severities)
@@ -267,62 +249,11 @@ def get_crisis_events(
     return df
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=900, show_spinner=False)
 def get_dim_topics() -> pd.DataFrame:
-    """Return dim_topics."""
+    """Return dim_topics.  ZERO JOINs."""
     sql = "SELECT * FROM dim_topics ORDER BY total_mentions DESC"
     df = _query(sql)
     if df is None:
         df = _make_dim_topics()
-    return df
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def get_keyword_frequencies() -> pd.DataFrame:
-    """Aggregate keyword frequencies (latest window)."""
-    sql = """
-        SELECT keyword, source,
-               sum(estimated_count) AS estimated_count
-        FROM dwh_prod.stg_keyword_freq
-        WHERE window_start >= now() - INTERVAL 7 DAY
-        GROUP BY keyword, source
-        ORDER BY estimated_count DESC
-        LIMIT 100
-    """
-    df = _query(sql)
-    if df is None:
-        df = _make_keyword_freq()
-    return df
-
-
-@st.cache_data(ttl=300, show_spinner=False)
-def get_recent_posts(topic_id: int, limit: int = 25) -> pd.DataFrame:
-    """Return recent posts for a specific topic."""
-    sql = f"""
-        SELECT post_id, source, author_name, sentiment_label,
-               engagement, title,
-               substring(body, 1, 200) AS excerpt,
-               created_at
-        FROM dwh_prod.stg_posts
-        WHERE topic_id = {topic_id}
-        ORDER BY created_at DESC
-        LIMIT {limit}
-    """
-    df = _query(sql)
-    if df is None:
-        # Generate minimal demo posts
-        rows = []
-        labels = ["positive", "negative", "neutral"]
-        for i in range(limit):
-            rows.append({
-                "post_id": f"p_{topic_id}_{i}",
-                "source": random.choice(DEMO_SOURCES),
-                "author_name": f"user_{random.randint(100,9999)}",
-                "sentiment_label": random.choice(labels),
-                "engagement": random.randint(10, 2000),
-                "title": f"Bài viết #{i+1} về chủ đề {topic_id}",
-                "excerpt": "Lorem ipsum dolor sit amet, đây là nội dung mẫu cho bài viết...",
-                "created_at": _dt.datetime.now() - _dt.timedelta(hours=random.randint(1, 168)),
-            })
-        df = pd.DataFrame(rows)
     return df

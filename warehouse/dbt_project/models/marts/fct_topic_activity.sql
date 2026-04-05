@@ -1,22 +1,20 @@
 {{
     config(
-        materialized='table'
+        materialized='table',
+        engine='MergeTree()',
+        partition_by='toYYYYMM(bucket_date)',
+        order_by=['hour_bucket', 'source_type', 'trend_score']
     )
 }}
 
 /*
-    FACT: Topic Activity (Hourly)
+    FACT: Topic Activity (Hourly) — ⭐ Core Mart
 
     Design rationale (ClickHouse OLAP):
-      - Merges the previous fct_topic_trends_hourly AND
-        fct_sentiment_timeseries into ONE table.
-      - Both had the same grain (topic_id × source × hour_bucket),
-        so joining them at query time was redundant overhead.
-      - dim_sources (only 4 rows) is embedded as a CASE expression
-        to eliminate that JOIN entirely.
-      - Topic label is embedded at write time from stg_topics.
-      - Result: dashboard queries for Trending Topics and Sentiment
-        Explorer need ZERO joins on this table.
+      - Merges trend scoring + sentiment timeseries into ONE wide table.
+      - source_type and topic_label are embedded — ZERO JOINs for dashboards.
+      - Atomic metric sums (reaction_sum, comment_sum, view_sum) preserved
+        for granular breakdown even at aggregate level.
 
     Grain: topic_id × source × hour_bucket
 
@@ -58,22 +56,32 @@ with_engagement_norm AS (
     FROM with_velocity
 ),
 
--- 7-day rolling stats for Z-Score anomaly detection
+-- Rolling stats for anomaly detection + crisis thresholds
 with_rolling AS (
     SELECT
         *,
+        -- 24h rolling average of neg_ratio (baseline for crisis detection)
         avg(neg_ratio) OVER (
             PARTITION BY topic_id, source
             ORDER BY hour_bucket
             ROWS BETWEEN 24 PRECEDING AND CURRENT ROW
         ) AS neg_ratio_24h_avg,
 
+        -- 24h rolling stddev of neg_ratio (for z-score)
+        stddevPop(neg_ratio) OVER (
+            PARTITION BY topic_id, source
+            ORDER BY hour_bucket
+            ROWS BETWEEN 24 PRECEDING AND CURRENT ROW
+        ) AS neg_ratio_24h_stddev,
+
+        -- 7-day rolling average of mention_count
         avg(mention_count) OVER (
             PARTITION BY topic_id, source
             ORDER BY hour_bucket
             ROWS BETWEEN 168 PRECEDING AND CURRENT ROW
         ) AS mention_7d_avg,
 
+        -- 7-day rolling stddev of mention_count
         stddevPop(mention_count) OVER (
             PARTITION BY topic_id, source
             ORDER BY hour_bucket
@@ -90,29 +98,26 @@ SELECT
     hour_bucket,
     bucket_date,
 
-    -- Embed source type inline — eliminates dim_sources JOIN
-    multiIf(
-        source = 'voz',       'forum',
-        source = 'tinhte',    'forum',
-        source = 'vnexpress', 'news',
-        source = 'youtube',   'video',
-        'unknown'
-    ) AS source_type,
-
-    -- Topic label embedded at write time — eliminates dim_topics JOIN
+    -- Embedded dimensions (zero-JOIN for dashboards)
+    source_type,
     topic_label,
 
-    -- Volume
+    -- Volume metrics
     mention_count,
     unique_authors,
     engagement_sum,
+
+    -- Atomic metric sums (preserved from Spark → staging → intermediate → mart)
+    reaction_sum,
+    comment_sum,
+    view_sum,
 
     -- Trend components
     velocity,
     acceleration,
     engagement_normalized,
 
-    -- Trend Score
+    -- ⭐ Trend Score
     {{ trend_score_calc('velocity', 'acceleration', 'engagement_normalized') }}
         AS trend_score,
 
@@ -127,15 +132,20 @@ SELECT
     neg_count,
     neu_count,
     neg_ratio,
-    pos_ratio,
-    avg_sentiment_confidence,
 
-    -- Rolling stats for crisis detection / Sentiment Explorer
+    -- Rolling baselines for crisis detection / Sentiment Explorer
     neg_ratio_24h_avg,
     mention_7d_avg,
     mention_7d_stddev,
 
-    -- Z-Score: standard deviations from 7-day rolling mean
+    -- Z-Score: neg_ratio anomaly signal
+    CASE
+        WHEN neg_ratio_24h_stddev > 0
+        THEN (neg_ratio - neg_ratio_24h_avg) / neg_ratio_24h_stddev
+        ELSE 0.0
+    END AS z_score_neg_ratio,
+
+    -- Z-Score: volume anomaly signal
     CASE
         WHEN mention_7d_stddev > 0
         THEN (mention_count - mention_7d_avg) / mention_7d_stddev

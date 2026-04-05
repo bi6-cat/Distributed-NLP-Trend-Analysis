@@ -8,5 +8,5 @@ tech_trend_dbt:
       port: 8123
       user: admin
       password: clickhouse_secret
-      schema: dwh_prod
+      schema: tech_radar
       threads: 4

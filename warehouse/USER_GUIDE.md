@@ -10,7 +10,7 @@ SHOW DATABASES;
 
 docker exec -i clickhouse-server clickhouse-client -n < init_schema.sql
 
-USE dwh_prod;
+USE tech_radar;
 SHOW TABLES;
 
 exit;

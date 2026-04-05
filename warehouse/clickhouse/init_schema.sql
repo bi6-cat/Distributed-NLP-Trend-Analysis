@@ -1,56 +1,80 @@
-CREATE DATABASE IF NOT EXISTS dwh_prod;
+CREATE DATABASE IF NOT EXISTS tech_radar;
 
--- 1. stg_posts: Flattened, deduplicated, sentiment-labeled documents
-CREATE TABLE IF NOT EXISTS dwh_prod.stg_posts (
-    post_id         String,
-    source          LowCardinality(String),
+-- 1. stg_posts_core
+CREATE TABLE IF NOT EXISTS tech_radar.stg_posts_core (
+    post_id         String,                  -- Canonical PK across all stages
+    source          LowCardinality(String),  -- 'voz','tinhte','vnexpress','youtube'
     author_id       String,
     author_name     String,
-    title           String DEFAULT '',
+    title           Nullable(String),
     body            String,
-    segmented_text  String,
-    sentiment_label LowCardinality(String),
-    sentiment_score Float32,
-    topic_id        UInt32 DEFAULT 0,
-    engagement      UInt32 DEFAULT 0,
+    segmented_text  String,                  -- VnCoreNLP word-segmented output
+    parent_id       Nullable(String),        -- NULL if top-level post
+    reaction_count  Int32 DEFAULT 0,         -- Atomic: likes/reactions only
+    comment_count   Int32 DEFAULT 0,         -- Atomic: direct replies count
+    view_count      Nullable(Int32),         -- Atomic: YouTube views; NULL for others
     created_at      DateTime,
+    crawled_at      DateTime,
+    loaded_at       DateTime DEFAULT now()
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(created_at)
+ORDER BY (source, created_at, post_id)
+TTL created_at + INTERVAL 1 YEAR;
+
+-- 2. stg_posts_nlp
+CREATE TABLE IF NOT EXISTS tech_radar.stg_posts_nlp (
+    post_id         String,                  -- FK → stg_posts_core.post_id
+    sentiment_label LowCardinality(String),  -- 'positive','negative','neutral'
+    sentiment_score Float32,                 -- Model confidence 0.0–1.0
+    model_version   LowCardinality(String),  -- e.g., 'phobert_v1.2'
+    predicted_at    DateTime,
     loaded_at       DateTime DEFAULT now()
 ) ENGINE = ReplacingMergeTree(loaded_at)
-PARTITION BY toYYYYMM(created_at)
-ORDER BY (topic_id, created_at, source, post_id);
+ORDER BY (post_id);
 
--- 2. stg_topics: Topic labels from LDA/BERTopic
-CREATE TABLE IF NOT EXISTS dwh_prod.stg_topics (
-    topic_id        UInt32,
+-- 3. stg_post_topics
+CREATE TABLE IF NOT EXISTS tech_radar.stg_post_topics (
+    post_id           String,                -- FK → stg_posts_core.post_id
+    topic_id          Int32,                 -- LDA/BERTopic assignment
+    topic_probability Float32,               -- Assignment confidence 0.0–1.0
+    model_type        LowCardinality(String), -- 'lda' | 'bertopic'
+    predicted_at      DateTime,
+    loaded_at         DateTime DEFAULT now()
+) ENGINE = ReplacingMergeTree(loaded_at)
+ORDER BY (post_id);
+
+-- 4. stg_topics
+CREATE TABLE IF NOT EXISTS tech_radar.stg_topics (
+    topic_id        Int32,
     label           String,
     top_keywords    Array(String),
-    coherence_score Float32 DEFAULT 0.0,
+    coherence_score Nullable(Float32),
     model_version   String,
     created_at      DateTime DEFAULT now()
 ) ENGINE = ReplacingMergeTree(created_at)
 ORDER BY (topic_id, model_version);
 
--- 3. stg_keyword_freq: Count-Min Sketch keyword frequencies
-CREATE TABLE IF NOT EXISTS dwh_prod.stg_keyword_freq (
+-- 5. stg_keyword_freq
+CREATE TABLE IF NOT EXISTS tech_radar.stg_keyword_freq (
     keyword         String,
     window_start    DateTime,
     window_end      DateTime,
-    estimated_count UInt64,
+    estimated_count Int64,
     source          LowCardinality(String)
-) ENGINE = ReplacingMergeTree(window_start)
+) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(window_start)
 ORDER BY (keyword, window_start);
 
--- 4. stg_crisis_events: Anomaly detection output
-CREATE TABLE IF NOT EXISTS dwh_prod.stg_crisis_events (
+-- 6. stg_crisis_events
+CREATE TABLE IF NOT EXISTS tech_radar.stg_crisis_events (
     event_id           String,
     detected_at        DateTime,
-    severity           LowCardinality(String),
-    anomaly_score      Float32,
+    severity           LowCardinality(String),  -- 'LOW','MEDIUM','HIGH'
+    anomaly_score      Float64,
     trigger_conditions Array(String),
-    affected_topics    Array(UInt32),
+    affected_topics    Array(Int32),
     neg_ratio          Float32,
     mention_velocity   Float32,
-    evidence_doc_ids   Array(String)
-) ENGINE = ReplacingMergeTree(detected_at)
+    evidence_post_ids  Array(String)            -- References stg_posts_core.post_id
+) ENGINE = MergeTree()
 ORDER BY (detected_at, event_id);
