@@ -13,6 +13,19 @@ data/*.db
 .vagrant/
 tutorial_work/
 
+# ── Model files (too large for git) ──────────
+output/**/*.pkl
+output/**/*.model
+output/**/*_model
+output/**/bertopic_model
+output/**/lda_model*
+output/**/*.npy
+output/**/*.bin
+output/**/*.h5
+output/**/*.pt
+output/**/*.pth
+output/**/*.ckpt
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
