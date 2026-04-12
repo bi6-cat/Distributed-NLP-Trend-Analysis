@@ -7,7 +7,7 @@ import pandas as pd
 import hashlib
 import io
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlparse, urlunparse
 
 # ==============================
 # CONFIG
@@ -37,6 +37,33 @@ if HDFS_HOSTS and HDFS_HOST not in HDFS_HOSTS:
     HDFS_HOSTS.insert(0, HDFS_HOST)
 elif not HDFS_HOSTS:
     HDFS_HOSTS = [HDFS_HOST]
+
+# Hostname -> IP mapping so redirect URLs from the NameNode
+# (which contain DataNode hostnames like "worker1") can be resolved
+# from machines outside the cluster.
+DATANODE_HOST_MAP = {
+    "master":  "192.168.56.11",
+    "worker1": "192.168.56.12",
+    "worker2": "192.168.56.13",
+    "storage": "192.168.56.14",
+}
+# Allow overriding via env, e.g. HDFS_DATANODE_MAP="worker1=100.x.y.z,worker2=100.a.b.c"
+for pair in os.getenv("HDFS_DATANODE_MAP", "").split(","):
+    pair = pair.strip()
+    if "=" in pair:
+        k, v = pair.split("=", 1)
+        DATANODE_HOST_MAP[k.strip()] = v.strip()
+
+
+def _resolve_redirect_url(location: str) -> str:
+    """Rewrite DataNode hostname in a WebHDFS redirect URL to its IP."""
+    parsed = urlparse(location)
+    mapped_ip = DATANODE_HOST_MAP.get(parsed.hostname)
+    if mapped_ip:
+        # Replace hostname, keep port
+        new_netloc = f"{mapped_ip}:{parsed.port}" if parsed.port else mapped_ip
+        location = urlunparse(parsed._replace(netloc=new_netloc))
+    return location
 
 PROGRESS_FILE = f"{HDFS_BASE_DIR}/progress.json"
 CRAWLED_FILE = f"{HDFS_BASE_DIR}/crawled_links.json"
@@ -89,14 +116,22 @@ def select_reachable_hdfs_host():
 def hdfs_request(method, path, op, extra_params=None, allow_redirects=True, data=None):
     url, params = hdfs_url(path, op, extra_params)
     try:
-        return requests.request(
+        r = requests.request(
             method,
             url,
             params=params,
-            allow_redirects=allow_redirects,
+            allow_redirects=False,        # always intercept redirects
             timeout=TIMEOUT,
             data=data,
         )
+
+        # If the caller wants redirects followed AND the NameNode issued one,
+        # rewrite the DataNode hostname to its IP and follow manually.
+        if allow_redirects and r.is_redirect:
+            location = _resolve_redirect_url(r.headers["Location"])
+            r = requests.request(method, location, timeout=TIMEOUT, data=data)
+
+        return r
     except requests.exceptions.RequestException as e:
         raise RuntimeError(
             "[HDFS CONNECT ERROR] Cannot connect to WebHDFS "
@@ -147,6 +182,7 @@ def hdfs_write(path, data, overwrite=True):
     if not location:
         raise RuntimeError(f"[HDFS] Missing redirect Location for CREATE: {path}")
 
+    location = _resolve_redirect_url(location)
     r2 = requests.put(location, data=data.encode("utf-8"), timeout=TIMEOUT)
     r2.raise_for_status()
 
@@ -163,6 +199,7 @@ def hdfs_append(path, data):
     if not location:
         raise RuntimeError(f"[HDFS] Missing redirect Location for APPEND: {path}")
 
+    location = _resolve_redirect_url(location)
     r2 = requests.post(location, data=data.encode("utf-8"), timeout=TIMEOUT)
     r2.raise_for_status()
 
