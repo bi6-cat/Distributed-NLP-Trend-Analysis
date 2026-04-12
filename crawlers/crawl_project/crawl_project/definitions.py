@@ -34,20 +34,17 @@ def _run_crawler_script(context: OpExecutionContext, script_name: str) -> None:
 
 
 @op(ins={"start": In(Nothing)})
-def crawl_vatvo(context: OpExecutionContext, start) -> None:
-    del start
+def crawl_vatvo(context: OpExecutionContext) -> None:
     _run_crawler_script(context, "vatvo.py")
 
 
 @op(ins={"start": In(Nothing)})
-def crawl_vnexpress(context: OpExecutionContext, start) -> None:
-    del start
+def crawl_vnexpress(context: OpExecutionContext) -> None:
     _run_crawler_script(context, "vnexpress.py")
 
 
 @op(ins={"start": In(Nothing)})
-def crawl_voz(context: OpExecutionContext, start) -> None:
-    del start
+def crawl_voz(context: OpExecutionContext) -> None:
     _run_crawler_script(context, "voz.py")
 
 
@@ -57,8 +54,8 @@ def start_parallel_crawl() -> None:
     return None
 
 
-@op
-def finish_parallel_crawl(vatvo: None, vnexpress: None, voz: None) -> None:
+@op(ins={"vatvo": In(Nothing), "vnexpress": In(Nothing), "voz": In(Nothing)})
+def finish_parallel_crawl() -> None:
     # Join op to mark that all crawler branches completed.
     return None
 
