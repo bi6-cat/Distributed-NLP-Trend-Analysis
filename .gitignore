@@ -1,3 +1,31 @@
+# ── Data files (không commit raw/fake data lên git) ──────────
+data/fake/
+data/raw/
+data/*.csv
+data/*.json
+data/*.parquet
+data/*.db
+# Giữ lại các file config trong data/ (stopwords, slang dict...)
+!data/stopwords_vi.txt
+!data/slang_dict.json
+
+# ── Vagrant & Tutorial work ──────────
+.vagrant/
+tutorial_work/
+
+# ── Model files (too large for git) ──────────
+output/**/*.pkl
+output/**/*.model
+output/**/*_model
+output/**/bertopic_model
+output/**/lda_model*
+output/**/*.npy
+output/**/*.bin
+output/**/*.h5
+output/**/*.pt
+output/**/*.pth
+output/**/*.ckpt
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
