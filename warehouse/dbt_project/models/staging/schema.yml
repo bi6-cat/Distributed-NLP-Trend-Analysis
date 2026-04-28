@@ -1,0 +1,99 @@
+version: 2
+
+sources:
+  - name: tech_radar
+    description: >
+      ClickHouse staging tables — 3 decoupled landing zones loaded independently
+      by Spark jobs (M2, M3, M4), plus supporting reference tables.
+    database: tech_radar
+    tables:
+      - name: stg_posts_core
+        description: >
+          Core post data with atomic engagement metrics. Loaded by M2 (flatten+clean+dedup).
+        columns:
+          - name: post_id
+            description: Canonical PK across all stages
+            tests:
+              - not_null
+              - unique
+          - name: source
+            tests:
+              - not_null
+              - accepted_values:
+                  arguments:
+                    values: ['voz', 'tinhte', 'vnexpress', 'youtube']
+
+      - name: stg_posts_nlp
+        description: >
+          PhoBERT sentiment labels. Loaded by M4.
+          ReplacingMergeTree ensures latest prediction wins on reruns.
+        columns:
+          - name: post_id
+            tests:
+              - not_null
+
+      - name: stg_post_topics
+        description: >
+          LDA/BERTopic topic assignments. Loaded by M3.
+          ReplacingMergeTree ensures latest assignment wins on weekly reruns.
+        columns:
+          - name: post_id
+            tests:
+              - not_null
+
+      - name: stg_topics
+        description: >
+          Topic lookup table — human-readable labels and keywords. Loaded by M3.
+        columns:
+          - name: topic_id
+            tests:
+              - not_null
+              - unique
+
+      - name: stg_keyword_freq
+        description: >
+          Count-Min Sketch keyword frequencies per sliding window. Loaded by M3.
+
+      - name: stg_crisis_events
+        description: >
+          Isolation Forest anomaly detection output. Loaded by M4.
+        columns:
+          - name: event_id
+            tests:
+              - not_null
+              - unique
+
+models:
+  - name: stg_posts
+    description: >
+      Unified staging VIEW — the core ELT responsibility. JOINs the 3 decoupled
+      landing tables (stg_posts_core, stg_posts_nlp, stg_post_topics) and computes
+      engagement from atomic metrics. LEFT JOINs ensure posts without NLP/topic
+      labels still appear (graceful partial pipeline handling).
+    columns:
+      - name: post_id
+        description: Canonical post identifier
+        tests:
+          - not_null
+      - name: source
+        description: "Data source: voz, tinhte, vnexpress, youtube"
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['voz', 'tinhte', 'vnexpress', 'youtube']
+      - name: engagement
+        description: >
+          Weighted engagement score computed by dbt from atomic metrics:
+          reaction_count + comment_count × 2 + coalesce(view_count, 0) / 100
+      - name: sentiment_label
+        description: "PhoBERT sentiment: positive, negative, neutral (nullable — LEFT JOIN)"
+      - name: source_type
+        description: "Derived platform type: forum, news, video"
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['forum', 'news', 'video', 'unknown']
+      - name: created_at
+        tests:
+          - not_null
