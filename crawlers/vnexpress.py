@@ -399,3 +399,12 @@ print("DONE")
 print(f"Checkpoint: {CHECKPOINT_PATH}")
 print(f"Post CSV: {POST_CSV_PATH}")
 print(f"Comment CSV: {COMMENT_CSV_PATH}")
+
+print("\n===========================================")
+print("🚀 Bắt đầu tự động đẩy dữ liệu lên HDFS...")
+print("===========================================")
+try:
+    from upload_to_hdfs import main as upload_main
+    upload_main()
+except Exception as e:
+    print(f"❌ Lỗi khi tự động tải dữ liệu lên HDFS: {e}")
