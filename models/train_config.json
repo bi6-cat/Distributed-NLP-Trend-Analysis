@@ -1,0 +1,43 @@
+{
+  "model_name": "vinai/phobert-base",
+  "num_labels": 3,
+  "label_map": {
+    "0": "Negative",
+    "1": "Neutral",
+    "2": "Positive"
+  },
+
+  "max_length": 256,
+  "batch_size": 32,
+  "eval_batch_size": 64,
+  "num_epochs": 5,
+  "learning_rate": 2e-5,
+  "weight_decay": 0.01,
+  "warmup_ratio": 0.1,
+  "gradient_accumulation_steps": 1,
+  "max_grad_norm": 1.0,
+  "fp16": true,
+
+  "class_weights": [1.0, 12.0, 1.0],
+
+  "data": {
+    "train_sentences": "data/train_sentences.csv",
+    "train_sentiments": "data/train_sentiments.csv",
+    "val_sentences": "data/val_sentences.csv",
+    "val_sentiments": "data/val_sentiments.csv",
+    "test_sentences": "data/test_sentences.csv",
+    "test_sentiments": "data/test_sentiments.csv"
+  },
+
+  "output_dir": "models/phobert_finetuned",
+  "checkpoint_dir": "models/checkpoints",
+  "best_metric": "eval_macro_f1",
+
+  "logging_steps": 100,
+  "eval_steps": 500,
+  "save_steps": 500,
+  "save_total_limit": 3,
+  "load_best_model_at_end": true,
+
+  "seed": 42
+}
