@@ -1,58 +1,39 @@
 import json
+import os
+import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
 import re
-import os
-import uuid
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-import pyarrow.fs as fs  # type: ignore[import-not-found]
 from selenium import webdriver
+from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 import time
 
 # ========== CONFIG ==========
+SCRIPT_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.getenv("DATA_DIR", str(SCRIPT_DIR / "data")))
+VNEXPRESS_DIR = DATA_DIR / "vnexpress"
+
 BASE_URLS = [
-    "https://vnexpress.net/khoa-hoc-cong-nghe/the-gioi-tu-nhien",
-    # "https://vnexpress.net/khoa-hoc-cong-nghe/ai",
-    # Thêm các base_url khác tại đây
-    # Pipeline sẽ chạy tuần tự từng base_url, không ảnh hưởng nhau khi một base kết thúc.
-    #
-    # Ví dụ:
-    # "https://vnexpress.net/khoa-hoc-cong-nghe/san-pham-moi",
+    "https://vnexpress.net/khoa-hoc-cong-nghe/thiet-bi",
+    "https://vnexpress.net/khoa-hoc-cong-nghe/ai",
+    "https://vnexpress.net/khoa-hoc-cong-nghe/vu-tru",
+    "https://vnexpress.net/khoa-hoc-cong-nghe/chuyen-doi-so"
 ]
 
-CHECKPOINT_PATH = Path("vnexpress_checkpoint.json")
-HDFS_HOST = os.getenv("HDFS_HOST", "192.168.56.11")
-HDFS_PORT = int(os.getenv("HDFS_PORT", "9000"))
-HDFS_USER = os.getenv("HDFS_USER", "hdfs")
-HDFS_POST_DIR = os.getenv("HDFS_POST_DIR", "/data/nlp-trend/raw/vnexpress/posts")
-HDFS_COMMENT_DIR = os.getenv("HDFS_COMMENT_DIR", "/data/nlp-trend/raw/vnexpress/comments")
+VNEXPRESS_DIR.mkdir(parents=True, exist_ok=True)
+
+CHECKPOINT_PATH = VNEXPRESS_DIR / "vnexpress_checkpoint.json"
+POST_CSV_PATH = VNEXPRESS_DIR / "post_vnexpress.csv"
+COMMENT_CSV_PATH = VNEXPRESS_DIR / "comment_vnexpress.csv"
 
 REQUEST_TIMEOUT = 30
 SLEEP_AFTER_OPEN_POST = 3
 MAX_CLICK_ROUNDS = 300
-
-
-def create_hdfs_client():
-    return fs.HadoopFileSystem(host=HDFS_HOST, port=HDFS_PORT, user=HDFS_USER)
-
-
-def write_records_to_hdfs(hdfs_client, hdfs_dir: str, records: list, prefix: str):
-    if not records:
-        return
-
-    hdfs_client.create_dir(hdfs_dir, recursive=True)
-    file_name = f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex[:8]}.csv"
-    hdfs_path = f"{hdfs_dir.rstrip('/')}/{file_name}"
-
-    df = pd.DataFrame(records)
-    payload = df.to_csv(index=False).encode("utf-8-sig")
-
-    with hdfs_client.open_output_stream(hdfs_path) as stream:
-        stream.write(payload)
 
 # ========== CHECKPOINT HELPERS ==========
 def load_checkpoint(path: Path):
@@ -73,6 +54,65 @@ def save_checkpoint(path: Path, checkpoint: dict):
 def append_unique(lst, value):
     if value not in lst:
         lst.append(value)
+
+def create_driver():
+    profile_dir = tempfile.TemporaryDirectory(prefix="vnexpress-chrome-")
+    options = Options()
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_argument(f"--user-data-dir={profile_dir.name}")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    return webdriver.Chrome(options=options), profile_dir
+
+def close_driver(driver, profile_dir):
+    try:
+        if driver is not None:
+            driver.quit()
+    except Exception:
+        pass
+
+    if profile_dir is not None:
+        try:
+            profile_dir.cleanup()
+        except Exception:
+            pass
+
+def is_driver_session_lost(exc: Exception):
+    text = str(exc).lower()
+    return any(
+        keyword in text
+        for keyword in [
+            "connection refused",
+            "connection reset by peer",
+            "connectionreseterror",
+            "connection aborted",
+            "connectionabortederror",
+            "failed to establish a new connection",
+            "max retries exceeded",
+            "invalid session id",
+            "chrome not reachable",
+            "session deleted",
+            "disconnected",
+            "winerror 10054",
+            "winerror 10061",
+            "/session/",
+        ]
+    )
+
+def restart_driver(driver_state: dict):
+    close_driver(driver_state.get("driver"), driver_state.get("profile_dir"))
+    driver_state["driver"], driver_state["profile_dir"] = create_driver()
+
+def safe_parse_post_and_comments(driver_state: dict, link: str):
+    for attempt in range(2):
+        try:
+            return parse_post_and_comments_from_link(driver_state["driver"], link)
+        except Exception as exc:
+            if attempt == 0 and is_driver_session_lost(exc):
+                print("  -> driver bị mất session, khởi động lại và thử lại link này")
+                restart_driver(driver_state)
+                continue
+            raise
 
 def ensure_base_state(checkpoint: dict, base_url: str):
     bases = checkpoint.setdefault("bases", {})
@@ -233,16 +273,21 @@ def parse_post_and_comments_from_link(driver, link: str):
 
     return post_record, comment_records
 
+def append_records_to_csv(path: Path, records: list):
+    if not records:
+        return
+    df = pd.DataFrame(records)
+    write_header = not path.exists()
+    df.to_csv(path, mode="a", index=False, header=write_header, encoding="utf-8-sig")
+
 # ========== PAGE-BY-PAGE RUN ==========
 checkpoint = load_checkpoint(CHECKPOINT_PATH)
 for base_url in BASE_URLS:
     ensure_base_state(checkpoint, base_url)
 save_checkpoint(CHECKPOINT_PATH, checkpoint)
-hdfs_client = create_hdfs_client()
 
-options = Options()
-# options.add_argument("--headless")  # Bật nếu muốn chạy ẩn
-driver = webdriver.Chrome(options=options)
+driver_state = {}
+driver_state["driver"], driver_state["profile_dir"] = create_driver()
 
 try:
     processed_posts = set(checkpoint.get("processed_posts", []))
@@ -320,9 +365,9 @@ try:
 
                 print(f"[POST] {link_post}")
                 try:
-                    post_record, comment_records = parse_post_and_comments_from_link(driver, link_post)
-                    write_records_to_hdfs(hdfs_client, HDFS_POST_DIR, [post_record], "post")
-                    write_records_to_hdfs(hdfs_client, HDFS_COMMENT_DIR, comment_records, "comment")
+                    post_record, comment_records = safe_parse_post_and_comments(driver_state, link_post)
+                    append_records_to_csv(POST_CSV_PATH, [post_record])
+                    append_records_to_csv(COMMENT_CSV_PATH, comment_records)
 
                     append_unique(base_state["crawled_links"], link_post)
                     append_unique(checkpoint["processed_posts"], link_post)
@@ -348,9 +393,18 @@ try:
         print(f"=== END BASE: {base_url} ===")
 
 finally:
-    driver.quit()
+    close_driver(driver_state.get("driver"), driver_state.get("profile_dir"))
 
 print("DONE")
 print(f"Checkpoint: {CHECKPOINT_PATH}")
-print(f"HDFS posts dir: {HDFS_POST_DIR}")
-print(f"HDFS comments dir: {HDFS_COMMENT_DIR}")
+print(f"Post CSV: {POST_CSV_PATH}")
+print(f"Comment CSV: {COMMENT_CSV_PATH}")
+
+print("\n===========================================")
+print("🚀 Bắt đầu tự động đẩy dữ liệu lên HDFS...")
+print("===========================================")
+try:
+    from upload_to_hdfs import main as upload_main
+    upload_main()
+except Exception as e:
+    print(f"❌ Lỗi khi tự động tải dữ liệu lên HDFS: {e}")
