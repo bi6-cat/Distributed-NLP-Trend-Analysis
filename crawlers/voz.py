@@ -3,11 +3,10 @@ import json
 import logging
 import random
 import os
-import uuid
+import tempfile
 import pandas as pd
 from pathlib import Path
 from bs4 import BeautifulSoup
-from pyarrow import fs
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -47,13 +46,14 @@ Link_FORUM = [
               "https://voz.vn/f/may-tinh-xach-tay.72/",
               "https://voz.vn/f/dien-thoai-di-dong.76/"]
 
-CHECKPOINT_FILE = "checkpoint.json"
+SCRIPT_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path(os.getenv("DATA_DIR", str(SCRIPT_DIR / "data")))
+VOZ_DIR = DATA_DIR / "voz"
 
-HDFS_HOST = os.getenv("HDFS_HOST", "192.168.56.11")
-HDFS_PORT = int(os.getenv("HDFS_PORT", "9000"))
-HDFS_USER = os.getenv("HDFS_USER", "hdfs")
-HDFS_POST_DIR = os.getenv("HDFS_POST_DIR", "/data/nlp-trend/raw/voz/posts")
-HDFS_COMMENT_DIR = os.getenv("HDFS_COMMENT_DIR", "/data/nlp-trend/raw/voz/comments")
+CHECKPOINT_FILE = VOZ_DIR / "checkpoint.json"
+
+POST_FILE = VOZ_DIR / "posts.csv"
+COMMENT_FILE = VOZ_DIR / "comments.csv"
 
 DELAY_MIN = 2
 DELAY_MAX = 5
@@ -68,33 +68,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-def create_hdfs_client():
-    return fs.HadoopFileSystem(host=HDFS_HOST, port=HDFS_PORT, user=HDFS_USER)
-
-
-def write_records_to_hdfs(hdfs_client, hdfs_dir: str, records: list, prefix: str):
-    if not records:
-        return
-
-    hdfs_client.create_dir(hdfs_dir, recursive=True)
-    file_name = f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}.csv"
-    hdfs_path = f"{hdfs_dir.rstrip('/')}/{file_name}"
-
-    df = pd.DataFrame(records)
-    payload = df.to_csv(index=False).encode("utf-8-sig")
-
-    with hdfs_client.open_output_stream(hdfs_path) as stream:
-        stream.write(payload)
-
 # =====================================================
 # DRIVER
 # =====================================================
 
 def create_driver():
+    profile_dir = tempfile.TemporaryDirectory(prefix="voz-chrome-")
     options = Options()
     options.add_argument("--disable-blink-features=AutomationControlled")
-    return webdriver.Chrome(options=options)
+    options.add_argument(f"--user-data-dir={profile_dir.name}")
+    options.add_argument("--no-first-run")
+    options.add_argument("--no-default-browser-check")
+    return webdriver.Chrome(options=options), profile_dir
 
 # =====================================================
 # CHECKPOINT STRUCTURE
@@ -116,12 +101,15 @@ def create_driver():
 """
 
 def load_checkpoint():
-    if not Path(CHECKPOINT_FILE).exists():
+    if not CHECKPOINT_FILE.exists():
         return {"forums": {}, "threads": {}}
-    return json.load(open(CHECKPOINT_FILE))
+    with CHECKPOINT_FILE.open("r", encoding="utf-8") as f:
+        return json.load(f)
 
 def save_checkpoint(cp):
-    json.dump(cp, open(CHECKPOINT_FILE, "w"), indent=2)
+    CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with CHECKPOINT_FILE.open("w", encoding="utf-8") as f:
+        json.dump(cp, f, indent=2)
 
 # =====================================================
 # LOAD PAGE
@@ -294,19 +282,23 @@ def parse_posts(soup, driver, url):
 # SAVE
 # =====================================================
 
-def save_data(posts, comments, hdfs_client):
+def save_data(posts, comments):
 
     if posts:
-        write_records_to_hdfs(hdfs_client, HDFS_POST_DIR, posts, "posts")
+        POST_FILE.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame(posts)
+        df.to_csv(POST_FILE, mode="a", index=False, header=not POST_FILE.exists())
 
     if comments:
-        write_records_to_hdfs(hdfs_client, HDFS_COMMENT_DIR, comments, "comments")
+        COMMENT_FILE.parent.mkdir(parents=True, exist_ok=True)
+        df = pd.DataFrame(comments)
+        df.to_csv(COMMENT_FILE, mode="a", index=False, header=not COMMENT_FILE.exists())
 
 # =====================================================
 # CRAWL THREAD
 # =====================================================
 
-def crawl_thread(driver, thread_url, checkpoint, hdfs_client):
+def crawl_thread(driver, thread_url, checkpoint):
 
     # skip nếu done
     if checkpoint["threads"].get(thread_url, {}).get("done"):
@@ -350,7 +342,7 @@ def crawl_thread(driver, thread_url, checkpoint, hdfs_client):
     }
     save_checkpoint(checkpoint)
 
-    save_data(posts, comments, hdfs_client)
+    save_data(posts, comments)
 
     logger.info(f"✅ DONE THREAD: {thread_url}")
 
@@ -358,7 +350,7 @@ def crawl_thread(driver, thread_url, checkpoint, hdfs_client):
 # CRAWL FORUM
 # =====================================================
 
-def crawl_forum(driver, forum_url, checkpoint, hdfs_client):
+def crawl_forum(driver, forum_url, checkpoint):
 
     logger.info(f"📂 FORUM: {forum_url}")
 
@@ -384,7 +376,7 @@ def crawl_forum(driver, forum_url, checkpoint, hdfs_client):
         logger.info(f"   🔗 THREADS FOUND: {len(threads)}")
 
         for thread in threads:
-            crawl_thread(driver, thread, checkpoint, hdfs_client)
+            crawl_thread(driver, thread, checkpoint)
 
         # mark page done
         checkpoint["forums"].setdefault(forum_url, {"done_pages": []})
@@ -402,17 +394,18 @@ def run():
 
     logger.info("🚀 START PIPELINE")
 
-    driver = create_driver()
+    driver, profile_dir = create_driver()
     checkpoint = load_checkpoint()
-    hdfs_client = create_hdfs_client()
 
-    for forum in Link_FORUM:
-        try:
-            crawl_forum(driver, forum, checkpoint, hdfs_client)
-        except Exception as e:
-            logger.error(f"❌ ERROR FORUM {forum}: {e}")
-
-    driver.quit()
+    try:
+        for forum in Link_FORUM:
+            try:
+                crawl_forum(driver, forum, checkpoint)
+            except Exception as e:
+                logger.error(f"❌ ERROR FORUM {forum}: {e}")
+    finally:
+        driver.quit()
+        profile_dir.cleanup()
 
     logger.info("🎯 FINISHED")
 
@@ -422,3 +415,12 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+    print("\n===========================================")
+    print("🚀 Bắt đầu tự động đẩy dữ liệu lên HDFS...")
+    print("===========================================")
+    try:
+        from upload_to_hdfs import main as upload_main
+        upload_main()
+    except Exception as e:
+        print(f"❌ Lỗi khi tự động tải dữ liệu lên HDFS: {e}")
