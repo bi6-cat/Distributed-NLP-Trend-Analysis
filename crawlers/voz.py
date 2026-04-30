@@ -415,3 +415,12 @@ def run():
 
 if __name__ == "__main__":
     run()
+
+    print("\n===========================================")
+    print("🚀 Bắt đầu tự động đẩy dữ liệu lên HDFS...")
+    print("===========================================")
+    try:
+        from upload_to_hdfs import main as upload_main
+        upload_main()
+    except Exception as e:
+        print(f"❌ Lỗi khi tự động tải dữ liệu lên HDFS: {e}")
