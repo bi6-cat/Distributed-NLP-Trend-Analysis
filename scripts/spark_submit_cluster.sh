@@ -20,16 +20,21 @@
 
 set -euo pipefail
 
-# ── Cấu hình cluster — M2 điền vào ──────────────────────────────────────────
-SPARK_MASTER="${SPARK_MASTER_URL:-spark://CLUSTER_MASTER:7077}"
-HDFS_BASE="${HDFS_NAMENODE:-hdfs://CLUSTER_MASTER:9000}"
-WORKER_PYTHON="${WORKER_PYTHON_PATH:-/opt/conda/envs/nlp-trend/bin/python}"
+export HADOOP_USER_NAME=zett
+
+# ── Cấu hình cluster — điền từ docs/CLUSTER_INFO.md ─────────────────────────
+# Master Node: 192.168.56.11 (Spark Master + HDFS NameNode)
+# Storage Node: 192.168.56.14 (ClickHouse)
+SPARK_MASTER="${SPARK_MASTER_URL:-spark://192.168.56.11:7077}"
+HDFS_BASE="${HDFS_NAMENODE:-hdfs://192.168.56.11:9000}"
+WORKER_PYTHON="${WORKER_PYTHON_PATH:-/opt/miniconda/envs/nlp-trend/bin/python}"
+CLICKHOUSE_HOST="${CLICKHOUSE_HOST:-192.168.56.14}"
 
 # ── Cấu hình job ─────────────────────────────────────────────────────────────
-NUM_EXECUTORS="${NUM_EXECUTORS:-3}"
-EXECUTOR_CORES="${EXECUTOR_CORES:-4}"
-EXECUTOR_MEMORY="${EXECUTOR_MEMORY:-6g}"
-DRIVER_MEMORY="${DRIVER_MEMORY:-4g}"
+NUM_EXECUTORS="${NUM_EXECUTORS:-2}"
+EXECUTOR_CORES="${EXECUTOR_CORES:-2}"
+EXECUTOR_MEMORY="${EXECUTOR_MEMORY:-3g}"
+DRIVER_MEMORY="${DRIVER_MEMORY:-2g}"
 
 # ── Đường dẫn local (relative từ project root) ───────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -37,11 +42,17 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 ZIP_PATH="$PROJECT_ROOT/dist/nlp_trend.zip"
 
 # ── Đường dẫn HDFS ───────────────────────────────────────────────────────────
-HDFS_MODEL="$HDFS_BASE/models/phobert_finetuned/final"
-HDFS_SLANG="$HDFS_BASE/data/ref/slang_dict.json"
-HDFS_STOPWORDS="$HDFS_BASE/data/ref/stopwords_vi.txt"
-HDFS_INPUT="$HDFS_BASE/data/raw/voz/date=*/*.json"
-HDFS_OUTPUT="$HDFS_BASE/data/staged/voz_sentiment/"
+# Dùng /user/zett/ — khớp với upload_to_hdfs.py (HDFS_USER=zett)
+HDFS_RAW="$HDFS_BASE/user/zett/raw_data"         # nơi M1 đã upload CSV
+HDFS_STAGED="$HDFS_BASE/user/zett/staged"         # output sau khi xử lý
+HDFS_MODEL="$HDFS_BASE/user/zett/models/phobert_finetuned/final"
+HDFS_SLANG="$HDFS_BASE/user/zett/ref/slang_dict.json"
+HDFS_STOPWORDS="$HDFS_BASE/user/zett/ref/stopwords_vi.txt"
+# Đọc cả 3 nguồn CSV — M1 upload dạng CSV (không phải JSON, không partition by date)
+HDFS_INPUT_VOZ="$HDFS_RAW/voz"
+HDFS_INPUT_VATVO="$HDFS_RAW/vatvo"
+HDFS_INPUT_VNE="$HDFS_RAW/vnexpress"
+HDFS_OUTPUT="$HDFS_STAGED/sentiment/"
 
 # =============================================================================
 # Hàm tiện ích
@@ -51,24 +62,25 @@ log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 upload_to_hdfs() {
     log "Upload model lên HDFS..."
-    hdfs dfs -mkdir -p "$HDFS_BASE/models/phobert_finetuned"
-    hdfs dfs -put -f "$PROJECT_ROOT/models/phobert_finetuned/final" \
-        "$HDFS_BASE/models/phobert_finetuned/"
+    /opt/hadoop/bin/hdfs dfs -mkdir -p "$HDFS_MODEL"
+    # /opt/hadoop/bin/hdfs dfs -put -f "$PROJECT_ROOT/models/phobert_finetuned/final" \
+    #     "$(dirname "$HDFS_MODEL")/"
 
-    log "Upload data files lên HDFS..."
-    hdfs dfs -mkdir -p "$HDFS_BASE/data/ref"
-    hdfs dfs -put -f "$PROJECT_ROOT/data/slang_dict.json"   "$HDFS_SLANG"
-    hdfs dfs -put -f "$PROJECT_ROOT/data/stopwords_vi.txt"  "$HDFS_STOPWORDS"
+    log "Upload data files (slang + stopwords) lên HDFS..."
+    /opt/hadoop/bin/hdfs dfs -mkdir -p "$(dirname "$HDFS_SLANG")"
+    /opt/hadoop/bin/hdfs dfs -put -f "$PROJECT_ROOT/data/slang_dict.json"   "$HDFS_SLANG"
+    /opt/hadoop/bin/hdfs dfs -put -f "$PROJECT_ROOT/data/stopwords_vi.txt"  "$HDFS_STOPWORDS"
 
     log "Upload hoàn tất."
-    hdfs dfs -ls "$HDFS_BASE/models/phobert_finetuned/final"
+    /opt/hadoop/bin/hdfs dfs -ls "$HDFS_MODEL" || true
 }
 
 build_zip() {
     log "Đóng gói Python code → $ZIP_PATH"
     mkdir -p "$PROJECT_ROOT/dist"
     cd "$PROJECT_ROOT"
-    zip -r "$ZIP_PATH" preprocessing/ spark_jobs/ models/ \
+    # Thêm schemas/ — chứa VozAdapter, VatVoAdapter, VnExpressAdapter, models.py
+    zip -r "$ZIP_PATH" preprocessing/ schemas/ spark_jobs/ models/ \
         -x "**/__pycache__/*" -x "**/*.pyc" -x "models/phobert_finetuned/*"
     log "Zip size: $(du -sh "$ZIP_PATH" | cut -f1)"
 }
@@ -77,10 +89,13 @@ submit_job() {
     log "Submit Spark job..."
     log "  Master       : $SPARK_MASTER"
     log "  Executors    : $NUM_EXECUTORS x $EXECUTOR_CORES cores x $EXECUTOR_MEMORY"
-    log "  HDFS input   : $HDFS_INPUT"
+    log "  HDFS VOZ     : $HDFS_INPUT_VOZ"
+    log "  HDFS VatVo   : $HDFS_INPUT_VATVO"
+    log "  HDFS VnE     : $HDFS_INPUT_VNE"
     log "  HDFS output  : $HDFS_OUTPUT"
+    log "  ClickHouse   : $CLICKHOUSE_HOST:8123"
 
-    spark-submit \
+    /opt/spark/bin/spark-submit \
         --master "$SPARK_MASTER" \
         --deploy-mode client \
         --num-executors "$NUM_EXECUTORS" \
@@ -100,10 +115,14 @@ submit_job() {
         --conf "spark.executorEnv.NLP_MODEL_PATH=$HDFS_MODEL" \
         --conf "spark.executorEnv.NLP_SLANG_DICT=$HDFS_SLANG" \
         --conf "spark.executorEnv.NLP_STOPWORDS=$HDFS_STOPWORDS" \
-        --conf "spark.executorEnv.HDFS_INPUT=$HDFS_INPUT" \
+        --conf "spark.executorEnv.HDFS_INPUT=$HDFS_INPUT_VOZ" \
         --conf "spark.executorEnv.HDFS_OUTPUT=$HDFS_OUTPUT" \
+        --conf "spark.executorEnv.CLICKHOUSE_HOST=$CLICKHOUSE_HOST" \
+        --conf "spark.executorEnv.CLICKHOUSE_PORT=8123" \
+        --conf "spark.executorEnv.CLICKHOUSE_DB=tech_radar" \
+        --conf "spark.executorEnv.CLICKHOUSE_USER=default" \
         \
-        "$PROJECT_ROOT/spark_jobs/preprocess_job.py"
+        "$PROJECT_ROOT/spark_jobs/cleaning_job.py"
 }
 
 # =============================================================================
