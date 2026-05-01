@@ -51,7 +51,7 @@ Sau khi cài đặt xong, bạn có thể truy cập các giao diện quản lý
 | **HDFS NameNode** | [http://192.168.56.11:9870](http://192.168.56.11:9870) | Quản lý file trên cụm Hadoop |
 | **Spark Master** | [http://192.168.56.11:8080](http://192.168.56.11:8080) | Quản lý các job tính toán phân tán |
 | **Airflow UI** | [http://192.168.56.11:8081](http://192.168.56.11:8081) | Lập lịch và quản lý Pipeline (DAGs) |
-| **ClickHouse** | 192.168.56.14:8123 | Port HTTP của Database lưu trữ |
+| **ClickHouse** | [http://192.168.56.14:8123](http://192.168.56.14:8123) | Port HTTP của Database lưu trữ |
 
 > [!NOTE]
 > Username/Password Airflow: `admin` / `admin`
