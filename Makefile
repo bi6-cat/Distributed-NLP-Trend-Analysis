@@ -28,3 +28,16 @@ setup-vms-multipass:
 	multipass launch -n worker1 -c 4 -m 16G -d 50G
 	multipass launch -n worker2 -c 4 -m 16G -d 50G
 	multipass launch -n storage -c 4 -m 16G -d 50G
+
+# Automation pipeline for Member 2 to run end-to-end cleaning and ingestion
+run-cleaning-pipeline:
+	@echo "================================================"
+	@echo "   RUNNING DISTRIBUTED CLEANING PIPELINE"
+	@echo "================================================"
+	@echo "[1/2] Đang chạy Spark Cleaning Job trên cluster..."
+	vagrant ssh master -c "bash /vagrant/scripts/spark_submit_cluster.sh"
+	@echo "\n[2/2] Đang nạp dữ liệu từ HDFS vào ClickHouse..."
+	vagrant ssh master -c "bash /vagrant/scripts/ingest_hdfs_to_clickhouse.sh"
+	@echo "\n================================================"
+	@echo "             PIPELINE HOÀN TẤT!"
+	@echo "================================================"
