@@ -248,4 +248,4 @@ nlp-worker-2/
 *.vbox-prev
 .venv/
 __pycache__/
-crawlers/data/
+

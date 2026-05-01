@@ -45,7 +45,8 @@
         "https://voz.vn/s/review-san-pham.103/page-41",
         "https://voz.vn/s/review-san-pham.103/page-42",
         "https://voz.vn/s/review-san-pham.103/page-43",
-        "https://voz.vn/s/review-san-pham.103/page-44"
+        "https://voz.vn/s/review-san-pham.103/page-44",
+        "https://voz.vn/s/review-san-pham.103/page-45"
       ]
     }
   },
@@ -3407,8 +3408,8 @@
       "last_page": 9
     },
     "https://voz.vn/t/trai-nghiem-ssd-kingspec-nx-series-nvme-pcie-gen3x4-gia-re.665444/": {
-      "done": false,
-      "last_page": 24
+      "done": true,
+      "last_page": 63
     },
     "https://voz.vn/t/tay-sen-mat-xa-xiaomi-diiib-x-powerful-pulse-booster-shower.668590/": {
       "done": true,
@@ -3451,8 +3452,52 @@
       "last_page": 4
     },
     "https://voz.vn/t/danh-gia-ban-phim-co-duoi-500k-ziyoung-lang-k3.664263/": {
-      "done": false,
+      "done": true,
+      "last_page": 8
+    },
+    "https://voz.vn/t/hanh-trinh-mua-panel-moi-cung-tu-taobao-ve-thay-cho-man-hinh-dell-ultrasharp-u2414h-da-qua-8-nam-su-dung-va-cai-ket.659985/": {
+      "done": true,
+      "last_page": 11
+    },
+    "https://voz.vn/t/mo-hop-ban-phim-royal-kludge-rk-h81.662315/": {
+      "done": true,
       "last_page": 7
+    },
+    "https://voz.vn/t/tien-it-ma-muon-hit-thom-innocn-27m2u-mini-led-27-4k-hdr1000.655281/": {
+      "done": true,
+      "last_page": 19
+    },
+    "https://voz.vn/t/thu-nghiem-ep-xung-ram-ddr5-voi-asus-z790-apex-va-ram-kingston-fury-renegade.665497/": {
+      "done": true,
+      "last_page": 1
+    },
+    "https://voz.vn/t/s3-stax-tai-nghe-over-ear-nha-edifier-nhung-lai-rat-audeze.662283/": {
+      "done": true,
+      "last_page": 1
+    },
+    "https://voz.vn/t/gt3-se-co-muc-gia-pho-thong-huong-den-nhung-nguoi-mua-smartwatch-lan-dau.659359/": {
+      "done": true,
+      "last_page": 4
+    },
+    "https://voz.vn/t/bien-the-tom-kho-vo-cuc-binh-cu-ruou-moi.660543/": {
+      "done": true,
+      "last_page": 32
+    },
+    "https://voz.vn/t/danh-gia-iphone-12-pro-max-2022-gia-duoi-20-trieu-co-nen-mua.645486/": {
+      "done": true,
+      "last_page": 5
+    },
+    "https://voz.vn/t/gillette-fusion-proshield-power-dang-cap-danh-cho-phai-manh.648664/": {
+      "done": true,
+      "last_page": 3
+    },
+    "https://voz.vn/t/unbox-synology-ds1522-giai-phap-nas-cho-nhu-cau-giai-tri-va-lam-viec.647417/": {
+      "done": true,
+      "last_page": 1
+    },
+    "https://voz.vn/t/tong-hop-review-gen-13-13900k-nong-va-ngon-dien-13600k-se-la-mon-hoi-lon-nhat.649452/": {
+      "done": false,
+      "last_page": 13
     }
   }
 }
