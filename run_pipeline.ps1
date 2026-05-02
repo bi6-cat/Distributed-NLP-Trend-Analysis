@@ -5,7 +5,15 @@ Write-Host "================================================" -ForegroundColor C
 Write-Host "   RUNNING DISTRIBUTED CLEANING PIPELINE" -ForegroundColor Cyan
 Write-Host "================================================" -ForegroundColor Cyan
 
-Write-Host "`n[1/2] Running Spark Cleaning Job..." -ForegroundColor Yellow
+Write-Host "`n[1/3] Uploading raw data to HDFS..." -ForegroundColor Yellow
+python crawlers/upload_to_hdfs.py
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "`n[ERROR] Data upload to HDFS failed!" -ForegroundColor Red
+    exit $LASTEXITCODE
+}
+
+Write-Host "`n[2/3] Running Spark Cleaning Job..." -ForegroundColor Yellow
 vagrant ssh master -c "bash /vagrant/scripts/spark_submit_cluster.sh"
 
 if ($LASTEXITCODE -ne 0) {
@@ -13,7 +21,10 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-Write-Host "`n[2/2] Loading data from HDFS into ClickHouse..." -ForegroundColor Yellow
+Write-Host "`n[3/3] Loading data from HDFS into ClickHouse..." -ForegroundColor Yellow
+# Khởi tạo schema trước khi nạp dữ liệu
+Write-Host "   -> Initializing ClickHouse Schema..." -ForegroundColor Gray
+vagrant ssh storage -c "clickhouse-client --multiquery < /vagrant/warehouse/clickhouse/init_schema.sql"
 vagrant ssh master -c "bash /vagrant/scripts/ingest_hdfs_to_clickhouse.sh"
 
 if ($LASTEXITCODE -ne 0) {
