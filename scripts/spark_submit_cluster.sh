@@ -32,8 +32,8 @@ CLICKHOUSE_HOST="${CLICKHOUSE_HOST:-192.168.56.14}"
 
 # ── Cấu hình job ─────────────────────────────────────────────────────────────
 NUM_EXECUTORS="${NUM_EXECUTORS:-2}"
-EXECUTOR_CORES="${EXECUTOR_CORES:-5}"
-EXECUTOR_MEMORY="${EXECUTOR_MEMORY:-3g}"
+EXECUTOR_CORES="${EXECUTOR_CORES:-4}"
+EXECUTOR_MEMORY="${EXECUTOR_MEMORY:-2g}"
 DRIVER_MEMORY="${DRIVER_MEMORY:-2g}"
 
 # ── Đường dẫn local (relative từ project root) ───────────────────────────────
@@ -80,7 +80,7 @@ build_zip() {
     mkdir -p "$PROJECT_ROOT/dist"
     cd "$PROJECT_ROOT"
     # Thêm schemas/ — chứa VozAdapter, VatVoAdapter, VnExpressAdapter, models.py
-    zip -r "$ZIP_PATH" preprocessing/ schemas/ spark_jobs/ models/ \
+    zip -r "$ZIP_PATH" preprocessing/ schemas/ spark_jobs/ models/ algorithms/ \
         -x "**/__pycache__/*" -x "**/*.pyc" -x "models/phobert_finetuned/*"
     log "Zip size: $(du -sh "$ZIP_PATH" | cut -f1)"
 }

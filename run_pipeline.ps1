@@ -5,22 +5,22 @@ Write-Host "================================================" -ForegroundColor C
 Write-Host "   RUNNING DISTRIBUTED CLEANING PIPELINE" -ForegroundColor Cyan
 Write-Host "================================================" -ForegroundColor Cyan
 
-Write-Host "`n[1/2] Đang chạy Spark Cleaning Job trên cluster..." -ForegroundColor Yellow
+Write-Host "`n[1/2] Running Spark Cleaning Job..." -ForegroundColor Yellow
 vagrant ssh master -c "bash /vagrant/scripts/spark_submit_cluster.sh"
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "`n[ERROR] Spark Cleaning Job thất bại!" -ForegroundColor Red
+    Write-Host "`n[ERROR] Spark Cleaning Job failed!" -ForegroundColor Red
     exit $LASTEXITCODE
 }
 
-Write-Host "`n[2/2] Đang nạp dữ liệu từ HDFS vào ClickHouse..." -ForegroundColor Yellow
+Write-Host "`n[2/2] Loading data from HDFS into ClickHouse..." -ForegroundColor Yellow
 vagrant ssh master -c "bash /vagrant/scripts/ingest_hdfs_to_clickhouse.sh"
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "`n[ERROR] Nạp dữ liệu vào ClickHouse thất bại!" -ForegroundColor Red
+    Write-Host "`n[ERROR] Loading data from HDFS into ClickHouse failed!" -ForegroundColor Red
     exit $LASTEXITCODE
 }
 
 Write-Host "`n================================================" -ForegroundColor Green
-Write-Host "             PIPELINE HOÀN TẤT!" -ForegroundColor Green
+Write-Host "             PIPELINE SUCCESS!" -ForegroundColor Green
 Write-Host "================================================" -ForegroundColor Green

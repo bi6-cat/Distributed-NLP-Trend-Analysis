@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     StructType, StructField,
-    StringType, IntegerType, LongType,
+    StringType, IntegerType, LongType, TimestampType
 )
 
 # ── Config (override bằng env var hoặc spark-submit --conf) ──────────────────
@@ -63,20 +63,17 @@ STOP_PATH  = os.environ.get("NLP_STOPWORDS",  f"{HDFS_BASE}/user/zett/ref/stopwo
 OUTPUT_SCHEMA = StructType([
     StructField("post_id",        StringType(),  False),
     StructField("source",         StringType(),  False),
-    StructField("post_type",      StringType(),  True),
     StructField("author",         StringType(),  True),
-    StructField("author_id",      StringType(),  True),
     StructField("title",          StringType(),  True),
-    StructField("body",           StringType(),  True),   # clean() output
+    StructField("body",           StringType(),  True),   # clean_html() output
+    StructField("clean_text",     StringType(),  True),   # clean() output
     StructField("segmented_text", StringType(),  True),   # preprocess() output
     StructField("parent_id",      StringType(),  True),
     StructField("reaction_count", IntegerType(), True),
     StructField("view_count",     IntegerType(), True),
     StructField("comment_count",  IntegerType(), True),
-    StructField("created_at",     LongType(),    True),   # Unix timestamp (giây)
-    StructField("crawled_at",     LongType(),    False),  # Unix timestamp khi job chạy
-    StructField("tags",           StringType(),  True),
-    StructField("url",            StringType(),  True),
+    StructField("created_at",     TimestampType(), True), 
+    StructField("crawled_at",     TimestampType(), False),
 ])
 
 
@@ -115,25 +112,23 @@ def process_voz_comments(iterator, slang_path: str, stop_path: str, crawled_ts: 
 
     for _, row in df.iterrows():
         content = str(row.get("comment", "") or "")
-        body    = preprocessor.clean(content)
+        body    = preprocessor.clean_html(content)
+        clean_t = preprocessor.clean(content)
         seg     = preprocessor.preprocess(content)
         yield (
             str(row.get("comment_id", "")),
             str(row.get("source", "voz")),
-            str(row.get("post_type", "comment")),
             str(row.get("user", "") or ""),
-            str(row.get("id_user", "") or ""),
             None,                                        # title
             body,
+            clean_t,
             seg,
             str(row.get("id_post", "") or ""),           # parent_id
             int(row.get("reaction_count", 0) or 0),
             None,                                        # view_count
             None,                                        # comment_count
-            int(row.get("created_at", 0) or 0),
-            crawled_ts,
-            None,                                        # tags
-            str(row.get("url", "") or ""),
+            _to_datetime(row.get("created_at")),
+            _to_datetime(crawled_ts),
         )
 
 
@@ -165,25 +160,23 @@ def process_voz_posts(iterator, slang_path: str, stop_path: str, crawled_ts: int
 
     for _, row in df.iterrows():
         content = str(row.get("title", "") or "")
-        body    = preprocessor.clean(content)
+        body    = preprocessor.clean_html(content)
+        clean_t = preprocessor.clean(content)
         seg     = preprocessor.preprocess(content)
         yield (
             str(row.get("id_post", "")),
             str(row.get("source", "voz")),
-            str(row.get("post_type", "post")),
             str(row.get("author_name", "") or ""),
-            str(row.get("id_author", "") or ""),
             content,                                     # title
             body,
+            clean_t,
             seg,
             None,                                        # parent_id (post gốc)
             None,                                        # reaction_count
             _safe_int(row.get("view_count")),
             _safe_int(row.get("comment_count")),
-            int(row.get("created_at", 0) or 0),
-            crawled_ts,
-            str(row.get("tags", "") or ""),
-            None,                                        # url
+            _to_datetime(row.get("created_at")),
+            _to_datetime(crawled_ts),
         )
 
 
@@ -215,25 +208,23 @@ def process_vatvo(iterator, slang_path: str, stop_path: str, crawled_ts: int):
 
     for _, row in df.iterrows():
         content = str(row.get("content", "") or "")
-        body    = preprocessor.clean(content)
+        body    = preprocessor.clean_html(content)
+        clean_t = preprocessor.clean(content)
         seg     = preprocessor.preprocess(content)
         yield (
             str(row.get("post_id", "")),
             str(row.get("source", "vatvo")),
-            str(row.get("post_type", "article")),
             str(row.get("author", "") or ""),
-            None,                                        # author_id
             str(row.get("title", "") or ""),
             body,
+            clean_t,
             seg,
             None,                                        # parent_id
             None,                                        # reaction_count
             None,                                        # view_count
             None,                                        # comment_count
-            int(row.get("created_at", 0) or 0),
-            crawled_ts,
-            None,                                        # tags
-            str(row.get("url", "") or ""),
+            _to_datetime(row.get("created_at")),
+            _to_datetime(crawled_ts),
         )
 
 
@@ -265,25 +256,23 @@ def process_vnexpress_posts(iterator, slang_path: str, stop_path: str, crawled_t
 
     for _, row in df.iterrows():
         content = str(row.get("body", "") or "")
-        body    = preprocessor.clean(content)
+        body    = preprocessor.clean_html(content)
+        clean_t = preprocessor.clean(content)
         seg     = preprocessor.preprocess(content)
         yield (
             str(row.get("post_id", "")),
             str(row.get("source", "vnexpress")),
-            "article",
             str(row.get("author", "VnExpress")),
-            None,                                        # author_id
             str(row.get("title", "") or ""),
             body,
+            clean_t,
             seg,
             None,                                        # parent_id
             _safe_int(row.get("reaction_count")),
             _safe_int(row.get("view_count")),
             _safe_int(row.get("comment_count")),
-            int(row.get("created_at", 0) or 0),
-            crawled_ts,
-            None,                                        # tags
-            str(row.get("url", "") or ""),
+            _to_datetime(row.get("created_at")),
+            _to_datetime(crawled_ts),
         )
 
 
@@ -315,25 +304,23 @@ def process_vnexpress_comments(iterator, slang_path: str, stop_path: str, crawle
 
     for _, row in df.iterrows():
         content = str(row.get("body", "") or "")
-        body    = preprocessor.clean(content)
+        body    = preprocessor.clean_html(content)
+        clean_t = preprocessor.clean(content)
         seg     = preprocessor.preprocess(content)
         yield (
             str(row.get("post_id", "")),
             str(row.get("source", "vnexpress")),
-            "comment",
             str(row.get("author", "") or ""),
-            None,                                        # author_id
             None,                                        # title
             body,
+            clean_t,
             seg,
             str(row.get("parent_id", "") or ""),
             _safe_int(row.get("reaction_count")),
             None,                                        # view_count
             None,                                        # comment_count
-            int(row.get("created_at", 0) or 0),
-            crawled_ts,
-            None,                                        # tags
-            str(row.get("url", "") or ""),
+            _to_datetime(row.get("created_at")),
+            _to_datetime(crawled_ts),
         )
 
 
@@ -347,6 +334,16 @@ def _safe_int(val) -> int | None:
         return int(float(str(val)))
     except (ValueError, TypeError):
         return None
+
+def _to_datetime(ts_val):
+    from datetime import datetime, timezone
+    if ts_val is None:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    try:
+        ts = float(str(ts_val))
+        return datetime.fromtimestamp(ts, tz=timezone.utc)
+    except (ValueError, TypeError):
+        return datetime.fromtimestamp(0, tz=timezone.utc)
 
 
 def _resolve_hdfs(path: str) -> str:
@@ -468,11 +465,14 @@ def main():
         when(col("post_id").isNull() | (col("post_id") == "None"), expr("uuid()")).otherwise(col("post_id"))
     )
 
+    # Cần cache() vì pipeline rất nặng (NLP) và uuid() là non-deterministic
+    result_df = result_df.cache()
+
     before_dedup = result_df.count()
     logger.info(f"[Cleaning] Tổng bản ghi sau clean (đã drop exact duplicates): {before_dedup:,}")
 
     # Thống kê theo nguồn (trước dedup)
-    result_df.groupBy("source", "post_type").count().orderBy("source").show()
+    result_df.groupBy("source").count().orderBy("source").show()
 
     # ── MinHash LSH Deduplication ─────────────────────────────────────────────
     if enable_dedup:
