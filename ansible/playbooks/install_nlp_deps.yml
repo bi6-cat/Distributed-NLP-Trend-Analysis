@@ -22,11 +22,24 @@
         executable: "{{ conda_env_bin }}"
         state: present
 
+    - name: Cài mmh3 (MurmurHash3 — dùng bởi CountMinSketch)
+      pip:
+        name: mmh3
+        executable: "{{ conda_env_bin }}"
+        state: present
+
     - name: Xác nhận datasketch đã cài
       shell: "/opt/miniconda/envs/nlp-trend/bin/python -c \"import datasketch; print('datasketch', datasketch.__version__)\""
       register: datasketch_check
       changed_when: false
 
+    - name: Xác nhận mmh3 đã cài
+      shell: "/opt/miniconda/envs/nlp-trend/bin/python -c \"import mmh3; print('mmh3', mmh3.version)\""
+      register: mmh3_check
+      changed_when: false
+
     - name: In kết quả xác nhận
       debug:
-        msg: "{{ datasketch_check.stdout }}"
+        msg:
+          - "{{ datasketch_check.stdout }}"
+          - "{{ mmh3_check.stdout }}"
