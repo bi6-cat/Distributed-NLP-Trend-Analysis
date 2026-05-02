@@ -19,7 +19,7 @@
 
 - name: Cài đặt dependencies cho Hadoop
   apt:
-    name: ['wget', 'rsync', 'unzip', 'tar']
+    name: ['wget', 'rsync', 'unzip', 'zip', 'tar']
     state: present
 
 - name: Kiểm tra file Hadoop archive đã tồn tại chưa
