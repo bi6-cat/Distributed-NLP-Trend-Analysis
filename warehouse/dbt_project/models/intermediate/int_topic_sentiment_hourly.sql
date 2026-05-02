@@ -18,8 +18,8 @@ SELECT
     uniqExact(s.author_id)                          AS unique_authors,
 
     -- Atomic metric sums
-    sum(s.reaction_count)                           AS reaction_sum,
-    sum(s.comment_count)                            AS comment_sum,
+    sum(coalesce(s.reaction_count, 0))              AS reaction_sum,
+    sum(coalesce(s.comment_count, 0))               AS comment_sum,
     sum(coalesce(s.view_count, 0))                  AS view_sum,
 
     -- Sentiment distribution
@@ -36,7 +36,7 @@ FROM (
         topic_id, source, source_type, created_at,
         engagement, author_id, reaction_count, comment_count,
         view_count, sentiment_label
-    FROM {{ ref('stg_posts') }}
+    FROM {{ ref('int_posts_enriched') }}
 ) AS s
 LEFT JOIN {{ source('tech_radar', 'stg_topics') }}  AS t
     ON s.topic_id = t.topic_id

@@ -20,8 +20,8 @@ SELECT
     c.view_count        AS view_count,
 
     -- ENGAGEMENT
-    (c.reaction_count + c.comment_count * 2
-     + coalesce(c.view_count, 0) / 100) AS engagement,
+    (coalesce(c.reaction_count, 0) * {{ var('weight_reaction') }} + coalesce(c.comment_count, 0) * {{ var('weight_comment') }}
+     + coalesce(c.view_count, 0) * {{ var('weight_view') }}) AS engagement,
 
     -- NLP LABELS
     coalesce(n.sentiment_label, 'neutral') AS sentiment_label,
@@ -46,9 +46,9 @@ SELECT
     toDate(c.created_at)        AS created_date,
     c.crawled_at        AS crawled_at
 
-FROM {{ source('tech_radar', 'stg_posts_core') }}       AS c
-LEFT JOIN {{ source('tech_radar', 'stg_posts_nlp') }}    AS n ON c.post_id = n.post_id
-LEFT JOIN {{ source('tech_radar', 'stg_post_topics') }}  AS t ON c.post_id = t.post_id
+FROM {{ ref('stg_posts_core') }}       AS c
+LEFT JOIN {{ ref('stg_posts_nlp') }}    AS n ON c.post_id = n.post_id
+LEFT JOIN {{ ref('stg_post_topics') }}  AS t ON c.post_id = t.post_id
 
 WHERE c.body != ''
   AND c.created_at >= today() - INTERVAL 90 DAY

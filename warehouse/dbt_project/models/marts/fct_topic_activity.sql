@@ -7,24 +7,6 @@
     )
 }}
 
-/*
-    FACT: Topic Activity (Hourly) — ⭐ Core Mart
-
-    Design rationale (ClickHouse OLAP):
-      - Merges trend scoring + sentiment timeseries into ONE wide table.
-      - source_type and topic_label are embedded — ZERO JOINs for dashboards.
-      - Atomic metric sums (reaction_sum, comment_sum, view_sum) preserved
-        for granular breakdown even at aggregate level.
-
-    Grain: topic_id × source × hour_bucket
-
-    Trend Score formula:
-        TrendScore(t) = α·V(t) + β·A(t) + γ·E(t)
-          V = Velocity (mentions/hour)        α = 0.40
-          A = Acceleration (ΔV/Δt)            β = 0.30
-          E = Normalized engagement           γ = 0.30
-*/
-
 WITH hourly AS (
     SELECT *
     FROM {{ ref('int_topic_sentiment_hourly') }}
@@ -41,7 +23,7 @@ with_velocity AS (
     FROM hourly
 ),
 
--- Min-max normalise engagement within the same calendar day
+-- Min-max normalise engagement
 with_engagement_norm AS (
     SELECT
         *,
@@ -60,14 +42,14 @@ with_engagement_norm AS (
 with_rolling AS (
     SELECT
         *,
-        -- 24h rolling average of neg_ratio (baseline for crisis detection)
+        -- 24h rolling average of neg_ratio
         avg(neg_ratio) OVER (
             PARTITION BY topic_id, source
             ORDER BY hour_bucket
             ROWS BETWEEN 24 PRECEDING AND CURRENT ROW
         ) AS neg_ratio_24h_avg,
 
-        -- 24h rolling stddev of neg_ratio (for z-score)
+        -- 24h rolling stddev of neg_ratio
         stddevPop(neg_ratio) OVER (
             PARTITION BY topic_id, source
             ORDER BY hour_bucket
@@ -98,7 +80,7 @@ SELECT
     hour_bucket,
     bucket_date,
 
-    -- Embedded dimensions (zero-JOIN for dashboards)
+    -- Embedded dimensions
     source_type,
     topic_label,
 
@@ -107,7 +89,7 @@ SELECT
     unique_authors,
     engagement_sum,
 
-    -- Atomic metric sums (preserved from Spark → staging → intermediate → mart)
+    -- Atomic metric sums
     reaction_sum,
     comment_sum,
     view_sum,
@@ -117,11 +99,11 @@ SELECT
     acceleration,
     engagement_normalized,
 
-    -- ⭐ Trend Score
+    -- Trend Score
     {{ trend_score_calc('velocity', 'acceleration', 'engagement_normalized') }}
         AS trend_score,
 
-    -- Rank within this hour (for Top-N queries)
+    -- Rank within this hour
     row_number() OVER (
         PARTITION BY hour_bucket
         ORDER BY {{ trend_score_calc('velocity', 'acceleration', 'engagement_normalized') }} DESC
