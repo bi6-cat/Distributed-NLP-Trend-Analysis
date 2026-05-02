@@ -1,5 +1,5 @@
 """
-spark_jobs/cleaning_job.py — M2: Spark Cleaning & Schema Normalisation Job
+spark_jobs/cleaning_job.py — M2: Spark Cleaning, Schema Normalisation & Dedup Job
 
 Luồng:
     HDFS /user/zett/raw_data/
@@ -9,6 +9,8 @@ Luồng:
                     /comment_vnexpress.csv    → VnExpressAdapter
                                 ↓
               TextPreprocessor.clean() (lazy init trong mapPartitions)
+                                ↓
+              MinHashDeduplicator (driver-side LSH, Jaccard ≥ 0.8)
                                 ↓
     Output Parquet: /user/zett/staged/stg_posts_core/
 
@@ -24,6 +26,9 @@ Cách chạy trên cluster (từ master node):
         --conf spark.executorEnv.NLP_STOPWORDS=hdfs:///user/zett/ref/stopwords_vi.txt \\
         spark_jobs/cleaning_job.py
 
+    # Bỏ qua bước dedup (test nhanh):
+        spark_jobs/cleaning_job.py --no-dedup
+
 Biến môi trường (tuỳ chỉnh qua --conf spark.executorEnv.*):
     HDFS_BASE       : hdfs://192.168.56.11:9000
     NLP_SLANG_DICT  : path slang_dict.json trên HDFS
@@ -31,8 +36,14 @@ Biến môi trường (tuỳ chỉnh qua --conf spark.executorEnv.*):
     HDFS_OUTPUT     : đường dẫn HDFS ghi kết quả Parquet
 """
 
+import argparse
+import logging
 import os
+import sys
 from datetime import datetime, timezone
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logger = logging.getLogger(__name__)
 
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
@@ -363,14 +374,29 @@ def _resolve_hdfs(path: str) -> str:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
-def main():
-    import sys
+def _parse_args() -> argparse.Namespace:
+    """Parse CLI arguments được truyền sau `spark-submit ... cleaning_job.py`."""
+    parser = argparse.ArgumentParser(description="M2 Spark Cleaning & Dedup Job")
+    parser.add_argument(
+        "--no-dedup",
+        action="store_true",
+        default=False,
+        help="Bỏ qua bước MinHash LSH deduplication (dùng khi test nhanh)",
+    )
+    # spark-submit truyền thêm các args không liên quan — bỏ qua
+    args, _ = parser.parse_known_args()
+    return args
 
+
+def main():
     # Fix encoding tiếng Việt trên terminal Windows
     if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         import io
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
+
+    cli_args = _parse_args()
+    enable_dedup = not cli_args.no_dedup
 
     spark = SparkSession.builder \
         .appName("M2_CleaningJob") \
@@ -386,6 +412,7 @@ def main():
     print(f"[INFO] Stopwords   : {STOP_PATH}")
 
     # ── Đọc 5 file CSV từ HDFS ───────────────────────────────────────────────
+    sc = spark.sparkContext
     read_csv = lambda path: (
         spark.read
              .option("header", "true")
@@ -394,6 +421,7 @@ def main():
              .option("escape", '"')
              .option("encoding", "UTF-8")
              .csv(path)
+             .repartition(sc.defaultParallelism * 2)  # Ép Spark chia nhỏ data để chạy trên nhiều Worker
     )
 
     voz_comments_raw = read_csv(f"{HDFS_RAW}/voz/comments.csv")
@@ -409,7 +437,6 @@ def main():
     print(f"[INFO] VnE comments : {vne_cmts_raw.count():,}")
 
     # ── mapPartitions → process qua Adapter + TextPreprocessor ───────────────
-    sc = spark.sparkContext
 
     voz_c_rdd  = voz_comments_raw.rdd.mapPartitions(
         lambda it: process_voz_comments(it, SLANG_PATH, STOP_PATH, crawled_ts))
@@ -431,11 +458,39 @@ def main():
         result_df.body.isNotNull() & (result_df.body != "")
     )
 
-    total = result_df.count()
-    print(f"\n[INFO] Tổng bản ghi sau clean: {total:,}")
+    # ── Fix 1: Xóa chính xác các bản ghi trùng lặp 100% (do lỗi crawler) ──────
+    result_df = result_df.dropDuplicates()
 
-    # Thống kê theo nguồn
+    # ── Fix 2: Cấp UUID cho các bản ghi bị lỗi post_id = "None" ───────────────
+    from pyspark.sql.functions import col, expr, when
+    result_df = result_df.withColumn(
+        "post_id",
+        when(col("post_id").isNull() | (col("post_id") == "None"), expr("uuid()")).otherwise(col("post_id"))
+    )
+
+    before_dedup = result_df.count()
+    logger.info(f"[Cleaning] Tổng bản ghi sau clean (đã drop exact duplicates): {before_dedup:,}")
+
+    # Thống kê theo nguồn (trước dedup)
     result_df.groupBy("source", "post_type").count().orderBy("source").show()
+
+    # ── MinHash LSH Deduplication ─────────────────────────────────────────────
+    if enable_dedup:
+        logger.info("[Dedup] Bắt đầu MinHash LSH dedup (threshold=0.8, num_perm=128, k=5)...")
+        from algorithms.minhash_dedup import MinHashDeduplicator
+
+        deduplicator = MinHashDeduplicator(num_perm=128, threshold=0.8, k=5)
+        result_df = deduplicator.fit_transform(result_df, spark)
+
+        after_dedup = result_df.count()
+        removed    = before_dedup - after_dedup
+        pct        = removed / max(before_dedup, 1) * 100
+        logger.info(f"[Dedup] Kết quả: {before_dedup:,} → {after_dedup:,} bản ghi "
+                    f"(loại {removed:,} duplicates, {pct:.1f}%)")
+        total = after_dedup
+    else:
+        logger.info("[Dedup] Bỏ qua (--no-dedup flag được bật)")
+        total = before_dedup
 
     # ── Ghi ra HDFS Parquet ───────────────────────────────────────────────────
     result_df.write \
@@ -443,7 +498,7 @@ def main():
         .partitionBy("source") \
         .parquet(HDFS_OUT)
 
-    print(f"[DONE] Đã ghi {total:,} bản ghi → {HDFS_OUT}")
+    logger.info(f"[DONE] Đã ghi {total:,} bản ghi → {HDFS_OUT}")
     spark.stop()
 
 
