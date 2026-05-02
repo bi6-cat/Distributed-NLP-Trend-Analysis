@@ -19,8 +19,13 @@
 
 - name: Cài đặt dependencies cho Hadoop
   apt:
-    name: ['wget', 'rsync', 'unzip', 'tar']
+    name: ['wget', 'rsync', 'unzip', 'zip', 'tar']
     state: present
+
+- name: Kiểm tra file Hadoop archive đã tồn tại chưa
+  stat:
+    path: "/home/{{ ansible_user }}/hadoop-{{ hadoop_version }}.tar.gz"
+  register: hadoop_archive
 
 - name: Tải Apache Hadoop (nếu chưa có)
   get_url:
@@ -30,6 +35,7 @@
   until: download_hadoop is succeeded
   retries: 5
   delay: 10
+  when: not hadoop_archive.stat.exists
 
 - name: Giải nén Hadoop archive sang tất cả các node
   unarchive:

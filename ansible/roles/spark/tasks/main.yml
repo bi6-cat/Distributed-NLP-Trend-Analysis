@@ -4,6 +4,11 @@
     name: wget
     state: present
 
+- name: Kiểm tra file Spark archive đã tồn tại chưa
+  stat:
+    path: "/home/{{ ansible_user }}/spark-{{ spark_version }}.tgz"
+  register: spark_archive
+
 - name: Tải Apache Spark
   get_url:
     url: "{{ spark_url }}"
@@ -12,6 +17,7 @@
   until: download_spark is succeeded
   retries: 5
   delay: 10
+  when: not spark_archive.stat.exists
 
 - name: Giải nén Spark archive sang tất cả các node
   unarchive:

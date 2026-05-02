@@ -41,8 +41,8 @@ Vagrant.configure("2") do |config|
     worker1.vm.network "private_network", ip: "192.168.56.12"
     worker1.vm.provider "virtualbox" do |vb|
       vb.name = "nlp-worker-1"
-      vb.memory = "4096"
-      vb.cpus = 2
+      vb.memory = "5096"
+      vb.cpus = 6
     end
   end
 
@@ -52,8 +52,8 @@ Vagrant.configure("2") do |config|
     worker2.vm.network "private_network", ip: "192.168.56.13"
     worker2.vm.provider "virtualbox" do |vb|
       vb.name = "nlp-worker-2"
-      vb.memory = "4096"
-      vb.cpus = 2
+      vb.memory = "5096"
+      vb.cpus = 6
     end
   end
 

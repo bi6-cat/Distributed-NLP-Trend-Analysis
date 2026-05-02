@@ -33,6 +33,9 @@
   args:
     creates: "{{ install_dir }}/envs/{{ env_name }}"
 
+- name: Cài đặt Python dependencies cho Spark jobs
+  shell: "{{ install_dir }}/envs/{{ env_name }}/bin/pip install pandas pydantic pyarrow clickhouse-connect underthesea datasketch mmh3"
+
 - name: Cấp quyền sở hữu thư mục Miniconda cho user '{{ ansible_user }}'
   file:
     path: "{{ install_dir }}"
