@@ -17,3 +17,8 @@ models:
       +materialized: view
     marts:
       +materialized: table
+      
+vars:
+  weight_reaction: 1
+  weight_comment: 2
+  weight_view: 0.01

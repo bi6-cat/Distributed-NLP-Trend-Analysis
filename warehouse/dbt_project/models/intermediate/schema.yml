@@ -1,0 +1,37 @@
+version: 2
+
+models:
+  - name: int_posts_enriched
+    description: >
+      Enriched posts intermediate VIEW. JOINs the 3 decoupled
+      staging tables (stg_posts_core, stg_posts_nlp, stg_post_topics) and computes
+      engagement from atomic metrics. LEFT JOINs ensure posts without NLP/topic
+      labels still appear (graceful partial pipeline handling). It also calculates
+      business logic such as engagement score and source_type.
+    columns:
+      - name: post_id
+        description: Canonical post identifier
+        tests:
+          - not_null
+      - name: source
+        description: "Data source: voz, tinhte, vnexpress, youtube"
+        tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ['voz', 'tinhte', 'vnexpress', 'youtube']
+      - name: engagement
+        description: >
+          Weighted engagement score computed by dbt from atomic metrics:
+          reaction_count + comment_count × 2 + coalesce(view_count, 0) / 100
+      - name: sentiment_label
+        description: "PhoBERT sentiment: positive, negative, neutral (nullable — LEFT JOIN)"
+      - name: source_type
+        description: "Derived platform type: forum, news, video"
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['forum', 'news', 'video', 'unknown']
+      - name: created_at
+        tests:
+          - not_null

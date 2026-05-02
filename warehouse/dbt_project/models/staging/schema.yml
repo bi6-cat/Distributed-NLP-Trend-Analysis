@@ -64,36 +64,12 @@ sources:
               - unique
 
 models:
-  - name: stg_posts
+  - name: stg_posts_core
     description: >
-      Unified staging VIEW — the core ELT responsibility. JOINs the 3 decoupled
-      landing tables (stg_posts_core, stg_posts_nlp, stg_post_topics) and computes
-      engagement from atomic metrics. LEFT JOINs ensure posts without NLP/topic
-      labels still appear (graceful partial pipeline handling).
-    columns:
-      - name: post_id
-        description: Canonical post identifier
-        tests:
-          - not_null
-      - name: source
-        description: "Data source: voz, tinhte, vnexpress, youtube"
-        tests:
-          - not_null
-          - accepted_values:
-              arguments:
-                values: ['voz', 'tinhte', 'vnexpress', 'youtube']
-      - name: engagement
-        description: >
-          Weighted engagement score computed by dbt from atomic metrics:
-          reaction_count + comment_count × 2 + coalesce(view_count, 0) / 100
-      - name: sentiment_label
-        description: "PhoBERT sentiment: positive, negative, neutral (nullable — LEFT JOIN)"
-      - name: source_type
-        description: "Derived platform type: forum, news, video"
-        tests:
-          - accepted_values:
-              arguments:
-                values: ['forum', 'news', 'video', 'unknown']
-      - name: created_at
-        tests:
-          - not_null
+      Staging layer for core post data. Loads raw table from source.
+  - name: stg_posts_nlp
+    description: >
+      Staging layer for NLP sentiment data. Loads raw table from source.
+  - name: stg_post_topics
+    description: >
+      Staging layer for topics. Loads raw table from source.

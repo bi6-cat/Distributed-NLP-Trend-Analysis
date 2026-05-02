@@ -11,7 +11,6 @@ SELECT
     t.coherence_score,
     t.model_version,
 
-    -- Aggregate stats from the pre-aggregated intermediate view
     coalesce(sum(h.mention_count), 0)                   AS total_mentions,
     min(h.hour_bucket)                                  AS first_seen,
     max(h.hour_bucket)                                  AS last_seen
