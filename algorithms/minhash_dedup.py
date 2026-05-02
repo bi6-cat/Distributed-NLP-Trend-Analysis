@@ -154,7 +154,10 @@ class MinHashDeduplicator:
                 skipped += 1
                 continue
             minhash_map[post_id] = mh
-            created_at_map[post_id] = int(created_at)
+            if hasattr(created_at, 'timestamp'):
+                created_at_map[post_id] = int(created_at.timestamp())
+            else:
+                created_at_map[post_id] = int(created_at)
 
         logger.info(f"[Dedup] Đã tính signature cho {len(minhash_map):,} records "
                     f"(bỏ qua {skipped:,} records không có text)")

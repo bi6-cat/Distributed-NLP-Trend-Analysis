@@ -145,6 +145,17 @@ class TextPreprocessor:
 
         return text
 
+    def clean_html(self, text: str) -> str:
+        """
+        Chỉ xóa HTML tags và các đoạn quote thừa của forum, giữ nguyên casing và ký tự đặc biệt.
+        """
+        if not text or not isinstance(text, str):
+            return ""
+        
+        text = self.remove_forum_quotes(text)
+        text = self.remove_html(text)
+        text = self.normalize_whitespace(text)
+        return text
 
     def tokenize(self, text: str) -> str:
         """
