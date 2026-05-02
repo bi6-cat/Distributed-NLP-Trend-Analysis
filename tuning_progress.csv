@@ -1,0 +1,8 @@
+name,description,n_neighbors,min_dist,min_cluster_size,min_samples,nr_topics,n_topics_found,n_outliers,outlier_ratio,diversity,coherence_umass,training_time
+exp_2_base,Original ultra granular (baseline for this run),30,0.0,5,1,auto,288,1915,0.383,0.8413194444444444,0.0,42.79465889930725
+exp_2_var_cluster_7,Slightly larger clusters to reduce noise,30,0.0,7,1,auto,169,2239,0.4478,0.7988165680473372,0.0,22.589353561401367
+exp_2_var_neighbor_50,"More global structure, might reduce outliers",50,0.0,5,1,auto,280,2114,0.4228,0.8442857142857143,0.0,28.048243761062622
+exp_2_var_neighbor_15,Highly local structure,15,0.0,5,1,auto,323,1795,0.359,0.8275541795665635,0.0,18.40110421180725
+exp_2_balanced,Balanced approach for mid-tier granularity,40,0.0,8,1,auto,3,0,0.0,0.9,-2.291758526672907,23.92908549308777
+exp_2_force_50,Force merge into 50 topics based on granular core,30,0.0,5,1,50,49,1915,0.383,0.8367346938775511,0.0,23.362959623336792
+exp_2_force_100,Force merge into 100 topics based on granular core,30,0.0,5,1,100,99,1915,0.383,0.8080808080808081,0.0,23.691976308822632

@@ -10,6 +10,22 @@ Components:
     3. HDBSCAN: Density-based clustering
     4. c-TF-IDF: Topic word extraction
 
+Output Schema (theo data_flow_schema_evolution.md — Stage 4 & 5):
+    /silver/post_topics/  → export_post_topics():
+        post_id           String   FK → posts_core.post_id
+        topic_id          Int32    BERTopic assignment
+        topic_probability Float32  Assignment confidence 0.0–1.0
+        model_type        String   'bertopic'
+        predicted_at      DateTime Inference timestamp
+
+    /silver/topics/       → export_stg_topics():
+        topic_id          Int32
+        label             String   Auto-generated từ top keywords
+        top_keywords      Array(String)  Top 10 words by c-TF-IDF
+        coherence_score   Float32 (nullable)
+        model_version     String   'bertopic_v2'
+        created_at        DateTime
+
 Usage:
     # Train
     model = VietnameseBERTopicModel(n_neighbors=15, min_cluster_size=15)
@@ -30,9 +46,11 @@ Author: Member 3 (ML Engineer)
 Date: 2026-04-04
 """
 
+import csv
 import os
 import pickle
 import warnings
+from datetime import datetime, timezone
 from typing import List, Tuple, Optional, Dict, Any
 import numpy as np
 import pandas as pd
@@ -75,6 +93,7 @@ class VietnameseBERTopicModel:
         min_dist: float = 0.0,
         min_cluster_size: int = 15,
         min_samples: int = 10,
+        nr_topics: Optional[Any] = None,
         top_n_words: int = 10,
         verbose: bool = True,
         use_gpu: bool = True
@@ -123,6 +142,7 @@ class VietnameseBERTopicModel:
         self.min_dist = min_dist
         self.min_cluster_size = min_cluster_size
         self.min_samples = min_samples
+        self.nr_topics = nr_topics
         self.top_n_words = top_n_words
         
         # [1] Initialize PhoBERT embedding model
@@ -182,6 +202,7 @@ class VietnameseBERTopicModel:
             hdbscan_model=self.hdbscan_model,
             top_n_words=top_n_words,
             verbose=verbose,
+            nr_topics=nr_topics,
             calculate_probabilities=True
         )
         
@@ -195,23 +216,44 @@ class VietnameseBERTopicModel:
         self.topics_ = None
         self.probs_ = None
     
-    def fit(self, documents: List[str]) -> Tuple[List[int], np.ndarray]:
+    def fit(
+        self,
+        documents: List[str],
+        embeddings: Optional[np.ndarray] = None,
+    ) -> Tuple[List[int], np.ndarray]:
         """
-        Train BERTopic trên documents
-        
-        Pipeline:
+        Train BERTopic trên documents.
+
+        Pipeline (khi không truyền embeddings):
             Input → PhoBERT → UMAP → HDBSCAN → c-TF-IDF → Output
-        
+
+        Pipeline (khi truyền pre-computed embeddings — RECOMMENDED cho tuning):
+            Pre-computed embeddings → UMAP → HDBSCAN → c-TF-IDF → Output
+            (Bỏ qua bước encode PhoBERT, tiết kiệm ~90% thời gian)
+
         Args:
-            documents: List of text documents (preprocessed clean_text)
-        
+            documents: List of text documents (preprocessed clean_text).
+            embeddings: Pre-computed PhoBERT embeddings, shape (n_docs, 768).
+                Nếu None, model sẽ tự encode bằng SentenceTransformer.
+                Phải được tạo bởi cùng SentenceTransformer("vinai/phobert-base")
+                để đảm bảo vector space nhất quán.
+
         Returns:
             topics: Topic assignments cho mỗi document (-1 = outlier)
-            probs: Topic probabilities (shape: n_docs × n_topics)
-        
+            probs:  Topic probabilities (shape: n_docs × n_topics)
+
+        Raises:
+            ValueError: Nếu documents rỗng, có phần tử không phải str,
+                        hoặc embeddings shape không khớp với documents.
+
         Example:
+            >>> # Cách 1: Không cache (tự encode)
             >>> model = VietnameseBERTopicModel()
             >>> topics, probs = model.fit(documents)
+
+            >>> # Cách 2: Dùng pre-computed embeddings (KHUYẾN NGHỊ khi tuning)
+            >>> emb = model.encode(documents)          # cache 1 lần
+            >>> topics, probs = model.fit(documents, embeddings=emb)
             >>> print(f"Found {len(set(topics))} topics")
             >>> print(f"Outliers: {sum(t == -1 for t in topics)}")
         """
@@ -221,30 +263,48 @@ class VietnameseBERTopicModel:
             print(f"{'='*60}")
             print(f"Documents: {len(documents)}")
             print(f"Device: {self.device}")
-        
-        # Validate input
+
+        # --- Validate documents ---
         if not documents:
             raise ValueError("documents cannot be empty")
-        
+
         if not all(isinstance(doc, str) for doc in documents):
             raise ValueError("All documents must be strings")
-        
-        # Train BERTopic
-        if self.verbose:
-            print("\nStarting training...")
-            print("  [1/4] Encoding documents (PhoBERT)...")
-        
-        topics, probs = self.topic_model.fit_transform(documents)
-        
+
+        # --- Validate embeddings nếu được truyền vào ---
+        if embeddings is not None:
+            if not isinstance(embeddings, np.ndarray):
+                raise ValueError(
+                    f"embeddings phải là np.ndarray, nhận được {type(embeddings)}"
+                )
+            if embeddings.shape[0] != len(documents):
+                raise ValueError(
+                    f"embeddings.shape[0] ({embeddings.shape[0]}) "
+                    f"!= len(documents) ({len(documents)}). "
+                    "Đảm bảo embeddings được tạo từ cùng list documents."
+                )
+            if self.verbose:
+                print(f"\nStarting training...")
+                print(f"  [1/4] Dùng pre-computed embeddings {embeddings.shape} — bỏ qua encode PhoBERT ✅")
+        else:
+            if self.verbose:
+                print("\nStarting training...")
+                print("  [1/4] Encoding documents (PhoBERT)...")
+
+        # --- Train BERTopic ---
+        # Truyền embeddings=None khi không có (BERTopic tự encode),
+        # hoặc truyền ma trận đã cache để skip bước encode.
+        topics, probs = self.topic_model.fit_transform(documents, embeddings=embeddings)
+
         # Store results
         self.topics_ = topics
         self.probs_ = probs
-        
+
         # Summary
         if self.verbose:
             n_topics = len(set(topics)) - (1 if -1 in topics else 0)
             n_outliers = sum(t == -1 for t in topics)
-            
+
             print(f"\n{'='*60}")
             print("TRAINING COMPLETED")
             print(f"{'='*60}")
@@ -252,8 +312,83 @@ class VietnameseBERTopicModel:
             print(f"✅ Outliers: {n_outliers} ({n_outliers/len(topics)*100:.1f}%)")
             print(f"✅ Documents assigned: {len(topics) - n_outliers}")
             print(f"{'='*60}\n")
-        
+
         return topics, probs
+
+    def reduce_topics(
+        self,
+        documents: List[str],
+        nr_topics: int
+    ) -> None:
+        """
+        [MAGIC STEP] Gộp các topics hiện tại xuống một số lượng cụ thể.
+        Dùng sau khi fit() để tối ưu hóa Dashboard mà không mất đi độ chính xác 
+        của việc phân cụm ban đầu.
+
+        Args:
+            documents: List documents ban đầu.
+            nr_topics: Số lượng topics mục tiêu (ví dụ 70).
+
+        Example:
+            >>> model.fit(documents) # Tìm ra 145 topics
+            >>> model.reduce_topics(documents, nr_topics=70) # Gộp về 70
+        """
+        if self.topics_ is None:
+            raise ValueError("Model chưa được train. Hãy gọi fit() trước.")
+
+        if self.verbose:
+            print(f"\n🪄  Reducing topics from {len(set(self.topics_))-1} to {nr_topics}...")
+
+        self.topic_model.reduce_topics(documents, nr_topics=nr_topics)
+        
+        # Cập nhật lại topics_ và nr_topics nội bộ
+        self.topics_ = self.topic_model.topics_
+        self.nr_topics = nr_topics
+
+        if self.verbose:
+            print(f"✅ Topics reduced successfully to {len(set(self.topics_))-1}")
+
+    def encode(self, documents: List[str], batch_size: int = 32) -> np.ndarray:
+        """
+        Encode documents thành PhoBERT embeddings (dùng để cache trước khi tuning).
+
+        Dùng cùng SentenceTransformer đã khởi tạo trong __init__ để đảm bảo
+        vector space nhất quán với production model.
+
+        Args:
+            documents:  List of text documents.
+            batch_size: Số documents mỗi batch GPU (default 32, T4 GPU ~OK).
+                        Giảm xuống 16 nếu gặp CUDA OOM.
+
+        Returns:
+            embeddings: np.ndarray shape (n_docs, 768), dtype float32.
+
+        Example:
+            >>> # Cache embeddings 1 lần, reuse cho nhiều experiments
+            >>> model = VietnameseBERTopicModel()
+            >>> embeddings = model.encode(documents, batch_size=32)
+            >>> np.save("embeddings_cache.npy", embeddings)
+
+            >>> # Sau đó load và dùng lại:
+            >>> embeddings = np.load("embeddings_cache.npy")
+            >>> topics, probs = model.fit(documents, embeddings=embeddings)
+        """
+        if self.verbose:
+            print(f"\nEncoding {len(documents):,} documents với PhoBERT...")
+            print(f"  batch_size={batch_size}, device={self.device}")
+
+        embeddings = self.embedding_model.encode(
+            documents,
+            batch_size=batch_size,
+            show_progress_bar=self.verbose,
+            convert_to_numpy=True,
+            normalize_embeddings=False,  # BERTopic xử lý normalization qua UMAP cosine
+        )
+
+        if self.verbose:
+            print(f"✅ Embeddings shape: {embeddings.shape}, dtype: {embeddings.dtype}")
+
+        return embeddings
     
     def transform(self, documents: List[str]) -> Tuple[List[int], np.ndarray]:
         """
@@ -394,12 +529,26 @@ class VietnameseBERTopicModel:
         for topic_id in sorted(topics_dict.keys()):
             words = [word for word, score in topics_dict[topic_id]]
             topics_words.append(words)
-        
+
         # Tokenize documents
-        texts = [doc.split() for doc in documents]
-        
-        # Create Gensim dictionary
+        # Lưu ý: PhoBERT đã word-segment tiếng Việt (dấu "_" nối từ ghép),
+        # nên split() là đúng. Filter token độ dài <= 1 để loại ký tự đơn lẻ
+        # (dấu câu, số đơn, ...) không có nghĩa trong co-occurrence.
+        texts = [
+            [token for token in doc.split() if len(token) > 1]
+            for doc in documents
+        ]
+
+        # Bỏ qua documents rỗng sau khi filter
+        texts = [t for t in texts if t]
+        if not texts:
+            if self.verbose:
+                print("⚠️  Tất cả documents trống sau khi tokenize")
+            return 0.0
+
+        # Create Gensim dictionary — filter extremes để coherence ổn định hơn
         dictionary = Dictionary(texts)
+        dictionary.filter_extremes(no_below=2, no_above=0.95)
         
         # Calculate coherence
         coherence_model = CoherenceModel(
@@ -416,18 +565,220 @@ class VietnameseBERTopicModel:
         
         return coherence_score
     
+    # =========================================================================
+    # SCHEMA-COMPLIANT EXPORT METHODS (data_flow_schema_evolution.md Stage 4/5)
+    # =========================================================================
+
+    def export_post_topics(
+        self,
+        post_ids: List[str],
+        output_path: str,
+        coherence_score: Optional[float] = None,
+    ) -> pd.DataFrame:
+        """
+        Xuất kết quả gán topic theo schema ``stg_post_topics`` (ClickHouse).
+
+        Schema output (data_flow_schema_evolution.md — Stage 5):
+            post_id           String   FK → stg_posts_core.post_id
+            topic_id          Int32    BERTopic assignment (-1 = outlier)
+            topic_probability Float32  Assignment confidence 0.0–1.0
+            model_type        String   'bertopic'
+            predicted_at      DateTime Inference timestamp (ISO 8601 UTC)
+
+        Args:
+            post_ids: Danh sách post_id tương ứng với thứ tự documents lúc fit().
+            output_path: Đường dẫn file CSV đầu ra
+                (ví dụ: "output/bertopic/stg_post_topics.csv").
+            coherence_score: Coherence score tổng thể (không ghi vào bảng này,
+                chỉ log để tham khảo).
+
+        Returns:
+            pd.DataFrame với 5 cột theo schema stg_post_topics.
+
+        Raises:
+            ValueError: Nếu model chưa train hoặc len(post_ids) != len(topics_).
+
+        Example:
+            >>> model.fit(documents)
+            >>> df = model.export_post_topics(post_ids, "output/stg_post_topics.csv")
+            >>> df.columns.tolist()
+            ['post_id', 'topic_id', 'topic_probability', 'model_type', 'predicted_at']
+        """
+        if self.topics_ is None:
+            raise ValueError("Model chưa được train. Hãy gọi fit() trước.")
+
+        if len(post_ids) != len(self.topics_):
+            raise ValueError(
+                f"Số lượng post_ids ({len(post_ids)}) "
+                f"không khớp với số topics ({len(self.topics_)})."
+            )
+
+        predicted_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        # Lấy xác suất cho topic được gán (topic_id tương ứng)
+        # self.probs_ shape: (n_docs,) hoặc (n_docs, n_topics)
+        probs_array = np.array(self.probs_) if self.probs_ is not None else None
+
+        rows = []
+        for i, (pid, tid) in enumerate(zip(post_ids, self.topics_)):
+            # Tính topic_probability
+            if probs_array is not None and probs_array.ndim == 2:
+                # BERTopic trả về ma trận (n_docs, n_topics)
+                if tid >= 0 and tid < probs_array.shape[1]:
+                    prob = float(probs_array[i, tid])
+                else:
+                    prob = 0.0  # outlier (tid == -1)
+            elif probs_array is not None and probs_array.ndim == 1:
+                prob = float(probs_array[i])
+            else:
+                prob = 0.0
+
+            rows.append({
+                "post_id": str(pid),
+                "topic_id": int(tid),
+                "topic_probability": round(prob, 6),
+                "model_type": "bertopic",
+                "predicted_at": predicted_at,
+            })
+
+        df = pd.DataFrame(
+            rows,
+            columns=["post_id", "topic_id", "topic_probability", "model_type", "predicted_at"],
+        )
+
+        # Ép kiểu đúng dtype
+        df["topic_id"] = df["topic_id"].astype("int32")
+        df["topic_probability"] = df["topic_probability"].astype("float32")
+
+        # Ghi ra CSV
+        os.makedirs(
+            os.path.dirname(output_path) if os.path.dirname(output_path) else ".",
+            exist_ok=True,
+        )
+        df.to_csv(output_path, index=False, encoding="utf-8")
+
+        if self.verbose:
+            print(f"✅ stg_post_topics → {output_path} ({len(df):,} rows)")
+            if coherence_score is not None:
+                print(f"   coherence_score (info only): {coherence_score:.4f}")
+
+        return df
+
+    def export_stg_topics(
+        self,
+        output_path: str,
+        coherence_score: Optional[float] = None,
+        model_version: str = "bertopic_v2",
+    ) -> pd.DataFrame:
+        """
+        Xuất bảng tra cứu topics theo schema ``stg_topics`` (ClickHouse).
+
+        Schema output (data_flow_schema_evolution.md — Stage 5):
+            topic_id        Int32
+            label           String    Auto-generated từ top-3 keywords
+            top_keywords    Array(String)  Top 10 words by c-TF-IDF
+            coherence_score Float32 (nullable)
+            model_version   String    e.g. 'bertopic_v2'
+            created_at      DateTime  ISO 8601 UTC
+
+        Lưu ý về ``top_keywords``:
+            - Trong file CSV: được serialize thành chuỗi JSON ("[\"iphone\",\"pin\"]")
+              để dbt/ClickHouse có thể parse bằng JSONExtract.
+            - Trong DataFrame trả về: là List[str] thực sự (Array).
+
+        Args:
+            output_path: Đường dẫn file CSV đầu ra
+                (ví dụ: "output/bertopic/stg_topics.csv").
+            coherence_score: Coherence C_V score của model (nullable).
+            model_version: Nhãn phiên bản model (mặc định 'bertopic_v2').
+
+        Returns:
+            pd.DataFrame với 6 cột theo schema stg_topics.
+
+        Raises:
+            ValueError: Nếu model chưa train.
+
+        Example:
+            >>> cv = model.calculate_coherence(documents)
+            >>> df = model.export_stg_topics("output/stg_topics.csv", coherence_score=cv)
+            >>> df.columns.tolist()
+            ['topic_id', 'label', 'top_keywords', 'coherence_score', 'model_version', 'created_at']
+        """
+        if self.topics_ is None:
+            raise ValueError("Model chưa được train. Hãy gọi fit() trước.")
+
+        created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        topics_dict = self.get_topics()  # {topic_id: [(word, score), ...]}
+
+        rows = []
+        for tid in sorted(topics_dict.keys()):
+            word_score_list = topics_dict[tid]  # [(word, score), ...]
+
+            # top_keywords: lấy tối đa 10 từ theo c-TF-IDF weight
+            top_keywords: List[str] = [
+                word for word, _score in word_score_list[:10]
+            ]
+
+            # label: ghép 3 từ đầu bằng " | "
+            label = " | ".join(top_keywords[:3]) if top_keywords else f"topic_{tid}"
+
+            rows.append({
+                "topic_id": int(tid),
+                "label": label,
+                "top_keywords": top_keywords,  # List[str] — Array(String) trong CH
+                "coherence_score": float(coherence_score) if coherence_score is not None else None,
+                "model_version": model_version,
+                "created_at": created_at,
+            })
+
+        df = pd.DataFrame(
+            rows,
+            columns=["topic_id", "label", "top_keywords", "coherence_score", "model_version", "created_at"],
+        )
+        df["topic_id"] = df["topic_id"].astype("int32")
+
+        # Dùng pandas nullable Float32 (chữ hoa) để hỗ trợ pd.NA an toàn
+        # thay vì float32 thường sẽ convert None → NaN không nhất quán
+        df["coherence_score"] = pd.array(
+            [float(coherence_score) if coherence_score is not None else pd.NA] * len(df),
+            dtype="Float32",  # Nullable — hỗ trợ pd.NA, tương thích ClickHouse Nullable(Float32)
+        )
+
+        # Ghi CSV: top_keywords serialize thành JSON array string
+        # Ví dụ: ["iphone","pin","camera"] — ClickHouse ARRAY JOIN or JSONExtract
+        import json as _json
+        os.makedirs(
+            os.path.dirname(output_path) if os.path.dirname(output_path) else ".",
+            exist_ok=True,
+        )
+        csv_rows = df.copy()
+        csv_rows["top_keywords"] = csv_rows["top_keywords"].apply(
+            lambda kws: _json.dumps(kws, ensure_ascii=False)
+        )
+        csv_rows.to_csv(output_path, index=False, encoding="utf-8")
+
+        if self.verbose:
+            print(f"✅ stg_topics → {output_path} ({len(df):,} topics)")
+
+        return df
+
     def save(self, path: str) -> None:
         """
-        Lưu trained model vào folder
-        
+        Lưu trained model vào folder.
+
         Saves:
-            - bertopic_model/       (BERTopic model files)
-            - config.pkl            (Hyperparameters)
-            - topics.pkl            (Topic assignments & probs)
-        
+            - bertopic_model/            (BERTopic model files — pickle)
+            - config.pkl                 (Hyperparameters)
+            - topics.pkl                 (Topic assignments & probs)
+            - stg_post_topics.csv        (Schema-compliant — stg_post_topics)
+            - stg_topics.csv             (Schema-compliant — stg_topics)
+
+        Lưu ý: ``stg_post_topics.csv`` yêu cầu post_ids. Nếu chưa có (chỉ dùng
+        index giả), hãy gọi export_post_topics() riêng sau khi có post_ids thực.
+
         Args:
             path: Folder path (e.g., "output/bertopic_model/")
-        
+
         Example:
             >>> model.save("output/bertopic_model/")
             >>> # Can reload later with: model.load("output/bertopic_model/")
@@ -477,6 +828,26 @@ class VietnameseBERTopicModel:
             
             if self.verbose:
                 print(f"✅ Topics/probs saved to {results_path}")
+
+            # [4] Export schema-compliant CSVs
+            # stg_topics: không cần post_ids
+            self.export_stg_topics(
+                output_path=os.path.join(path, "stg_topics.csv"),
+                model_version="bertopic_v2",
+            )
+
+            # stg_post_topics: dùng index giả nếu chưa có post_ids thực
+            # Người dùng nên gọi export_post_topics(post_ids, ...) với post_ids thực.
+            fake_ids = [f"doc_{i}" for i in range(len(self.topics_))]
+            self.export_post_topics(
+                post_ids=fake_ids,
+                output_path=os.path.join(path, "stg_post_topics.csv"),
+            )
+            if self.verbose:
+                print(
+                    "⚠️  stg_post_topics.csv sử dụng index giả (doc_0, doc_1, ...). "
+                    "Gọi export_post_topics(real_post_ids, ...) để ghi lại với post_ids thực."
+                )
         
         if self.verbose:
             print(f"\n{'='*60}")

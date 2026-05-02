@@ -1,0 +1,7 @@
+name,description,n_neighbors,n_components,min_dist,min_cluster_size,min_samples,nr_topics,n_topics_found,n_outliers,outlier_ratio,diversity,coherence_umass,training_time
+umap_base_5d,Standard compression (5D),30,5,0.0,8,1,auto,2,0,0.0,1.0,-3.104683076797367,37.822833776474
+umap_base_10d,Lower compression (10D) - Harder for HDBSCAN,30,10,0.0,8,1,auto,145,2306,0.4612,0.7751724137931034,0.0,23.246281623840332
+umap_max_compress_3d,Extreme compression (3D) - Denser clusters,30,3,0.0,8,1,auto,3,0,0.0,0.9,-2.291758526672907,15.945968389511108
+umap_global_view,High n_neighbors (100) for global structure,100,5,0.0,8,1,auto,3,5,0.001,0.7,-2.306712444772639,28.673832416534424
+umap_local_view,Low n_neighbors (15) for high detail,15,5,0.0,8,1,auto,4,8,0.0016,0.7,-1.8796439073126814,14.194722414016724
+umap_optimized_force_75,The ultimate dashboard setup,40,5,0.0,8,2,75,3,6,0.0012,0.7,-2.3004984945165527,19.60144567489624

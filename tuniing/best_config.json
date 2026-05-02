@@ -1,0 +1,18 @@
+{
+  "name": "umap_base_10d",
+  "description": "Lower compression (10D) - Harder for HDBSCAN",
+  "hyperparameters": {
+    "n_neighbors": 30,
+    "n_components": 10,
+    "min_dist": 0.0,
+    "min_cluster_size": 8,
+    "min_samples": 1,
+    "nr_topics": "auto"
+  },
+  "metrics": {
+    "n_topics_found": 145,
+    "outlier_ratio": 0.4612,
+    "diversity": 0.7751724137931034,
+    "composite_score": 0.8609703761755485
+  }
+}
