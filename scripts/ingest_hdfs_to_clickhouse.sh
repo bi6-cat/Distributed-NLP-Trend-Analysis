@@ -15,8 +15,8 @@ echo "  - Table      : $DB_TABLE"
 echo "  - HDFS Data  : $HDFS_PATH"
 echo "--------------------------------------------------------"
 
-# Xóa dữ liệu cũ trước khi nạp để tránh trùng lặp (Idempotent)
-curl -s -d "TRUNCATE TABLE $DB_TABLE" "http://$CLICKHOUSE_HOST:$CLICKHOUSE_PORT/"
+# Xóa dữ liệu cũ trong bảng mục tiêu để tránh trùng lặp
+curl -s -d "TRUNCATE TABLE IF EXISTS $DB_TABLE" "http://$CLICKHOUSE_HOST:$CLICKHOUSE_PORT/"
 
 # Tạo câu lệnh SQL
 QUERY="INSERT INTO $DB_TABLE SELECT * FROM hdfs('$HDFS_PATH', 'Parquet')"
