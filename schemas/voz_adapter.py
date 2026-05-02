@@ -141,7 +141,7 @@ class VozAdapter:
         for raw in raw_comments:
             try:
                 record = self._convert_comment(raw)
-            except ValidationError as e:
+            except (ValidationError, ValueError) as e:
                 n_skip += 1
                 logger.warning("Skip comment id_post=%s id_user=%s: %s",
                                raw.get("id_post"), raw.get("id_user"), e)
@@ -179,7 +179,7 @@ class VozAdapter:
         for raw in raw_posts:
             try:
                 record = self._convert_post(raw)
-            except ValidationError as e:
+            except (ValidationError, ValueError) as e:
                 n_skip += 1
                 logger.warning("Skip post id_post=%s: %s", raw.get("id_post"), e)
                 if self.strict:
@@ -280,7 +280,16 @@ class VozAdapter:
 
     def _convert_post(self, raw: dict) -> dict:
         """Validate 1 raw post dict qua UniversalSocialPost → row dict."""
-        id_post    = str(raw.get("id_post", ""))
+        id_post    = str(raw.get("id_post", "") or "")
+
+        # ── Lọc rác: bỏ qua các bản ghi crawler ghi sai id_post hoặc title = "None" ──
+        _null_vals = {"", "none", "null", "nan"}
+        if id_post.lower() in _null_vals:
+            raise ValueError(f"id_post không hợp lệ: {id_post!r}")
+        title_raw = str(raw.get("title", "") or "")
+        if title_raw.lower() in _null_vals:
+            raise ValueError(f"title không hợp lệ: {title_raw!r}")
+
         time_str   = raw.get("time_post", "")
         created_at = _parse_time(time_str, _POST_TIME_FMT)
 
