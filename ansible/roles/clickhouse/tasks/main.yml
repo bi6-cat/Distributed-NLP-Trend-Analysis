@@ -22,6 +22,18 @@
     state: present
     update_cache: yes
 
+- name: Cho phép ClickHouse listen trên tất cả IP
+  copy:
+    dest: /etc/clickhouse-server/config.d/listen_host.xml
+    content: |
+      <clickhouse>
+          <listen_host>0.0.0.0</listen_host>
+      </clickhouse>
+    owner: clickhouse
+    group: clickhouse
+    mode: '0644'
+  notify: Restart ClickHouse
+
 - name: Đảm bảo dịch vụ ClickHouse đang chạy
   systemd:
     name: clickhouse-server

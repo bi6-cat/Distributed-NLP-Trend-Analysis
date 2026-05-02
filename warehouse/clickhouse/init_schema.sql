@@ -4,8 +4,7 @@ CREATE DATABASE IF NOT EXISTS tech_radar;
 CREATE TABLE IF NOT EXISTS tech_radar.stg_posts_core (
     post_id         String,                  -- Canonical PK across all stages
     source          LowCardinality(String),  -- 'voz','tinhte','vnexpress','youtube'
-    author_id       String,
-    author_name     String,
+    author          String,
     title           Nullable(String),
     body            String,
     segmented_text  String,                  -- VnCoreNLP word-segmented output

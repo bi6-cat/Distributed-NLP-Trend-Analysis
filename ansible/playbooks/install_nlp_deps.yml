@@ -1,0 +1,45 @@
+---
+# Playbook cài nhanh Python NLP dependencies lên tất cả worker nodes
+# Dùng khi VM đã chạy sẵn và cần cài thêm package mà không cần reprovision
+#
+# Cách chạy:
+#   cd d:\PTIT\BigData\Distributed-NLP-Trend-Analysis-1
+#   vagrant ssh master -c "ansible-playbook /vagrant/ansible/playbooks/install_nlp_deps.yml"
+#
+# Hoặc chạy từ host (nếu đã cấu hình SSH key):
+#   ansible-playbook -i ansible/inventory ansible/playbooks/install_nlp_deps.yml
+
+- name: Cài đặt Python NLP dependencies lên tất cả nodes
+  hosts: all
+  become: yes
+  vars:
+    conda_env_bin: "/opt/miniconda/envs/nlp-trend/bin/pip"
+
+  tasks:
+    - name: Cài datasketch (MinHash LSH deduplication)
+      pip:
+        name: datasketch
+        executable: "{{ conda_env_bin }}"
+        state: present
+
+    - name: Cài mmh3 (MurmurHash3 — dùng bởi CountMinSketch)
+      pip:
+        name: mmh3
+        executable: "{{ conda_env_bin }}"
+        state: present
+
+    - name: Xác nhận datasketch đã cài
+      shell: "/opt/miniconda/envs/nlp-trend/bin/python -c \"import datasketch; print('datasketch', datasketch.__version__)\""
+      register: datasketch_check
+      changed_when: false
+
+    - name: Xác nhận mmh3 đã cài
+      shell: "/opt/miniconda/envs/nlp-trend/bin/python -c \"import mmh3; print('mmh3', mmh3.version)\""
+      register: mmh3_check
+      changed_when: false
+
+    - name: In kết quả xác nhận
+      debug:
+        msg:
+          - "{{ datasketch_check.stdout }}"
+          - "{{ mmh3_check.stdout }}"

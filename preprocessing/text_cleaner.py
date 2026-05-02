@@ -60,6 +60,7 @@ class TextPreprocessor:
             r"(?:%[0-9a-fA-F][0-9a-fA-F]))+"
         )
         self._email_pattern = re.compile(r"\S+@\S+\.\S+")
+        self._forum_quote_pattern = re.compile(r"\b\w+\s+said.*?click to expand\s*", flags=re.IGNORECASE | re.DOTALL)
         self._emoji_pattern = re.compile(
             "["
             "\U0001F600-\U0001F64F"  # Emoticons
@@ -96,6 +97,10 @@ class TextPreprocessor:
         """Xóa mentions."""
         return re.sub(r"@\w+", " ", text)
     
+    def remove_forum_quotes(self, text: str) -> str:
+        """Xóa các đoạn trích dẫn (quote) rác của diễn đàn XenForo (như VOZ)."""
+        return self._forum_quote_pattern.sub(" ", text)
+    
     def remove_emojis(self, text: str) -> str:
         """Xóa emojis."""
         return self._emoji_pattern.sub(" ", text)
@@ -127,6 +132,7 @@ class TextPreprocessor:
             return ""
 
         text = self.lowercase(text)
+        text = self.remove_forum_quotes(text)
         text = self.remove_html(text)
         text = self.remove_urls(text)
         text = self.remove_emails(text)
@@ -139,6 +145,17 @@ class TextPreprocessor:
 
         return text
 
+    def clean_html(self, text: str) -> str:
+        """
+        Chỉ xóa HTML tags và các đoạn quote thừa của forum, giữ nguyên casing và ký tự đặc biệt.
+        """
+        if not text or not isinstance(text, str):
+            return ""
+        
+        text = self.remove_forum_quotes(text)
+        text = self.remove_html(text)
+        text = self.normalize_whitespace(text)
+        return text
 
     def tokenize(self, text: str) -> str:
         """
