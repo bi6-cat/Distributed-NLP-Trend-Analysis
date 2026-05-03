@@ -5,7 +5,10 @@ data/*.csv
 data/*.json
 data/*.parquet
 data/*.db
+data/**
+
 # Giữ lại các file config trong data/ (stopwords, slang dict...)
+
 !data/stopwords_vi.txt
 !data/slang_dict.json
 
