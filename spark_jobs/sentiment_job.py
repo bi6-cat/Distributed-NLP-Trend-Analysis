@@ -221,10 +221,6 @@ def main():
         password=CLICKHOUSE_PASS,
     )
 
-    # Log phân bố sentiment
-    print("\n── Phân bố sentiment ──")
-    processed_df.groupBy("sentiment_label").count().show()
-
     spark.stop()
 
 
