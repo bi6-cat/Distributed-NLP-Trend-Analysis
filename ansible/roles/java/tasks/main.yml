@@ -1,0 +1,24 @@
+---
+- name: Cập nhật apt cache
+  apt:
+    update_cache: yes
+    cache_valid_time: 36000
+  when: ansible_os_family == "Debian"
+
+- name: Cài đặt Java Package
+  apt:
+    name: "{{ java_package }}"
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Cấu hình JAVA_HOME tại /etc/environment
+  lineinfile:
+    path: /etc/environment
+    line: 'JAVA_HOME="{{ java_home_path }}"'
+    state: present
+
+- name: Kích hoạt biến môi trường
+  shell: "source /etc/environment"
+  args:
+    executable: /bin/bash
+  changed_when: false

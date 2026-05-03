@@ -1,0 +1,85 @@
+---
+- name: Cài đặt dependencies cho Spark
+  apt:
+    name: wget
+    state: present
+
+- name: Kiểm tra file Spark archive đã tồn tại chưa
+  stat:
+    path: "/home/{{ ansible_user }}/spark-{{ spark_version }}.tgz"
+  register: spark_archive
+
+- name: Tải Apache Spark
+  get_url:
+    url: "{{ spark_url }}"
+    dest: "/home/{{ ansible_user }}/spark-{{ spark_version }}.tgz"
+  register: download_spark
+  until: download_spark is succeeded
+  retries: 5
+  delay: 10
+  when: not spark_archive.stat.exists
+
+- name: Giải nén Spark archive sang tất cả các node
+  unarchive:
+    src: "/home/{{ ansible_user }}/spark-{{ spark_version }}.tgz"
+    dest: "/opt/"
+    remote_src: yes
+    creates: "/opt/spark-{{ spark_version }}-bin-{{ hadoop_profile }}"
+
+- name: Tạo symlink
+  file:
+    src: "/opt/spark-{{ spark_version }}-bin-{{ hadoop_profile }}"
+    dest: "{{ install_dir }}"
+    state: link
+
+- name: Cấp quyền sở hữu thư mục cho user '{{ ansible_user }}'
+  file:
+    path: "/opt/spark-{{ spark_version }}-bin-{{ hadoop_profile }}"
+    owner: "{{ ansible_user }}"
+    group: "{{ ansible_user }}"
+    recurse: true
+
+- name: Cấu hình file spark-env.sh
+  copy:
+    dest: "{{ install_dir }}/conf/spark-env.sh"
+    content: |
+      #!/usr/bin/env bash
+      export SPARK_MASTER_HOST={{ hostvars[groups['master'][0]]['ansible_host'] | default(groups['master'][0]) }}
+      export SPARK_MASTER_PORT={{ spark_master_port }}
+      # Bạn có thể điều chỉnh cấu hình này dựa vào VM thực tế 
+      export SPARK_WORKER_CORES={{ spark_worker_cores }}
+      export SPARK_WORKER_MEMORY={{ spark_worker_memory }}
+    mode: '0755'
+    owner: "{{ ansible_user }}"
+
+- name: Cấu hình workers (trên Master)
+  copy:
+    dest: "{{ install_dir }}/conf/workers"
+    content: |
+      {% for host in groups['workers'] %}
+      {{ hostvars[host]['ansible_host'] | default(host) }}
+      {% endfor %}
+    owner: "{{ ansible_user }}"
+  when: inventory_hostname in groups['master']
+
+- name: Cập nhật biến môi trường SPARK_HOME
+  lineinfile:
+    path: /etc/profile.d/spark.sh
+    line: "export SPARK_HOME={{ install_dir }}\nexport PATH=$PATH:$SPARK_HOME/bin:$SPARK_HOME/sbin"
+    create: yes
+
+- name: Khởi động Spark Master (chì Master)
+  become: yes
+  become_user: "{{ ansible_user }}"
+  shell: "{{ install_dir }}/sbin/start-master.sh"
+  register: spark_master_start
+  failed_when: spark_master_start.rc != 0 and "running as process" not in spark_master_start.stdout
+  when: inventory_hostname in groups['master']
+
+- name: Khởi động Spark Worker (chì Workers)
+  become: yes
+  become_user: "{{ ansible_user }}"
+  shell: "{{ install_dir }}/sbin/start-worker.sh spark://{{ hostvars[groups['master'][0]]['ansible_host'] | default(groups['master'][0]) }}:{{ spark_master_port }}"
+  register: spark_worker_start
+  failed_when: spark_worker_start.rc != 0 and "running as process" not in spark_worker_start.stdout
+  when: inventory_hostname in groups['workers']

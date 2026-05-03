@@ -1,0 +1,77 @@
+{
+  "forums": {
+    "https://voz.vn/s/review-san-pham.103/": {
+      "done_pages": [
+        "https://voz.vn/s/review-san-pham.103/",
+        "https://voz.vn/s/review-san-pham.103/page-2",
+        "https://voz.vn/s/review-san-pham.103/page-3"
+      ]
+    }
+  },
+  "threads": {
+    "https://voz.vn/t/review-nhanh-tren-tay-vivo-x300-chinh-hang.1185014/": {
+      "done": true,
+      "last_page": 2
+    },
+    "https://voz.vn/t/review-may-rua-bat-lg-quadwash-truesteam-mau-den-ldt14bla4-mua-tren-shopee-gia-hon-13-trieu.1191648/": {
+      "done": true,
+      "last_page": 4
+    },
+    "https://voz.vn/t/camera-oppo-find-x9-pro-iphone-17-promax.1192364/": {
+      "done": true,
+      "last_page": 2
+    },
+    "https://voz.vn/t/lenovo-xiaoxin-air14-sau-5-nam-cay-cuoc.1193698/": {
+      "done": true,
+      "last_page": 2
+    },
+    "https://voz.vn/t/canh-bao-ace-dang-dung-o-cam-chuyen-doi-dang-nhu-sopoka.1190037/": {
+      "done": true,
+      "last_page": 4
+    },
+    "https://voz.vn/t/top-3-bo-office-cong-cu-van-phong-cho-linux.1190084/": {
+      "done": true,
+      "last_page": 1
+    },
+    "https://voz.vn/t/review-lap-he-thong-nang-luong-mat-troi-cho-nha-xai-1-5-2-cu-tien-dien-cho-anh-em-tham-khao.1182316/": {
+      "done": true,
+      "last_page": 4
+    },
+    "https://voz.vn/t/robot-hut-bui-narwal-flow-con-robot-underated-nhat.1196880/": {
+      "done": true,
+      "last_page": 3
+    },
+    "https://voz.vn/t/honor-400-noi-dia.1197366/": {
+      "done": true,
+      "last_page": 2
+    },
+    "https://voz.vn/t/review-chiec-iphone-16e-top-1-e-va-tranh-cai.1187836/": {
+      "done": true,
+      "last_page": 17
+    },
+    "https://voz.vn/t/may-lanh-tcl-tep-13csd-f1i-1-5hp.1182981/": {
+      "done": true,
+      "last_page": 6
+    },
+    "https://voz.vn/t/so-sanh-trai-nghiem-find-x9-pro-va-x300-pro.1187105/": {
+      "done": true,
+      "last_page": 2
+    },
+    "https://voz.vn/t/review-man-hinh-ktc-h24t7-vs-aoc-q27g11e-74.1190832/": {
+      "done": true,
+      "last_page": 4
+    },
+    "https://voz.vn/t/danh-gia-noi-com-dien-cao-tan-zojirushi-np-zu18-td-1-8l-noi-dia-nhat.1188149/": {
+      "done": true,
+      "last_page": 4
+    },
+    "https://voz.vn/t/r9-7845hx-mang-len-pc-tren-main-topc-yuniki-fl1-hx-itx-d5.1187872/": {
+      "done": true,
+      "last_page": 9
+    },
+    "https://voz.vn/t/trai-nghiem-cua-em-sau-1-nam-di-xforce-base-so-sanh-voi-vf6.1187034/": {
+      "done": false,
+      "last_page": 2
+    }
+  }
+}

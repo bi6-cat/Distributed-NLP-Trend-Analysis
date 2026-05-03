@@ -1,0 +1,6 @@
+---
+- name: Bước 7 - Cài đặt Apache Airflow 2.9
+  hosts: master
+  become: yes
+  roles:
+    - airflow
