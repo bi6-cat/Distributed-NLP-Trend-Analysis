@@ -148,16 +148,17 @@ def extract_features(
         if "id_post" in sent.columns and "post_id" not in sent.columns:
             sent = sent.rename(columns={"id_post": "post_id"})
 
+        sent["sentiment_label"] = sent["sentiment_label"].str.lower()
         sent_agg = sent.groupby("post_id")["sentiment_label"].value_counts(
             normalize=True
         ).unstack(fill_value=0.0)
 
-        for col in ("Negative", "Positive"):
+        for col in ("negative", "positive"):
             if col not in sent_agg.columns:
                 sent_agg[col] = 0.0
 
-        agg["neg_ratio"] = sent_agg["Negative"].reindex(agg.index, fill_value=0.0)
-        agg["pos_ratio"] = sent_agg["Positive"].reindex(agg.index, fill_value=0.0)
+        agg["neg_ratio"] = sent_agg["negative"].reindex(agg.index, fill_value=0.0).round(5)
+        agg["pos_ratio"] = sent_agg["positive"].reindex(agg.index, fill_value=0.0).round(5)
     else:
         agg["neg_ratio"] = 0.0
         agg["pos_ratio"] = 0.0

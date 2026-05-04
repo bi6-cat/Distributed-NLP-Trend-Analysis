@@ -13,7 +13,7 @@ Cách dùng:
 
     # Single text
     result = predictor.predict("Giáo viên giảng rất hay!")
-    # → {"label": "Positive", "label_id": 2, "confidence": 0.95, "probs": [0.02, 0.03, 0.95]}
+    # → {"label": "positive", "label_id": 2, "confidence": 0.95, "probs": [0.02, 0.03, 0.95]}
 
     # Batch (dùng trong Spark)
     results = predictor.predict_batch(["câu 1", "câu 2", ...], batch_size=32)
@@ -27,7 +27,7 @@ from typing import List, Dict, Optional
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
 
-LABEL_MAP = {0: "Negative", 1: "Neutral", 2: "Positive"}
+LABEL_MAP = {0: "negative", 1: "neutral", 2: "positive"}
 
 
 class SentimentPredictor:
@@ -138,9 +138,9 @@ class SentimentPredictor:
                 "label_id":   label_id,
                 "confidence": float(probs[i][label_id]),
                 "probs": {
-                    "Negative": float(probs[i][0]),
-                    "Neutral":  float(probs[i][1]),
-                    "Positive": float(probs[i][2]),
+                    "negative": float(probs[i][0]),
+                    "neutral":  float(probs[i][1]),
+                    "positive": float(probs[i][2]),
                 },
             })
         return results
