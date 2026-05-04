@@ -204,9 +204,6 @@ def main():
         if col_name not in raw_df.columns:
             raw_df = raw_df.withColumn(col_name, lit(None))
 
-    total = raw_df.count()
-    print(f"[INFO] Tổng số bản ghi đầu vào: {total:,}")
-
     # Phân tán inference qua mapPartitions
     processed_rdd = raw_df.rdd.mapPartitions(process_partition)
     processed_df  = spark.createDataFrame(processed_rdd, OUTPUT_SCHEMA)
