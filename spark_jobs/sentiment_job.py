@@ -14,7 +14,7 @@ Cách chạy trên cluster:
         --total-executor-cores 4 \\
         --py-files dist/nlp_trend.zip \\
         --conf spark.jars=/opt/spark/jars/clickhouse-jdbc.jar \\
-        --conf spark.executorEnv.NLP_MODEL_PATH=hdfs:///models/phobert_finetuned/final \\
+        --conf spark.executorEnv.NLP_MODEL_PATH=hdfs://192.168.56.11:9000/user/zett/models/phobert_finetuned/final \\
         --conf spark.executorEnv.NLP_MODEL_VERSION=phobert_v1 \\
         --conf spark.executorEnv.CLICKHOUSE_HOST=192.168.56.14 \\
         spark_jobs/sentiment_job.py
@@ -38,8 +38,8 @@ from pyspark.sql.types import (
     StringType, FloatType, TimestampType,
 )
 
-HDFS_INPUT    = os.environ.get("HDFS_INPUT",        "hdfs:///data/silver/posts_core/date=*/")
-MODEL_PATH    = os.environ.get("NLP_MODEL_PATH",    "hdfs:///models/phobert_finetuned/final")
+HDFS_INPUT    = os.environ.get("HDFS_INPUT",        "hdfs://192.168.56.11:9000/user/zett/staged/stg_posts_core")
+MODEL_PATH    = os.environ.get("NLP_MODEL_PATH",    "hdfs://192.168.56.11:9000/user/zett/models/phobert_finetuned/final")
 MODEL_VERSION = os.environ.get("NLP_MODEL_VERSION", "phobert_v1")
 
 CLICKHOUSE_HOST = os.environ.get("CLICKHOUSE_HOST", "192.168.56.14")
@@ -72,6 +72,10 @@ def process_partition(iterator):
     import os, sys, traceback
     from datetime import datetime, timezone
 
+    # Force offline mode để transformers không cố download từ HuggingFace Hub
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
     try:
         from pyspark import SparkFiles
         root = SparkFiles.getRootDirectory()
@@ -85,19 +89,49 @@ def process_partition(iterator):
 
     def _hdfs_to_local(hdfs_path, local_name):
         if not hdfs_path.startswith("hdfs://"):
+            print(f"[HDFS] Path is local: {hdfs_path}", flush=True)
             return hdfs_path
+
         local = f"/tmp/{local_name}"
-        if not os.path.exists(local):
-            import subprocess
-            hdfs_bin = "/opt/hadoop/bin/hdfs"
-            subprocess.run([hdfs_bin, "dfs", "-get", hdfs_path, local], check=True)
+
+        # Luôn xóa thư mục cũ để đảm bảo fresh copy
+        import shutil
+        if os.path.exists(local):
+            print(f"[HDFS] Removing stale directory: {local}", flush=True)
+            shutil.rmtree(local, ignore_errors=True)
+
+        import subprocess
+        hdfs_bin = "/opt/hadoop/bin/hdfs"
+        print(f"[HDFS] Copying {hdfs_path} → {local}", flush=True)
+
+        result = subprocess.run([hdfs_bin, "dfs", "-get", hdfs_path, local],
+                               capture_output=True, text=True, timeout=60)
+
+        if result.returncode != 0:
+            print(f"[HDFS STDOUT] {result.stdout}", flush=True)
+            print(f"[HDFS STDERR] {result.stderr}", flush=True)
+            raise RuntimeError(f"HDFS copy failed (code {result.returncode}): {result.stderr}")
+
+        print(f"[HDFS] Copy complete.", flush=True)
+
+        # Verify model files exist
+        required_files = ["config.json", "tokenizer.json"]
+        for fname in required_files:
+            fpath = os.path.join(local, fname)
+            if not os.path.exists(fpath):
+                print(f"[ERROR] Missing {fname} in {local}", flush=True)
+                import subprocess
+                subprocess.run(["find", local, "-type", "f"], capture_output=False)
+                raise RuntimeError(f"Model file missing: {fpath}")
+
+        print(f"[HDFS] Model files verified ✓", flush=True)
         return local
 
     model_path = _hdfs_to_local(model_path, "phobert_finetuned")
 
     try:
         import torch
-        from transformers import AutoTokenizer, AutoModelForSequenceClassification
+        from transformers import AutoTokenizer, AutoModelForSequenceClassification, PretrainedConfig
     except Exception as e:
         print(f"[WORKER IMPORT ERROR] {e}", flush=True)
         traceback.print_exc()
@@ -107,14 +141,22 @@ def process_partition(iterator):
     device    = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
-        model     = AutoModelForSequenceClassification.from_pretrained(model_path, local_files_only=True)
+        print(f"[MODEL] Loading from {model_path}", flush=True)
+
+        # Load config trực tiếp từ file
+        config = PretrainedConfig.from_pretrained(model_path, local_files_only=True)
+        tokenizer = AutoTokenizer.from_pretrained(model_path, config=config, local_files_only=True)
+        model = AutoModelForSequenceClassification.from_pretrained(model_path, config=config, local_files_only=True)
         model.to(device)
         model.eval()
+        print(f"[MODEL] Loaded successfully ✓", flush=True)
     except Exception as e:
-        print(f"[WORKER MODEL LOAD ERROR] model_path={model_path} error={e}", flush=True)
+        print(f"[MODEL ERROR] {e}", flush=True)
+        import glob
+        files = glob.glob(f"{model_path}/**/*", recursive=True)[:10]
+        print(f"[DEBUG] Files: {files}", flush=True)
         traceback.print_exc()
-        raise RuntimeError(f"Worker cannot load model from {model_path}: {e}")
+        raise RuntimeError(f"Cannot load model: {e}")
 
     BATCH_SIZE = 32
     rows       = list(iterator)
