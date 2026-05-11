@@ -515,65 +515,74 @@ with DAG(
     pipeline_start = DummyOperator(task_id="pipeline_start")
 
     # ── Task từ Member 1: Crawl ──
-    # TODO [Member 1]: Thay bằng crawl DAG thực tế
-    crawl_sources = DummyOperator(
+    # Thay bằng crawl thực tế qua BashOperator
+    # Note: Truyền biến môi trường HDFS_HOST để python script tự nhận dạng hostname docker
+    crawl_sources = BashOperator(
         task_id="crawl_sources",
+        bash_command=(
+            "export HDFS_HOST='namenode' && "
+            "python3 /opt/airflow/crawlers/vnexpress.py || true && "
+            "python3 /opt/airflow/crawlers/voz.py || true && "
+            "python3 /opt/airflow/crawlers/upload_to_hdfs.py"
+        ),
     )
 
     # ── Task từ Member 2: Spark Cleaning + Dedup LSH ──
-    # TODO [Member 2]: Thay bằng SparkSubmitOperator thực tế
-    spark_cleaning = DummyOperator(
+    from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
+
+    # Note: SparkSubmitOperator yêu cầu connection 'spark_default' đã được tạo với host 'spark://spark-master:7077'
+    # Hoặc chúng ta override trực tiếp tham số:
+    spark_cleaning = SparkSubmitOperator(
         task_id="spark_cleaning",
+        application="/opt/airflow/spark_jobs/cleaning_job.py",
+        conn_id="spark_default",
+        conf={"spark.master": "spark://spark-master:7077"},
+        executor_memory="4g",
+        env_vars={
+            "HDFS_INPUT": "hdfs://namenode:9000/user/zett/raw_data/voz",
+            "HDFS_OUTPUT": "hdfs://namenode:9000/user/zett/staged/sentiment/",
+            "CLICKHOUSE_HOST": "clickhouse",
+        }
     )
 
     # ── Task từ Member 3: LDA Topic Modeling ──
-    # Chạy lda_job.py qua spark-submit
-    lda_topic_modeling = BashOperator(
+    lda_topic_modeling = SparkSubmitOperator(
         task_id="lda_topic_modeling",
-        bash_command=(
-            "spark-submit "
-            "--master spark://master-node:7077 "
-            "--deploy-mode client "
-            "--executor-memory 8g "
-            "--driver-memory 4g "
-            "spark_jobs/lda_job.py "
-            "--input-path /data/staged/ "
-            "--output-path /data/results/lda/ "
-            "--k 20 "
-            "--max-iter 50 "
-        ),
-        # TODO [Member 2]: Cấu hình spark-submit path và connection
+        application="/opt/airflow/spark_jobs/lda_job.py",
+        conn_id="spark_default",
+        conf={"spark.master": "spark://spark-master:7077"},
+        executor_memory="4g",
+        application_args=[
+            "--input-path", "hdfs://namenode:9000/user/zett/staged/",
+            "--output-path", "hdfs://namenode:9000/user/zett/results/lda/",
+            "--k", "20"
+        ]
     )
 
     # ── Task từ Member 4: Sentiment Analysis ──
-    # TODO [Member 4]: Thay bằng SparkSubmitOperator cho sentiment_job.py
-    sentiment_analysis = DummyOperator(
+    sentiment_analysis = SparkSubmitOperator(
         task_id="sentiment_analysis",
+        application="/opt/airflow/spark_jobs/sentiment_job.py",
+        conn_id="spark_default",
+        conf={"spark.master": "spark://spark-master:7077"},
+        executor_memory="4g",
+        env_vars={
+            "HDFS_INPUT": "hdfs://namenode:9000/user/zett/staged/",
+            "CLICKHOUSE_HOST": "clickhouse"
+        }
     )
 
-    # ── Task từ Member 5: Trend Scoring ──
-    # TODO [Member 5]: Thay bằng PythonOperator cho trend_scorer.py
-    trend_scoring = DummyOperator(
-        task_id="trend_scoring",
-    )
-
-    # ── Task từ Member 2: Load to ClickHouse ──
-    # TODO [Member 2]: Thay bằng task load staging tables vào ClickHouse
-    load_to_clickhouse = DummyOperator(
-        task_id="load_to_clickhouse",
-    )
-
-    # ── Task từ Member 2: dbt Transformations ──
-    # TODO [Member 2]: Thay bằng BashOperator chạy `dbt run`
-    dbt_transform = DummyOperator(
+    # ── Task từ Member 5: Trend Scoring (bằng dbt) ──
+    dbt_transform = BashOperator(
         task_id="dbt_transform",
+        bash_command="cd /opt/airflow/warehouse/dbt_project && dbt run --profiles-dir .",
     )
 
     pipeline_end = DummyOperator(task_id="pipeline_end")
 
     # ── DAG Flow ──
-    # crawl → clean → [LDA + sentiment song song] → scoring → clickhouse → dbt
+    # crawl → clean → [LDA + sentiment song song] → dbt 
+    # (Scoring & Load to Clickhouse đã nằm trong dbt & NLP jobs)
     pipeline_start >> crawl_sources >> spark_cleaning
     spark_cleaning >> [lda_topic_modeling, sentiment_analysis]
-    [lda_topic_modeling, sentiment_analysis] >> trend_scoring
-    trend_scoring >> load_to_clickhouse >> dbt_transform >> pipeline_end
+    [lda_topic_modeling, sentiment_analysis] >> dbt_transform >> pipeline_end

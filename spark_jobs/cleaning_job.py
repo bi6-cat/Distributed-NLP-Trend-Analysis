@@ -16,7 +16,7 @@ Luồng:
 
 Cách chạy trên cluster (từ master node):
     spark-submit \\
-        --master spark://192.168.56.11:7077 \\
+        --master spark://spark-master:7077 \\
         --num-executors 2 \\
         --executor-cores 2 \\
         --executor-memory 4g \\
@@ -30,7 +30,7 @@ Cách chạy trên cluster (từ master node):
         spark_jobs/cleaning_job.py --no-dedup
 
 Biến môi trường (tuỳ chỉnh qua --conf spark.executorEnv.*):
-    HDFS_BASE       : hdfs://192.168.56.11:9000
+    HDFS_BASE       : hdfs://namenode:9000
     NLP_SLANG_DICT  : path slang_dict.json trên HDFS
     NLP_STOPWORDS   : path stopwords_vi.txt trên HDFS
     HDFS_OUTPUT     : đường dẫn HDFS ghi kết quả Parquet
@@ -52,7 +52,7 @@ from pyspark.sql.types import (
 )
 
 # ── Config (override bằng env var hoặc spark-submit --conf) ──────────────────
-HDFS_BASE  = os.environ.get("HDFS_BASE",    "hdfs://192.168.56.11:9000")
+HDFS_BASE  = os.environ.get("HDFS_BASE",    "hdfs://namenode:9000")
 HDFS_RAW   = os.environ.get("HDFS_INPUT",   f"{HDFS_BASE}/user/zett/raw_data")
 HDFS_OUT   = os.environ.get("HDFS_OUTPUT",  f"{HDFS_BASE}/user/zett/staged/stg_posts_core")
 

@@ -9,21 +9,21 @@ word segment). Worker chỉ cần đọc segmented_text, không preprocess lại
 
 Cách chạy trên cluster:
     spark-submit \\
-        --master spark://192.168.56.11:7077 \\
+        --master spark://spark-master:7077 \\
         --executor-memory 2g \\
         --total-executor-cores 4 \\
         --py-files dist/nlp_trend.zip \\
         --conf spark.jars=/opt/spark/jars/clickhouse-jdbc.jar \\
         --conf spark.executorEnv.NLP_MODEL_PATH=hdfs:///models/phobert_finetuned/final \\
         --conf spark.executorEnv.NLP_MODEL_VERSION=phobert_v1 \\
-        --conf spark.executorEnv.CLICKHOUSE_HOST=192.168.56.14 \\
+        --conf spark.executorEnv.CLICKHOUSE_HOST=clickhouse \\
         spark_jobs/sentiment_job.py
 
 Biến môi trường (truyền qua --conf spark.executorEnv.* hoặc export trước):
     HDFS_INPUT        : path Parquet stg_posts_core  (mặc định hdfs:///data/silver/posts_core/date=*/)
     NLP_MODEL_PATH    : path tới PhoBERT checkpoint (HDFS hoặc local shared fs)
     NLP_MODEL_VERSION : version string ghi vào model_version  (mặc định 'phobert_v1')
-    CLICKHOUSE_HOST   : IP storage node          (mặc định 192.168.56.14)
+    CLICKHOUSE_HOST   : IP storage node          (mặc định clickhouse)
     CLICKHOUSE_PORT   : HTTP port ClickHouse     (mặc định 8123)
     CLICKHOUSE_DB     : database name            (mặc định tech_radar)
     CLICKHOUSE_USER   : user                     (mặc định default)
@@ -42,7 +42,7 @@ HDFS_INPUT    = os.environ.get("HDFS_INPUT",        "hdfs:///data/silver/posts_c
 MODEL_PATH    = os.environ.get("NLP_MODEL_PATH",    "hdfs:///models/phobert_finetuned/final")
 MODEL_VERSION = os.environ.get("NLP_MODEL_VERSION", "phobert_v1")
 
-CLICKHOUSE_HOST = os.environ.get("CLICKHOUSE_HOST", "192.168.56.14")
+CLICKHOUSE_HOST = os.environ.get("CLICKHOUSE_HOST", "clickhouse")
 CLICKHOUSE_PORT = os.environ.get("CLICKHOUSE_PORT", "8123")
 CLICKHOUSE_DB   = os.environ.get("CLICKHOUSE_DB",   "tech_radar")
 CLICKHOUSE_USER = os.environ.get("CLICKHOUSE_USER", "default")

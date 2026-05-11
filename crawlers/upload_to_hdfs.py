@@ -3,7 +3,7 @@ import requests
 import urllib.parse
 
 # Cấu hình HDFS (WebHDFS)
-HDFS_HOST = "192.168.56.11"
+HDFS_HOST = os.environ.get("HDFS_HOST", "namenode")
 HDFS_PORT = 9870
 HDFS_USER = "zett"
 HDFS_BASE_DIR = "/user/zett/raw_data"
