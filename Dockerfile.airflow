@@ -1,4 +1,4 @@
-FROM apache/airflow:2.8.3
+FROM apache/airflow:2.8.3-python3.10
 
 USER root
 # Install OpenJDK-17 to support Spark/PySpark if needed inside Airflow
@@ -17,7 +17,7 @@ COPY requirements.txt /requirements.txt
 RUN pip install --no-cache-dir "apache-airflow==${AIRFLOW_VERSION}" -r /requirements.txt
 
 # Additional dbt & spark operators
-RUN pip install --no-cache-dir \
+RUN pip install --no-cache-dir "apache-airflow==${AIRFLOW_VERSION}" \
     apache-airflow-providers-apache-spark \
-    dbt-core \
-    dbt-clickhouse
+    dbt-core==1.7.0 \
+    dbt-clickhouse==1.7.0

@@ -17,9 +17,11 @@ x-airflow-common:
     - ./dags:/opt/airflow/dags
     - ./spark_jobs:/opt/airflow/spark_jobs
     - ./scripts:/opt/airflow/scripts
-    - ./warehouse/dbt_project:/opt/airflow/dbt_project
+    - ./warehouse:/opt/airflow/warehouse
     - ./data:/opt/airflow/data
     - ./output:/opt/airflow/output
+    - ./algorithms:/opt/airflow/algorithms
+    - ./crawlers:/opt/airflow/crawlers
   depends_on:
     postgres:
       condition: service_healthy
@@ -39,6 +41,7 @@ services:
       - hadoop_namenode:/hadoop/dfs/name
     environment:
       - CLUSTER_NAME=nlp_cluster
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
     networks:
       - nlp_network
 
@@ -52,6 +55,7 @@ services:
       - hadoop_datanode:/hadoop/dfs/data
     environment:
       SERVICE_PRECONDITION: "namenode:9870"
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
     networks:
       - nlp_network
 
@@ -59,7 +63,7 @@ services:
   # 2. APACHE SPARK
   # ==========================================
   spark-master:
-    image: bitnami/spark:3.5.0
+    image: public.ecr.aws/bitnami/spark:3.5.0
     container_name: spark-master
     environment:
       - SPARK_MODE=master
@@ -75,7 +79,7 @@ services:
 
   # Gộp thành 1 Worker lớn (6 Cores, 20G RAM)
   spark-worker:
-    image: bitnami/spark:3.5.0
+    image: public.ecr.aws/bitnami/spark:3.5.0
     container_name: spark-worker
     environment:
       - SPARK_MODE=worker
@@ -99,7 +103,7 @@ services:
     container_name: clickhouse
     ports:
       - "8123:8123"
-      - "9000:9000" # Dùng nội bộ cho giao tiếp
+      - "9001:9000" # Dùng nội bộ cho giao tiếp, đổi host port qua 9001 tránh trùng Hadoop
     volumes:
       - clickhouse_data:/var/lib/clickhouse
     networks:
