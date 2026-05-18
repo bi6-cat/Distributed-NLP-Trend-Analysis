@@ -523,6 +523,7 @@ with DAG(
             "export HDFS_HOST='namenode' && "
             "python3 /opt/airflow/crawlers/vnexpress.py || true && "
             "python3 /opt/airflow/crawlers/voz.py || true && "
+            "python3 /opt/airflow/crawlers/vatvo.py || true && "
             "python3 /opt/airflow/crawlers/upload_to_hdfs.py"
         ),
     )
@@ -536,12 +537,13 @@ with DAG(
         task_id="spark_cleaning",
         application="/opt/airflow/spark_jobs/cleaning_job.py",
         conn_id="spark_default",
-        conf={"spark.master": "spark://spark-master:7077"},
+        conf={"spark.master": "local[*]"},
         executor_memory="4g",
         env_vars={
-            "HDFS_INPUT": "hdfs://namenode:9000/user/zett/raw_data/voz",
+            "HDFS_INPUT": "hdfs://namenode:9000/user/zett/raw_data",
             "HDFS_OUTPUT": "hdfs://namenode:9000/user/zett/staged/sentiment/",
             "CLICKHOUSE_HOST": "clickhouse",
+            "PYTHONPATH": "/opt/airflow",
         }
     )
 
@@ -550,7 +552,7 @@ with DAG(
         task_id="lda_topic_modeling",
         application="/opt/airflow/spark_jobs/lda_job.py",
         conn_id="spark_default",
-        conf={"spark.master": "spark://spark-master:7077"},
+        conf={"spark.master": "local[*]"},
         executor_memory="4g",
         application_args=[
             "--input-path", "hdfs://namenode:9000/user/zett/staged/",
@@ -568,7 +570,8 @@ with DAG(
         executor_memory="4g",
         env_vars={
             "HDFS_INPUT": "hdfs://namenode:9000/user/zett/staged/",
-            "CLICKHOUSE_HOST": "clickhouse"
+            "CLICKHOUSE_HOST": "clickhouse",
+            "PYTHONPATH": "/opt/airflow",
         }
     )
 
