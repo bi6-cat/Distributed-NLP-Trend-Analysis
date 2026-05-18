@@ -13,6 +13,7 @@ x-airflow-common:
     AIRFLOW__CORE__FERNET_KEY: ''
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    HADOOP_USER_NAME: root
   volumes:
     - ./:/opt/airflow
   depends_on:
@@ -64,6 +65,7 @@ services:
       - SPARK_MODE=master
       - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
       - PYSPARK_DRIVER_PYTHON=/opt/bitnami/python/bin/python3
+      - HADOOP_USER_NAME=root
     ports:
       - "8080:8080"
       - "7077:7077"
@@ -87,6 +89,7 @@ services:
       - SPARK_WORKER_CORES=6
       - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
       - PYSPARK_DRIVER_PYTHON=/opt/bitnami/python/bin/python3
+      - HADOOP_USER_NAME=root
     depends_on:
       - spark-master
     volumes:

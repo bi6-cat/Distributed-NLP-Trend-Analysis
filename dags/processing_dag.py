@@ -520,12 +520,17 @@ with DAG(
     crawl_sources = BashOperator(
         task_id="crawl_sources",
         bash_command=(
-            "export HDFS_HOST='namenode' && "
-            "python3 /opt/airflow/crawlers/vnexpress.py || true && "
-            "python3 /opt/airflow/crawlers/voz.py || true && "
-            "python3 /opt/airflow/crawlers/vatvo.py || true && "
-            "python3 /opt/airflow/crawlers/upload_to_hdfs.py"
+            # SKIP TẠM THỜI: Dùng data có sẵn để tập trung vào phần processing
+            # "export HDFS_HOST='namenode' && "
+            # "python3 /opt/airflow/crawlers/vnexpress.py || true && "
+            # "python3 /opt/airflow/crawlers/voz.py || true && "
+            # "python3 /opt/airflow/crawlers/vatvo.py || true && "
+            # "python3 /opt/airflow/crawlers/upload_to_hdfs.py"
+            "export HDFS_HOST='namenode' PYTHONUNBUFFERED=1 && "
+            "echo '[SKIP] crawlers - dùng data có sẵn' && "
+            "python3 -u /opt/airflow/crawlers/upload_to_hdfs.py"
         ),
+        execution_timeout=timedelta(hours=2),
     )
 
     # ── Task từ Member 2: Spark Cleaning + Dedup LSH ──
