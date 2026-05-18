@@ -37,6 +37,7 @@ SELECT
         c.source = 'tinhte',    'forum',
         c.source = 'vnexpress', 'news',
         c.source = 'youtube',   'video',
+        c.source = 'vatvo',     'forum',
         'unknown'
     ) AS source_type,
 

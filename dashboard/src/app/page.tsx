@@ -8,10 +8,26 @@ import {
 } from "lucide-react";
 import { SentimentDonutChart } from "@/components/dashboard/sentiment-donut";
 import { TrendingTopicsTable } from "@/components/dashboard/trending-topics-table";
+import { getOverviewKPIs, getTrendingTopics, getOverallSentiment } from "@/app/actions/overview";
 
-const isAlert = true;
+export const revalidate = 3600;
 
-export default function OverviewPage() {
+export default async function OverviewPage() {
+  const [kpis, trendingTopics, sentimentData] = await Promise.all([
+    getOverviewKPIs(),
+    getTrendingTopics(),
+    getOverallSentiment()
+  ]);
+  
+  // Format numbers securely
+  const dailyMentions = Number(kpis.daily_mentions) || 0;
+  const activeCrises = Number(kpis.active_crises) || 0;
+  const mentionDelta = Number(kpis.mention_delta_pct) || 0;
+  
+  // A simple threshold for the heat indicator: 
+  // if active crises > 0 or mention delta > 50%
+  const isAlert = activeCrises > 0 || mentionDelta > 50;
+
   return (
     <div className="space-y-8">
       {/* Page header */}
@@ -45,12 +61,16 @@ export default function OverviewPage() {
                 Daily Mentions
               </p>
               <p className="mt-3 text-4xl font-bold tabular-nums tracking-tight text-slate-900">
-                24,531
+                {dailyMentions.toLocaleString()}
               </p>
-              <div className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2 py-0.5 text-xs font-semibold text-emerald-700">
-                <TrendingUp className="h-3.5 w-3.5" strokeWidth={2.5} />
-                +12.5%
-                <span className="font-medium text-emerald-600/80">vs yesterday</span>
+              <div className={`mt-2 inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-semibold ${mentionDelta >= 0 ? "bg-emerald-50 text-emerald-700" : "bg-rose-50 text-rose-700"}`}>
+                {mentionDelta >= 0 ? (
+                  <TrendingUp className="h-3.5 w-3.5" strokeWidth={2.5} />
+                ) : (
+                  <TrendingDown className="h-3.5 w-3.5" strokeWidth={2.5} />
+                )}
+                {mentionDelta > 0 ? "+" : ""}{mentionDelta.toFixed(1)}%
+                <span className={`font-medium ${mentionDelta >= 0 ? "text-emerald-600/80" : "text-rose-600/80"}`}>vs yesterday</span>
               </div>
             </div>
             <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600 ring-1 ring-inset ring-indigo-100">
@@ -67,14 +87,23 @@ export default function OverviewPage() {
                 Active Crises
               </p>
               <p className="mt-3 text-4xl font-bold tabular-nums tracking-tight text-slate-900">
-                3
+                {activeCrises}
               </p>
-              <div className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-rose-50 px-2 py-0.5 text-xs font-semibold text-rose-700">
-                <TrendingDown className="h-3.5 w-3.5 rotate-180" strokeWidth={2.5} />
-                +1 detected today
+              <div className={`mt-2 inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-semibold ${activeCrises > 0 ? "bg-rose-50 text-rose-700" : "bg-slate-100 text-slate-600"}`}>
+                {activeCrises > 0 ? (
+                  <>
+                    <TrendingUp className="h-3.5 w-3.5" strokeWidth={2.5} />
+                    Active events detected
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle2 className="h-3.5 w-3.5" strokeWidth={2.5} />
+                    No active events
+                  </>
+                )}
               </div>
             </div>
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-50 text-amber-600 ring-1 ring-inset ring-amber-100">
+            <div className={`flex h-10 w-10 items-center justify-center rounded-lg ring-1 ring-inset ${activeCrises > 0 ? "bg-amber-50 text-amber-600 ring-amber-100" : "bg-slate-50 text-slate-400 ring-slate-200"}`}>
               <ShieldAlert className="h-5 w-5" strokeWidth={2} />
             </div>
           </div>
@@ -115,7 +144,7 @@ export default function OverviewPage() {
               </div>
               <p className="mt-2 max-w-[16rem] text-xs font-medium text-slate-600">
                 {isAlert
-                  ? "Crisis volume above 2σ baseline. Review incidents."
+                  ? "Crisis volume above baseline or active events detected."
                   : "All signals are within healthy thresholds."}
               </p>
             </div>
@@ -138,8 +167,8 @@ export default function OverviewPage() {
 
       {/* Charts row */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-5">
-        <SentimentDonutChart className="xl:col-span-4" />
-        <TrendingTopicsTable className="xl:col-span-8" />
+        <SentimentDonutChart className="xl:col-span-4" data={sentimentData} />
+        <TrendingTopicsTable className="xl:col-span-8" topics={trendingTopics} />
       </div>
     </div>
   );

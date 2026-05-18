@@ -17,14 +17,19 @@ import {
   chartAxisTickStyle,
 } from "@/lib/chart-styles";
 
-const data = [
-  { id: "EVT-1", time: "08:30", severity: 3, label: "Shopee Data Breach Rumor", color: "#f43f5e" },
-  { id: "EVT-2", time: "10:15", severity: 2, label: "Momo App Outage", color: "#f59e0b" },
-  { id: "EVT-3", time: "14:45", severity: 1, label: "Be Group Service Fee", color: "#eab308" },
-  { id: "EVT-4", time: "16:20", severity: 3, label: "FPT Play Cyber Attack", color: "#f43f5e" },
-];
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function ActiveEventsTimeline({ events }: { events: any[] }) {
+  // Guard against empty array and map properties
+  const safeData = events.length > 0 ? events.map(e => ({
+    id: e.event_id,
+    time: e.time,
+    severity: e.severityRank,
+    label: e.affected_topics[0] || "Unknown Event",
+    color: e.severity === 'HIGH' ? '#f43f5e' : e.severity === 'MEDIUM' ? '#f59e0b' : '#eab308'
+  })) : [
+    { id: "No-events", time: "12:00", severity: 0, label: "No active events", color: "#cbd5e1" }
+  ];
 
-export function ActiveEventsTimeline() {
   return (
     <div className="h-[260px] w-full">
       <ResponsiveContainer width="100%" height="100%">
@@ -67,8 +72,8 @@ export function ActiveEventsTimeline() {
               return [value, name];
             }}
           />
-          <Scatter name="Incidents" data={data} fill="#8884d8" shape="circle">
-            {data.map((entry, index) => (
+          <Scatter name="Incidents" data={safeData} fill="#8884d8" shape="circle">
+            {safeData.map((entry, index) => (
               <Cell
                 key={`cell-${index}`}
                 fill={entry.color}

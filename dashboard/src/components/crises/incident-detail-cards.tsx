@@ -22,86 +22,51 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-const incidents = [
-  {
-    event_id: "EVT-1001",
-    severity: "HIGH",
-    detected_at: "Today, 08:30",
-    affected_topics: ["Shopee Data Breach Rumor", "E-commerce Security"],
-    trigger_conditions: ["volume_zscore > 3.0", "neg_ratio > 0.8"],
-    neg_ratio: 85,
-    mention_velocity: "+450/hr",
-    anomaly_score: 0.92,
-    evidence_posts: [
-      { id: 1, author: "Security_Expert", text: "Dữ liệu hơn 10 triệu thẻ tín dụng nghi bị rò rỉ từ sàn S.", type: "forum", engagement: 5200 },
-      { id: 2, author: "Báo Pháp Luật", text: "Tin đồn: Một nền tảng TMĐT lớn bị hacker tấn công.", type: "news", engagement: 3100 },
-    ],
-  },
-  {
-    event_id: "EVT-1002",
-    severity: "HIGH",
-    detected_at: "Today, 16:20",
-    affected_topics: ["FPT Play Cyber Attack", "Streaming Service"],
-    trigger_conditions: ["volume_zscore > 2.5", "acceleration > 50"],
-    neg_ratio: 72,
-    mention_velocity: "+320/hr",
-    anomaly_score: 0.84,
-    evidence_posts: [
-      { id: 3, author: "TinTucCongNghe", text: "FPT Play sập toàn hệ thống tối chủ nhật ngay lúc có bóng đá.", type: "news", engagement: 4500 },
-      { id: 4, author: "nguoidung_fpt", text: "Không thể đăng nhập được từ web hay app TV.", type: "forum", engagement: 1200 },
-    ],
-  },
-  {
-    event_id: "EVT-1003",
-    severity: "MEDIUM",
-    detected_at: "Today, 10:15",
-    affected_topics: ["Momo App Outage", "Digital Payment"],
-    trigger_conditions: ["neg_ratio_zscore > 2.0"],
-    neg_ratio: 65,
-    mention_velocity: "+150/hr",
-    anomaly_score: 0.61,
-    evidence_posts: [
-      { id: 5, author: "ThanhToanLoi", text: "Chuyển tiền qua Momo bị trừ tiền nhưng bên kia chưa nhận được.", type: "forum", engagement: 890 },
-      { id: 6, author: "TechVlogger", text: "Lỗi kết nối ngân hàng của Momo chiều nay.", type: "video", engagement: 670 },
-    ],
-  },
-];
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function IncidentDetailCards({ incidents }: { incidents: any[] }) {
+  // Guard against empty array
+  const safeData = incidents.length > 0 ? incidents : [];
 
-const severityMeta = {
-  HIGH: {
-    cardClass: "border-rose-200/70",
-    accentBar: "bg-gradient-to-b from-rose-500 to-rose-400",
-    badgeClass: "bg-gradient-to-r from-rose-50 to-orange-50 text-rose-700 ring-rose-200/60",
-    valueText: "text-rose-700",
-    icon: "text-rose-500",
-  },
-  MEDIUM: {
-    cardClass: "border-amber-200/70",
-    accentBar: "bg-gradient-to-b from-amber-500 to-amber-400",
-    badgeClass: "bg-gradient-to-r from-amber-50 to-yellow-50 text-amber-700 ring-amber-200/60",
-    valueText: "text-amber-700",
-    icon: "text-amber-500",
-  },
-  LOW: {
-    cardClass: "border-yellow-200/70",
-    accentBar: "bg-gradient-to-b from-yellow-400 to-yellow-300",
-    badgeClass: "bg-yellow-50 text-yellow-800 ring-yellow-200/60",
-    valueText: "text-yellow-800",
-    icon: "text-yellow-500",
-  },
-} as const;
+  const severityMeta = {
+    HIGH: {
+      cardClass: "border-rose-200/70",
+      accentBar: "bg-gradient-to-b from-rose-500 to-rose-400",
+      badgeClass: "bg-gradient-to-r from-rose-50 to-orange-50 text-rose-700 ring-rose-200/60",
+      valueText: "text-rose-700",
+      icon: "text-rose-500",
+    },
+    MEDIUM: {
+      cardClass: "border-amber-200/70",
+      accentBar: "bg-gradient-to-b from-amber-500 to-amber-400",
+      badgeClass: "bg-gradient-to-r from-amber-50 to-yellow-50 text-amber-700 ring-amber-200/60",
+      valueText: "text-amber-700",
+      icon: "text-amber-500",
+    },
+    LOW: {
+      cardClass: "border-yellow-200/70",
+      accentBar: "bg-gradient-to-b from-yellow-400 to-yellow-300",
+      badgeClass: "bg-yellow-50 text-yellow-800 ring-yellow-200/60",
+      valueText: "text-yellow-800",
+      icon: "text-yellow-500",
+    },
+  } as const;
 
-const sourceMeta = {
-  forum: { Icon: MessageSquare, label: "Forum", className: "bg-blue-50 text-blue-600 ring-blue-100" },
-  video: { Icon: Video, label: "Video", className: "bg-rose-50 text-rose-600 ring-rose-100" },
-  news: { Icon: Newspaper, label: "News", className: "bg-emerald-50 text-emerald-600 ring-emerald-100" },
-};
+  const sourceMeta = {
+    forum: { Icon: MessageSquare, label: "Forum", className: "bg-blue-50 text-blue-600 ring-blue-100" },
+    video: { Icon: Video, label: "Video", className: "bg-rose-50 text-rose-600 ring-rose-100" },
+    news: { Icon: Newspaper, label: "News", className: "bg-emerald-50 text-emerald-600 ring-emerald-100" },
+  };
 
-export function IncidentDetailCards() {
+  if (safeData.length === 0) {
+    return <div className="text-slate-500 py-4">No active incidents detected.</div>;
+  }
+
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
-      {incidents.map((incident) => {
-        const meta = severityMeta[incident.severity as keyof typeof severityMeta];
+      {safeData.map((incident) => {
+        const meta = severityMeta[incident.severity as keyof typeof severityMeta] || severityMeta.LOW;
+        const anomalyScore = Number(incident.anomaly_score) || 0;
+        
         return (
           <article
             key={incident.event_id}
@@ -126,7 +91,7 @@ export function IncidentDetailCards() {
               </div>
 
               <div className="space-y-1.5">
-                {incident.affected_topics.map((topic, i) => (
+                {(incident.affected_topics || []).map((topic: string, i: number) => (
                   <h3
                     key={i}
                     className="flex items-center gap-1.5 text-sm font-semibold text-slate-900 leading-snug"
@@ -146,7 +111,7 @@ export function IncidentDetailCards() {
                   Trigger Conditions
                 </h4>
                 <div className="flex flex-wrap gap-1.5">
-                  {incident.trigger_conditions.map((cond, i) => (
+                  {(incident.trigger_conditions || []).map((cond: string, i: number) => (
                     <span
                       key={i}
                       className="inline-flex items-center rounded-md bg-slate-50 ring-1 ring-inset ring-slate-200/60 px-2 py-0.5 text-[11px] font-mono font-medium text-slate-600"
@@ -176,7 +141,7 @@ export function IncidentDetailCards() {
                 <Metric
                   Icon={Zap}
                   label="Anomaly"
-                  value={incident.anomaly_score.toFixed(2)}
+                  value={anomalyScore.toFixed(2)}
                   iconClassName={meta.icon}
                   valueClassName={meta.valueText}
                 />
@@ -186,7 +151,7 @@ export function IncidentDetailCards() {
             {/* Footer */}
             <div className="px-5 py-3 bg-slate-50/60 border-t border-slate-100 flex items-center justify-between">
               <span className="text-[11px] font-medium text-slate-500">
-                {incident.evidence_posts.length} evidence posts
+                {(incident.evidence_posts || []).length} evidence posts
               </span>
               <Sheet>
                 <SheetTrigger
@@ -214,13 +179,14 @@ export function IncidentDetailCards() {
                     </SheetTitle>
                     <SheetDescription className="text-xs text-slate-500">
                       Posts that triggered the anomaly detector for{" "}
-                      {incident.affected_topics[0]}
+                      {incident.affected_topics && incident.affected_topics[0]}
                     </SheetDescription>
                   </SheetHeader>
                   <ScrollArea className="h-[calc(100vh-180px)] px-1">
                     <div className="space-y-3 py-4 pr-3">
-                      {incident.evidence_posts.map((post) => {
-                        const src = sourceMeta[post.type as keyof typeof sourceMeta];
+                      {/* eslint-disable-next-line @typescript-eslint/no-explicit-any */}
+                      {(incident.evidence_posts || []).map((post: any) => {
+                        const src = sourceMeta[post.type as keyof typeof sourceMeta] || sourceMeta.forum;
                         const SourceIcon = src.Icon;
                         return (
                           <div

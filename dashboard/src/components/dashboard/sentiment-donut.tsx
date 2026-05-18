@@ -4,20 +4,28 @@ import { PieChart as PieChartIcon } from "lucide-react";
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from "recharts";
 import { chartTooltipStyle } from "@/lib/chart-styles";
 
-const data = [
-  { name: "Positive", value: 450, color: "#10b981", soft: "#d1fae5" },
-  { name: "Neutral", value: 300, color: "#94a3b8", soft: "#e2e8f0" },
-  { name: "Negative", value: 250, color: "#f43f5e", soft: "#ffe4e6" },
-];
-
-const total = data.reduce((sum, d) => sum + d.value, 0);
+type SentimentData = {
+  name: string;
+  value: number;
+  color: string;
+  soft: string;
+};
 
 interface SentimentDonutChartProps {
   className?: string;
+  data: SentimentData[];
 }
 
-export function SentimentDonutChart({ className }: SentimentDonutChartProps) {
-  const dominant = data.reduce((max, d) => (d.value > max.value ? d : max), data[0]);
+export function SentimentDonutChart({ className, data }: SentimentDonutChartProps) {
+  // Guard against empty data
+  const safeData = data?.length > 0 ? data : [
+    { name: "Positive", value: 1, color: "#10b981", soft: "#d1fae5" },
+    { name: "Neutral", value: 1, color: "#94a3b8", soft: "#e2e8f0" },
+    { name: "Negative", value: 1, color: "#f43f5e", soft: "#ffe4e6" },
+  ];
+  
+  const total = safeData.reduce((sum, d) => sum + d.value, 0) || 1;
+  const dominant = safeData.reduce((max, d) => (d.value > max.value ? d : max), safeData[0]);
   const dominantPct = ((dominant.value / total) * 100).toFixed(0);
 
   return (
@@ -31,7 +39,7 @@ export function SentimentDonutChart({ className }: SentimentDonutChartProps) {
           </div>
           <h3 className="text-sm font-semibold text-slate-900">Sentiment Distribution</h3>
         </div>
-        <span className="text-[11px] font-medium text-slate-500">Last 24h</span>
+        <span className="text-[11px] font-medium text-slate-500">Today</span>
       </div>
 
       <div className="relative px-6 pb-2 flex-1">
@@ -39,7 +47,7 @@ export function SentimentDonutChart({ className }: SentimentDonutChartProps) {
           <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie
-                data={data}
+                data={safeData}
                 cx="50%"
                 cy="50%"
                 innerRadius={70}
@@ -48,7 +56,7 @@ export function SentimentDonutChart({ className }: SentimentDonutChartProps) {
                 dataKey="value"
                 stroke="none"
               >
-                {data.map((entry, index) => (
+                {safeData.map((entry, index) => (
                   <Cell key={`cell-${index}`} fill={entry.color} />
                 ))}
               </Pie>
@@ -79,7 +87,7 @@ export function SentimentDonutChart({ className }: SentimentDonutChartProps) {
 
       {/* Legend with bars */}
       <div className="px-6 pb-5 pt-2 space-y-2">
-        {data.map((d) => {
+        {safeData.map((d) => {
           const pct = (d.value / total) * 100;
           return (
             <div key={d.name} className="flex items-center gap-3">

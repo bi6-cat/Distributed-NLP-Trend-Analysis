@@ -5,27 +5,35 @@ models:
     description: >
       Enriched posts intermediate VIEW. JOINs the 3 decoupled
       staging tables (stg_posts_core, stg_posts_nlp, stg_post_topics) and computes
-      engagement from atomic metrics. LEFT JOINs ensure posts without NLP/topic
-      labels still appear (graceful partial pipeline handling). It also calculates
-      business logic such as engagement score and source_type.
+      engagement from atomic metrics.
     columns:
       - name: post_id
         description: Canonical post identifier
         tests:
           - not_null
       - name: source
-        description: "Data source: voz, tinhte, vnexpress, youtube"
+        description: "Data source: voz, tinhte, vnexpress, youtube, vatvo"
         tests:
           - not_null
           - accepted_values:
               arguments:
-                values: ['voz', 'tinhte', 'vnexpress', 'youtube']
+                values: ['voz', 'tinhte', 'vnexpress', 'youtube', 'vatvo']
+      - name: author_id
+      - name: author_name
+      - name: title
+      - name: body
+      - name: segmented_text
+      - name: parent_id
+      - name: reaction_count
+      - name: comment_count
+      - name: view_count
       - name: engagement
-        description: >
-          Weighted engagement score computed by dbt from atomic metrics:
-          reaction_count + comment_count × 2 + coalesce(view_count, 0) / 100
+        description: Weighted engagement score computed by dbt from atomic metrics.
       - name: sentiment_label
         description: "PhoBERT sentiment: positive, negative, neutral (nullable — LEFT JOIN)"
+      - name: sentiment_score
+      - name: topic_id
+      - name: topic_probability
       - name: source_type
         description: "Derived platform type: forum, news, video"
         tests:
@@ -35,3 +43,26 @@ models:
       - name: created_at
         tests:
           - not_null
+      - name: created_hour
+      - name: created_date
+      - name: crawled_at
+
+  - name: int_topic_sentiment_hourly
+    description: Aggregates int_posts_enriched data into hourly buckets per topic and source.
+    columns:
+      - name: topic_id
+      - name: topic_label
+      - name: source
+      - name: source_type
+      - name: hour_bucket
+      - name: bucket_date
+      - name: mention_count
+      - name: engagement_sum
+      - name: unique_authors
+      - name: reaction_sum
+      - name: comment_sum
+      - name: view_sum
+      - name: pos_count
+      - name: neg_count
+      - name: neu_count
+      - name: neg_ratio

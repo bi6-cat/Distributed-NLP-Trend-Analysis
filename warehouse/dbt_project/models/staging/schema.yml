@@ -21,7 +21,7 @@ sources:
               - not_null
               - accepted_values:
                   arguments:
-                    values: ['voz', 'tinhte', 'vnexpress', 'youtube']
+                    values: ['voz', 'tinhte', 'vnexpress', 'youtube', 'vatvo']
 
       - name: stg_posts_nlp
         description: >
@@ -65,11 +65,30 @@ sources:
 
 models:
   - name: stg_posts_core
-    description: >
-      Staging layer for core post data. Loads raw table from source.
+    description: Staging layer for core post data. Loads raw table from source.
+    columns:
+      - name: post_id
+      - name: source
+      - name: author_id
+      - name: author_name
+      - name: title
+      - name: body
+      - name: segmented_text
+      - name: parent_id
+      - name: reaction_count
+      - name: comment_count
+      - name: view_count
+      - name: created_at
+      - name: crawled_at
   - name: stg_posts_nlp
-    description: >
-      Staging layer for NLP sentiment data. Loads raw table from source.
+    description: Staging layer for NLP sentiment data. Loads raw table from source.
+    columns:
+      - name: post_id
+      - name: sentiment_label
+      - name: sentiment_score
   - name: stg_post_topics
-    description: >
-      Staging layer for topics. Loads raw table from source.
+    description: Staging layer for topics. Loads raw table from source.
+    columns:
+      - name: post_id
+      - name: topic_id
+      - name: topic_probability

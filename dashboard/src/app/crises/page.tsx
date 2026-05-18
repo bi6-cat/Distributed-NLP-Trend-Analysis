@@ -1,8 +1,21 @@
 import { Activity, Siren, Radio } from "lucide-react";
 import { ActiveEventsTimeline } from "@/components/crises/active-events-timeline";
 import { IncidentDetailCards } from "@/components/crises/incident-detail-cards";
+import { getRecentCrises, getCrisisStats } from "@/app/actions/crises";
 
-export default function CrisisMonitorPage() {
+export const revalidate = 3600;
+
+export default async function CrisisMonitorPage() {
+  const [crises, stats] = await Promise.all([
+    getRecentCrises(),
+    getCrisisStats()
+  ]);
+
+  const activeCount = crises.filter(c => (c as Record<string, unknown>).severity === 'HIGH').length;
+  const total24h = Number(stats.total_24h) || 0;
+  const highSeverity = Number(stats.high_severity_count) || 0;
+  const avgVelocity = Number(stats.avg_velocity) || 0;
+
   return (
     <div className="space-y-6">
       {/* Page header */}
@@ -15,16 +28,16 @@ export default function CrisisMonitorPage() {
             Crisis Monitor
           </h1>
           <p className="mt-1.5 text-sm text-slate-500">
-            Real-time anomaly detection from M4 Isolation Forest signals.
+            Real-time anomaly detection
           </p>
         </div>
         <div className="flex items-center gap-2">
           <span className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-rose-50 to-orange-50 ring-1 ring-inset ring-rose-200/60 px-3 py-1.5 text-xs font-semibold text-rose-700">
             <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75 animate-ping" />
+              <span className={`absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75 ${activeCount > 0 ? "animate-ping" : ""}`} />
               <span className="relative inline-flex h-2 w-2 rounded-full bg-rose-500" />
             </span>
-            3 Active Events
+            {activeCount} Active Events
           </span>
           <span className="inline-flex items-center gap-1.5 rounded-full bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-600">
             <Radio className="h-3.5 w-3.5 text-slate-400" />
@@ -36,10 +49,10 @@ export default function CrisisMonitorPage() {
       {/* Stat strip */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: "Last 24h", value: "7", sub: "events detected", tone: "slate" },
-          { label: "High severity", value: "3", sub: "requires action", tone: "rose" },
-          { label: "Avg. velocity", value: "+285/hr", sub: "across active", tone: "amber" },
-          { label: "Resolved today", value: "4", sub: "auto-cleared", tone: "emerald" },
+          { label: "Last 24h", value: total24h.toString(), sub: "events detected", tone: "slate" },
+          { label: "High severity", value: highSeverity.toString(), sub: "requires action", tone: "rose" },
+          { label: "Avg. velocity", value: `+${avgVelocity.toFixed(0)}/hr`, sub: "across active", tone: "amber" },
+          { label: "Resolved today", value: "0", sub: "auto-cleared", tone: "emerald" }, // Mocked resolved
         ].map((s) => {
           const toneClasses: Record<string, string> = {
             slate: "text-slate-900",
@@ -89,7 +102,7 @@ export default function CrisisMonitorPage() {
           </div>
         </div>
         <div className="px-3 pb-5">
-          <ActiveEventsTimeline />
+          <ActiveEventsTimeline events={crises} />
         </div>
       </section>
 
@@ -102,11 +115,11 @@ export default function CrisisMonitorPage() {
             </div>
             <h2 className="text-sm font-semibold text-slate-900">Detected Incidents</h2>
             <span className="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold tabular-nums text-slate-600">
-              3
+              {crises.length}
             </span>
           </div>
         </div>
-        <IncidentDetailCards />
+        <IncidentDetailCards incidents={crises} />
       </section>
     </div>
   );

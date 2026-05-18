@@ -4,7 +4,7 @@ CREATE DATABASE IF NOT EXISTS tech_radar;
 CREATE TABLE IF NOT EXISTS tech_radar.stg_posts_core (
     post_id         String,
     source          LowCardinality(String),
-    author_id       String,
+    author_id       Nullable(String),
     author_name     String,
     title           Nullable(String),
     body            String,
@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS tech_radar.stg_posts_nlp (
     predicted_at    DateTime,
     loaded_at       DateTime DEFAULT now()
 ) ENGINE = ReplacingMergeTree(loaded_at)
+PARTITION BY toYYYYMM(predicted_at)
 ORDER BY (post_id);
 
 -- 3. stg_post_topics

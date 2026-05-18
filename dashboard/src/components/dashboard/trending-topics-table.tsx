@@ -2,25 +2,26 @@
 
 import { Flame, ArrowUpRight } from "lucide-react";
 
-const trendingTopics = [
-  { id: 1, label: "Apple Silicon M4 Release", score: 98.5, volume: 15420, delta: 24 },
-  { id: 2, label: "VinFast VF3 Launch", score: 92.1, volume: 12100, delta: 18 },
-  { id: 3, label: "Shopee Data Breach Rumor", score: 88.4, volume: 8430, delta: 42 },
-  { id: 4, label: "VNG Stock NYSE IPO", score: 85.0, volume: 7200, delta: -3 },
-  { id: 5, label: "FPT Play Cyber Attack", score: 82.3, volume: 6890, delta: 31 },
-  { id: 6, label: "Momo App Outage", score: 79.1, volume: 5400, delta: 12 },
-  { id: 7, label: "Gojek New Fee Policy", score: 76.8, volume: 4900, delta: 8 },
-  { id: 8, label: "TikTok Shop Vietnam Ban", score: 74.2, volume: 4100, delta: -5 },
-  { id: 9, label: "Viettel 5G Coverage Expansion", score: 71.5, volume: 3800, delta: 6 },
-  { id: 10, label: "Be Group Funding Round", score: 68.9, volume: 3100, delta: 2 },
-];
+type TopicData = {
+  id: number;
+  label: string;
+  score: number;
+  volume: number;
+  delta: number;
+};
 
 interface TrendingTopicsTableProps {
   className?: string;
+  topics: TopicData[];
 }
 
-export function TrendingTopicsTable({ className }: TrendingTopicsTableProps) {
-  const maxScore = Math.max(...trendingTopics.map((t) => t.score));
+export function TrendingTopicsTable({ className, topics }: TrendingTopicsTableProps) {
+  // Handle empty array fallback
+      const safeTopics = topics?.length > 0 ? topics : [
+    { id: 0, label: "No topics found", score: 0, volume: 0, delta: 0 }
+  ];
+  
+  const maxScore = Math.max(...safeTopics.map((t) => Number(t.score) || 0), 1);
 
   return (
     <div
@@ -47,14 +48,18 @@ export function TrendingTopicsTable({ className }: TrendingTopicsTableProps) {
           <div className="col-span-1">#</div>
           <div className="col-span-5">Topic</div>
           <div className="col-span-4">Trend Score</div>
-          <div className="col-span-1 text-right">Δ%</div>
+          <div className="col-span-1 text-right">Δ</div>
           <div className="col-span-1 text-right">Volume</div>
         </div>
 
         <ul className="space-y-0.5">
-          {trendingTopics.map((topic, idx) => {
-            const widthPct = (topic.score / maxScore) * 100;
-            const isPositive = topic.delta >= 0;
+          {safeTopics.map((topic, idx) => {
+            const score = Number(topic.score) || 0;
+            const volume = Number(topic.volume) || 0;
+            const delta = Number(topic.delta) || 0;
+            const widthPct = (score / maxScore) * 100;
+            const isPositive = delta >= 0;
+            
             return (
               <li
                 key={topic.id}
@@ -78,7 +83,7 @@ export function TrendingTopicsTable({ className }: TrendingTopicsTableProps) {
                 </div>
                 <div className="col-span-4 flex items-center gap-2.5">
                   <span className="text-xs font-semibold tabular-nums text-slate-700 w-9">
-                    {topic.score.toFixed(1)}
+                    {score.toFixed(1)}
                   </span>
                   <div className="h-1.5 flex-1 bg-slate-100 rounded-full overflow-hidden">
                     <div
@@ -93,13 +98,12 @@ export function TrendingTopicsTable({ className }: TrendingTopicsTableProps) {
                       isPositive ? "text-emerald-600" : "text-rose-600"
                     }`}
                   >
-                    {isPositive ? "+" : ""}
-                    {topic.delta}%
+                    {isPositive ? "+" : ""}{delta.toFixed(0)}
                   </span>
                 </div>
                 <div className="col-span-1 text-right">
                   <span className="text-xs font-semibold tabular-nums text-slate-700">
-                    {topic.volume.toLocaleString()}
+                    {volume.toLocaleString()}
                   </span>
                 </div>
               </li>
