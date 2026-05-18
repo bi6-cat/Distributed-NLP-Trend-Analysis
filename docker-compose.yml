@@ -14,14 +14,7 @@ x-airflow-common:
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
   volumes:
-    - ./dags:/opt/airflow/dags
-    - ./spark_jobs:/opt/airflow/spark_jobs
-    - ./scripts:/opt/airflow/scripts
-    - ./warehouse:/opt/airflow/warehouse
-    - ./data:/opt/airflow/data
-    - ./output:/opt/airflow/output
-    - ./algorithms:/opt/airflow/algorithms
-    - ./crawlers:/opt/airflow/crawlers
+    - ./:/opt/airflow
   depends_on:
     postgres:
       condition: service_healthy
@@ -71,9 +64,7 @@ services:
       - "8080:8080"
       - "7077:7077"
     volumes:
-      - ./spark_jobs:/opt/spark/work-dir/spark_jobs
-      - ./data:/opt/spark/work-dir/data
-      - ./output:/opt/spark/work-dir/output
+      - ./:/opt/spark/work-dir
     networks:
       - nlp_network
 
@@ -89,9 +80,7 @@ services:
     depends_on:
       - spark-master
     volumes:
-      - ./spark_jobs:/opt/spark/work-dir/spark_jobs
-      - ./data:/opt/spark/work-dir/data
-      - ./output:/opt/spark/work-dir/output
+      - ./:/opt/spark/work-dir
     networks:
       - nlp_network
 
@@ -166,6 +155,8 @@ services:
         condition: service_completed_successfully
     networks:
       - nlp_network
+    volumes:
+      - ./:/opt/airflow
 
 volumes:
   hadoop_namenode:
