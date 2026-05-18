@@ -537,8 +537,8 @@ with DAG(
         task_id="spark_cleaning",
         application="/opt/airflow/spark_jobs/cleaning_job.py",
         conn_id="spark_default",
-        conf={"spark.master": "local[*]"},
-        executor_memory="4g",
+        conf={"spark.master": "spark://spark-master:7077", "spark.pyspark.python": "/opt/bitnami/python/bin/python3", "spark.pyspark.driver.python": "/usr/local/bin/python3", "spark.executorEnv.PYSPARK_PYTHON": "/opt/bitnami/python/bin/python3", "spark.executorEnv.PYTHONPATH": "/opt/airflow"},
+        executor_memory="12g",
         env_vars={
             "HDFS_INPUT": "hdfs://namenode:9000/user/zett/raw_data",
             "HDFS_OUTPUT": "hdfs://namenode:9000/user/zett/staged/sentiment/",
@@ -552,8 +552,8 @@ with DAG(
         task_id="lda_topic_modeling",
         application="/opt/airflow/spark_jobs/lda_job.py",
         conn_id="spark_default",
-        conf={"spark.master": "local[*]"},
-        executor_memory="4g",
+        conf={"spark.master": "spark://spark-master:7077", "spark.pyspark.python": "/opt/bitnami/python/bin/python3", "spark.pyspark.driver.python": "/usr/local/bin/python3", "spark.executorEnv.PYSPARK_PYTHON": "/opt/bitnami/python/bin/python3", "spark.executorEnv.PYTHONPATH": "/opt/airflow"},
+        executor_memory="12g",
         application_args=[
             "--input-path", "hdfs://namenode:9000/user/zett/staged/",
             "--output-path", "hdfs://namenode:9000/user/zett/results/lda/",
@@ -566,11 +566,12 @@ with DAG(
         task_id="sentiment_analysis",
         application="/opt/airflow/spark_jobs/sentiment_job.py",
         conn_id="spark_default",
-        conf={"spark.master": "spark://spark-master:7077"},
-        executor_memory="4g",
+        conf={"spark.master": "spark://spark-master:7077", "spark.pyspark.python": "/opt/bitnami/python/bin/python3", "spark.pyspark.driver.python": "/usr/local/bin/python3", "spark.executorEnv.PYSPARK_PYTHON": "/opt/bitnami/python/bin/python3", "spark.executorEnv.PYTHONPATH": "/opt/airflow", "spark.executorEnv.KAGGLE_MODEL_HANDLE": "nquanggnguyn/phobert-/transformers/default"},
+        executor_memory="12g",
         env_vars={
             "HDFS_INPUT": "hdfs://namenode:9000/user/zett/staged/",
             "CLICKHOUSE_HOST": "clickhouse",
+            "KAGGLE_MODEL_HANDLE": "nquanggnguyn/phobert-/transformers/default",
             "PYTHONPATH": "/opt/airflow",
         }
     )

@@ -56,31 +56,43 @@ services:
   # 2. APACHE SPARK
   # ==========================================
   spark-master:
-    image: public.ecr.aws/bitnami/spark:3.5.0
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
     container_name: spark-master
     environment:
       - SPARK_MODE=master
+      - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
+      - PYSPARK_DRIVER_PYTHON=/opt/bitnami/python/bin/python3
     ports:
       - "8080:8080"
       - "7077:7077"
     volumes:
       - ./:/opt/spark/work-dir
+      - ./:/opt/airflow
+      - /root/.kaggle/access_token:/root/.kaggle/access_token:ro
     networks:
       - nlp_network
 
-  # Gộp thành 1 Worker lớn (6 Cores, 20G RAM)
+  # Gộp thành 1 Worker lớn (6 Cores, 24G RAM)
   spark-worker:
-    image: public.ecr.aws/bitnami/spark:3.5.0
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
     container_name: spark-worker
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_MEMORY=22G
+      - SPARK_WORKER_MEMORY=24G
       - SPARK_WORKER_CORES=6
+      - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
+      - PYSPARK_DRIVER_PYTHON=/opt/bitnami/python/bin/python3
     depends_on:
       - spark-master
     volumes:
       - ./:/opt/spark/work-dir
+      - ./:/opt/airflow
+      - /root/.kaggle/access_token:/root/.kaggle/access_token:ro
     networks:
       - nlp_network
 
@@ -148,6 +160,8 @@ services:
     <<: *airflow-common
     container_name: airflow-scheduler
     command: scheduler
+    environment:
+      <<: *airflow-common-env
     depends_on:
       postgres:
         condition: service_healthy

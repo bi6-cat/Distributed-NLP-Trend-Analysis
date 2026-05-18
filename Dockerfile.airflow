@@ -1,4 +1,4 @@
-FROM apache/airflow:2.8.3-python3.10
+FROM apache/airflow:2.8.3-python3.11
 
 USER root
 # Install OpenJDK-17 to support Spark/PySpark, and dependencies for headless Chrome
