@@ -3,11 +3,11 @@ import requests
 import urllib.parse
 
 # Cấu hình HDFS (WebHDFS)
-HDFS_HOST = "192.168.56.11"
+HDFS_HOST = os.environ.get("HDFS_HOST", "namenode")
 HDFS_PORT = 9870
 HDFS_USER = "zett"
 HDFS_BASE_DIR = "/user/zett/raw_data"
-DATA_DIR = "crawlers/data" # Thư mục chứa file local của crawlers
+DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 
 def hdfs_mkdirs(path):
     url = f"http://{HDFS_HOST}:{HDFS_PORT}/webhdfs/v1{path}?op=MKDIRS&user.name={HDFS_USER}"

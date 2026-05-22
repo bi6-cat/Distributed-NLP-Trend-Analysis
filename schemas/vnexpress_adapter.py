@@ -1,7 +1,6 @@
 """
 schemas/vnexpress_adapter.py — Chuyển đổi raw data VnExpress → UniversalSocialPost
 
-M1 gửi 2 file:
   POST (post_vnexpress.csv):
     id_post, link_post, post_time, post_content
     post_time dạng: "Thứ tư, 29/4/2026, 07:00 (GMT+7)"
@@ -77,7 +76,7 @@ def _parse_reactions(reaction_detail) -> int:
 
 def _make_comment_id(id_post, user_id, comment_time: str) -> str:
     key = f"vnexpress_{id_post}_{user_id}_{comment_time}"
-    return "vne_" + hashlib.md5(key.encode()).hexdigest()[:12]
+    return hashlib.md5(key.encode()).hexdigest()[:12]
 
 
 class VnExpressAdapter:
@@ -163,8 +162,13 @@ class VnExpressAdapter:
         if created_at is None:
             raise ValueError(f"Không parse được post_time: {time_str!r}")
 
+        try:
+            normalized_id = str(int(float(id_post)))
+        except (ValueError, OverflowError):
+            raise ValueError(f"id_post không hợp lệ: {id_post!r}")
+
         post = UniversalSocialPost(
-            post_id    = f"vne_{id_post}",
+            post_id    = normalized_id,
             source     = "vnexpress",
             post_type  = "article",
             author     = "VnExpress",
@@ -188,6 +192,10 @@ class VnExpressAdapter:
 
     def _convert_comment(self, raw: dict) -> dict:
         id_post    = str(raw.get("id_post", ""))
+        try:
+            parent_id = str(int(float(id_post)))
+        except (ValueError, OverflowError):
+            raise ValueError(f"id_post không hợp lệ: {id_post!r}")
         user_id    = str(raw.get("user_id", ""))
         user_name  = str(raw.get("user_name", "") or "")
         content    = str(raw.get("comment_content", "") or "").strip()
@@ -209,7 +217,7 @@ class VnExpressAdapter:
             content        = content,
             created_at     = created_at,
             url            = f"https://vnexpress.net/{id_post}",
-            parent_post_id = f"vne_{id_post}",
+            parent_post_id = parent_id,
             reaction_count = reactions,
         )
         return {

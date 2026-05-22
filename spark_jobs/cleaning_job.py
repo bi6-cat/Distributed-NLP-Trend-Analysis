@@ -10,13 +10,13 @@ Luồng:
                                 ↓
               TextPreprocessor.clean() (lazy init trong mapPartitions)
                                 ↓
-              MinHashDeduplicator (driver-side LSH, Jaccard ≥ 0.8)
+              MinHashDeduplicator (Spark MinHashLSH dedup)
                                 ↓
     Output Parquet: /user/zett/staged/stg_posts_core/
 
 Cách chạy trên cluster (từ master node):
     spark-submit \\
-        --master spark://192.168.56.11:7077 \\
+        --master spark://spark-master:7077 \\
         --num-executors 2 \\
         --executor-cores 2 \\
         --executor-memory 4g \\
@@ -30,7 +30,7 @@ Cách chạy trên cluster (từ master node):
         spark_jobs/cleaning_job.py --no-dedup
 
 Biến môi trường (tuỳ chỉnh qua --conf spark.executorEnv.*):
-    HDFS_BASE       : hdfs://192.168.56.11:9000
+    HDFS_BASE       : hdfs://namenode:9000
     NLP_SLANG_DICT  : path slang_dict.json trên HDFS
     NLP_STOPWORDS   : path stopwords_vi.txt trên HDFS
     HDFS_OUTPUT     : đường dẫn HDFS ghi kết quả Parquet
@@ -52,7 +52,7 @@ from pyspark.sql.types import (
 )
 
 # ── Config (override bằng env var hoặc spark-submit --conf) ──────────────────
-HDFS_BASE  = os.environ.get("HDFS_BASE",    "hdfs://192.168.56.11:9000")
+HDFS_BASE  = os.environ.get("HDFS_BASE",    "hdfs://namenode:9000")
 HDFS_RAW   = os.environ.get("HDFS_INPUT",   f"{HDFS_BASE}/user/zett/raw_data")
 HDFS_OUT   = os.environ.get("HDFS_OUTPUT",  f"{HDFS_BASE}/user/zett/staged/stg_posts_core")
 
@@ -427,12 +427,6 @@ def main():
     vne_posts_raw    = read_csv(f"{HDFS_RAW}/vnexpress/post_vnexpress.csv")
     vne_cmts_raw     = read_csv(f"{HDFS_RAW}/vnexpress/comment_vnexpress.csv")
 
-    print(f"[INFO] VOZ comments : {voz_comments_raw.count():,}")
-    print(f"[INFO] VOZ posts    : {voz_posts_raw.count():,}")
-    print(f"[INFO] VatVo        : {vatvo_raw.count():,}")
-    print(f"[INFO] VnE posts    : {vne_posts_raw.count():,}")
-    print(f"[INFO] VnE comments : {vne_cmts_raw.count():,}")
-
     # ── mapPartitions → process qua Adapter + TextPreprocessor ───────────────
 
     voz_c_rdd  = voz_comments_raw.rdd.mapPartitions(
@@ -468,29 +462,13 @@ def main():
     # Cần cache() vì pipeline rất nặng (NLP) và uuid() là non-deterministic
     result_df = result_df.cache()
 
-    before_dedup = result_df.count()
-    logger.info(f"[Cleaning] Tổng bản ghi sau clean (đã drop exact duplicates): {before_dedup:,}")
-
-    # Thống kê theo nguồn (trước dedup)
-    result_df.groupBy("source").count().orderBy("source").show()
-
-    # ── MinHash LSH Deduplication ─────────────────────────────────────────────
     if enable_dedup:
-        logger.info("[Dedup] Bắt đầu MinHash LSH dedup (threshold=0.8, num_perm=128, k=5)...")
+        logger.info("[Dedup] Bắt đầu Spark MinHashLSH dedup...")
         from algorithms.minhash_dedup import MinHashDeduplicator
-
         deduplicator = MinHashDeduplicator(num_perm=128, threshold=0.8, k=5)
         result_df = deduplicator.fit_transform(result_df, spark)
 
-        after_dedup = result_df.count()
-        removed    = before_dedup - after_dedup
-        pct        = removed / max(before_dedup, 1) * 100
-        logger.info(f"[Dedup] Kết quả: {before_dedup:,} → {after_dedup:,} bản ghi "
-                    f"(loại {removed:,} duplicates, {pct:.1f}%)")
-        total = after_dedup
-    else:
-        logger.info("[Dedup] Bỏ qua (--no-dedup flag được bật)")
-        total = before_dedup
+    logger.info("[Cleaning] Ghi output...")
 
     # ── Ghi ra HDFS Parquet ───────────────────────────────────────────────────
     result_df.write \
@@ -498,7 +476,7 @@ def main():
         .partitionBy("source") \
         .parquet(HDFS_OUT)
 
-    logger.info(f"[DONE] Đã ghi {total:,} bản ghi → {HDFS_OUT}")
+    logger.info(f"[DONE] Đã ghi bản ghi → {HDFS_OUT}")
     spark.stop()
 
 

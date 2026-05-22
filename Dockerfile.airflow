@@ -1,0 +1,30 @@
+FROM apache/airflow:2.8.3-python3.11
+
+USER root
+# Install OpenJDK-17 to support Spark/PySpark, and dependencies for headless Chrome
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+         openjdk-17-jre-headless \
+         wget \
+         gnupg2 \
+         unzip \
+  && wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | apt-key add - \
+  && echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list \
+  && apt-get update \
+  && apt-get install -y --no-install-recommends google-chrome-stable \
+  && apt-get autoremove -yqq --purge \
+  && apt-get clean \
+  && rm -rf /var/lib/apt/lists/*
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+
+USER airflow
+
+# Install Python requirements for standard operators & your specific scripts
+COPY requirements.txt /requirements.txt
+RUN pip install --no-cache-dir "apache-airflow==${AIRFLOW_VERSION}" -r /requirements.txt
+
+# Additional dbt & spark operators
+RUN pip install --no-cache-dir "apache-airflow==${AIRFLOW_VERSION}" \
+    apache-airflow-providers-apache-spark \
+    dbt-core==1.7.0 \
+    dbt-clickhouse==1.7.0

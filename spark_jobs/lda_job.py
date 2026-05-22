@@ -53,11 +53,15 @@ import math
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
 from pyspark.sql import SparkSession, DataFrame
 from pyspark.sql import functions as F
-from pyspark.sql.types import ArrayType, StringType
+from pyspark.sql.types import (
+    ArrayType, FloatType, IntegerType, StringType,
+    StructField, StructType, TimestampType,
+)
 from pyspark.ml.feature import CountVectorizer, CountVectorizerModel, IDF
 from pyspark.ml.clustering import LDA
 from pyspark.ml.functions import vector_to_array
@@ -304,40 +308,27 @@ def create_spark_session(
         os.environ["PYSPARK_PYTHON"] = python_exec
         os.environ["PYSPARK_DRIVER_PYTHON"] = python_exec
 
-        # local[1]: chỉ dùng 1 thread — tránh treo trên Windows
-        # Khi debug xong, có thể đổi lại local[*] hoặc chạy trên cluster
-        builder = builder.master("local[1]")
+        builder = builder.master("local[*]")
         builder = (
             builder
             .config("spark.pyspark.python", python_exec)
             .config("spark.pyspark.driver.python", python_exec)
-            # Bind driver vào 127.0.0.1 — tránh delay do Windows dò card mạng
-            .config("spark.driver.host", "127.0.0.1")
-            .config("spark.driver.bindAddress", "127.0.0.1")
             .config("spark.python.worker.reuse", "false")
             .config("spark.python.worker.faulthandler.enabled", "true")
             .config("spark.sql.execution.pyspark.udf.faulthandler.enabled", "true")
-            # Local mode: giảm memory + shuffle partitions cho máy cá nhân
-            .config("spark.executor.memory", "1g")
-            .config("spark.driver.memory", "1g")
-            .config("spark.sql.shuffle.partitions", "4")
         )
     else:
         # TODO [Member 2]: Cấu hình master URL từ spark_config.py
         # Mặc định dùng cấu hình từ spark-submit --master
         logger.info("Mode: CLUSTER (sử dụng cấu hình từ spark-submit)")
-        builder = (
-            builder
-            .config("spark.executor.memory", "8g")
-            .config("spark.driver.memory", "4g")
-            .config("spark.sql.shuffle.partitions", "200")
-        )
 
     spark = (
         builder
+        .config("spark.executor.memory", "8g")
+        .config("spark.driver.memory", "4g")
+        .config("spark.sql.shuffle.partitions", "200")
         .config("spark.sql.ansi.enabled", "false")
         .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
-        .config("spark.ui.enabled", "false")
         .getOrCreate()
     )
 
@@ -410,7 +401,49 @@ def load_data(
         return F.concat(F.lit(prefix), F.monotonically_increasing_id().cast("string"))
 
     if local:
-        # ── LOCAL MODE: đọc CSV từ data/real hoặc data/fake ──
+        # ── LOCAL MODE: parquet (stg_posts_core từ cleaning_job) hoặc CSV fallback ──
+        def _has_parquet(path: str) -> bool:
+            if not os.path.isdir(path):
+                return False
+            for entry in os.listdir(path):
+                if entry.startswith("_"):
+                    continue
+                full = os.path.join(path, entry)
+                if entry.endswith(".parquet"):
+                    return True
+                # Hive-style partition subdirs (e.g. source=voz/)
+                if os.path.isdir(full) and "=" in entry:
+                    return True
+            return False
+        has_parquet = _has_parquet(input_path)
+        if has_parquet:
+            logger.info(f"[LOCAL] Reading parquet from {input_path}")
+            df = spark.read.parquet(input_path)
+            # Map stg_posts_core schema → canonical schema
+            text_col = next(
+                (c for c in ["segmented_text", "clean_text", "body", "title", "text"] if c in df.columns),
+                None,
+            )
+            if text_col is None:
+                logger.error(f"No text column found in parquet. Columns: {df.columns}")
+                sys.exit(1)
+            df = df.select(
+                _pick_col_or_lit(df, ["post_id"], "").cast("string").alias("post_id"),
+                _pick_col_or_lit(df, ["source"], "unknown").cast("string").alias("source"),
+                _pick_col_or_lit(df, ["author"], "unknown").cast("string").alias("author"),
+                _build_created_at_expr(df).alias("created_at"),
+                F.lit("").cast("string").alias("url"),
+                F.col(text_col).cast("string").alias("text"),
+                _pick_col_or_lit(df, ["clean_text", "segmented_text"], "").cast("string").alias("preprocessed_text"),
+            )
+            df = df.filter(F.col("text").isNotNull() & (F.trim(F.col("text")) != ""))
+            row_count = df.count()
+            logger.info(f"Total documents from parquet: {row_count:,}")
+            if row_count == 0:
+                logger.error("No documents after filtering!")
+                sys.exit(1)
+            return df
+
         logger.info(f"Reading CSV from local: {input_path}")
         dfs: List[DataFrame] = []
 
@@ -555,32 +588,30 @@ def load_data(
 def infer_post_topic_assignment(
     lda_model,
     tfidf_df: DataFrame,
-    topics: List[Dict],
 ) -> DataFrame:
     """
     Gán topic tốt nhất cho từng document sau khi train LDA.
 
-    Output schema (stg_post_topics):
-        post_id, topic_id, topic_probability, model_type, predicted_at
+    Output columns:
+        post_id, source, author, content, created_at, url,
+        topic_id, topic_label, topic_prob
     """
     transformed = lda_model.transform(tfidf_df)
 
     assignments = (
         transformed
         .withColumn("topic_probs", vector_to_array(F.col("topicDistribution")))
-        .withColumn("topic_probability", F.array_max(F.col("topic_probs")).cast("float"))
+        .withColumn("topic_probability", F.array_max(F.col("topic_probs")))
         .withColumn(
             "topic_id",
-            (F.expr("array_position(topic_probs, cast(topic_probability as double))") - F.lit(1)).cast("int"),
+            (F.expr("array_position(topic_probs, array_max(topic_probs))") - F.lit(1)).cast("int"),
         )
-        .withColumn("model_type", F.lit("lda"))
-        .withColumn("predicted_at", F.current_timestamp())
         .select(
             F.col("post_id"),
             F.col("topic_id"),
             F.col("topic_probability"),
-            F.col("model_type"),
-            F.col("predicted_at")
+            F.lit("lda").alias("model_type"),
+            F.current_timestamp().alias("predicted_at"),
         )
     )
     return assignments
@@ -874,6 +905,7 @@ def save_results(
     assignments_df: DataFrame,
     output_path: str,
     local: bool = False,
+    k: int = None,
 ) -> None:
     """
     Lưu mô hình LDA và mô tả topics.
@@ -904,83 +936,64 @@ def save_results(
         except Exception as exc:
             logger.warning(f"Skipping LDA model save in local mode: {exc}")
 
-        # ── Local: lưu topics.json theo schema stg_topics ──
-        # Schema: topic_id, label, top_keywords(Array[str]), coherence_score, model_version, created_at
-        from datetime import datetime as _dt
-        _now = _dt.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-        topics_formatted = [
+        # ── Local: lưu parquet đơn (cùng format với BERTopic, đọc được bởi save_topics_to_ch) ──
+        import pandas as _pd
+        model_version = f"lda_k{k}" if k else f"lda_k{len(topics)}"
+        now_ts = datetime.now(tz=timezone.utc)
+        os.makedirs(output_path, exist_ok=True)
+
+        topics_export = [
             {
-                "topic_id": int(t["topic_id"]),
-                "label": str(t["topic_label"]),
-                "top_keywords": [str(kw["word"]) for kw in t["keywords"][:10]],
-                "coherence_score": None,  # Task 2.2 — computed in lda_evaluation.ipynb
-                "model_version": "lda_v1",
-                "created_at": _now,
+                "topic_id":       int(t["topic_id"]),
+                "label":          str(t["topic_label"]),
+                "top_keywords":   [kw["word"] for kw in t["keywords"]],
+                "coherence_score": None,
+                "model_version":  model_version,
+                "created_at":     now_ts,
             }
             for t in topics
         ]
-        topics_path = os.path.join(output_path, "topics.json")
-        os.makedirs(output_path, exist_ok=True)
-        with open(topics_path, "w", encoding="utf-8") as f:
-            json.dump(topics_formatted, f, ensure_ascii=False, indent=2)
-        logger.info(f"Saving stg_topics → {topics_path}")
+        topics_parquet = os.path.join(output_path, "topics.parquet")
+        _pd.DataFrame(topics_export).to_parquet(topics_parquet, index=False)
+        logger.info(f"Saving topics → {topics_parquet}")
 
-        # ── Lưu stg_topics.csv (dễ xem trong Excel/VS Code) ──
-        import csv as _csv
-        topics_csv_path = os.path.join(output_path, "stg_topics.csv")
-        with open(topics_csv_path, "w", newline="", encoding="utf-8") as f:
-            writer = _csv.DictWriter(
-                f,
-                fieldnames=["topic_id", "label", "top_keywords", "coherence_score", "model_version", "created_at"]
-            )
-            writer.writeheader()
-            for t in topics_formatted:
-                writer.writerow({
-                    **t,
-                    "top_keywords": "|".join(t["top_keywords"]),  # pipe-separated for CSV
-                })
-        logger.info(f"Saving stg_topics CSV → {topics_csv_path}")
-
-        # ── Lưu post_topic_assignment.csv (stg_post_topics schema) ──
-        assignment_path = os.path.join(output_path, "post_topic_assignment.csv")
-        assignments_df.toPandas().to_csv(assignment_path, index=False, encoding="utf-8")
-        logger.info(f"Saving stg_post_topics → {assignment_path}")
+        assignment_parquet = os.path.join(output_path, "post_topic_assignment.parquet")
+        assignments_df.toPandas().to_parquet(assignment_parquet, index=False)
+        logger.info(f"Saving post-topic assignments → {assignment_parquet}")
     else:
         # ── Lưu LDA model (Spark MLlib format) ──
         model_path = os.path.join(output_path, "lda_model")
         logger.info(f"Saving LDA model → {model_path}")
         lda_model.write().overwrite().save(model_path)
 
-        # ── Cluster: lưu topics Parquet trên HDFS ──
-        from datetime import datetime
-        from pyspark.sql.types import StructType, StructField, IntegerType, StringType, ArrayType, FloatType, TimestampType
-        
-        current_time = datetime.now()
-        topics_formatted: List[Dict] = []
-        for t in topics:
-            topics_formatted.append({
-                "topic_id": int(t["topic_id"]),
-                "label": str(t["topic_label"]),
-                "top_keywords": [str(kw["word"]) for kw in t["keywords"]],
-                "coherence_score": None,
-                "model_version": "lda_v1",
-                "created_at": current_time,
-            })
-            
-        topic_schema = StructType([
-            StructField("topic_id", IntegerType(), True),
-            StructField("label", StringType(), True),
-            StructField("top_keywords", ArrayType(StringType()), True),
+        # ── Cluster: lưu topics Parquet (spec: stg_topics schema) ──
+        model_version = f"lda_k{k}" if k else f"lda_k{len(topics)}"
+        now = datetime.now(tz=timezone.utc)
+        topics_schema = StructType([
+            StructField("topic_id", IntegerType(), False),
+            StructField("label", StringType(), False),
+            StructField("top_keywords", ArrayType(StringType()), False),
             StructField("coherence_score", FloatType(), True),
-            StructField("model_version", StringType(), True),
-            StructField("created_at", TimestampType(), True)
+            StructField("model_version", StringType(), False),
+            StructField("created_at", TimestampType(), False),
         ])
-        
-        topics_df = spark.createDataFrame(topics_formatted, schema=topic_schema)
+        topics_rows = [
+            (
+                int(t["topic_id"]),
+                str(t["topic_label"]),
+                [kw["word"] for kw in t["keywords"]],
+                None,
+                model_version,
+                now,
+            )
+            for t in topics
+        ]
+        topics_df = spark.createDataFrame(topics_rows, schema=topics_schema)
         topics_parquet_path = os.path.join(output_path, "topics")
         topics_df.write.mode("overwrite").parquet(topics_parquet_path)
         logger.info(f"Saving topics Parquet → {topics_parquet_path}")
 
+        # post_topics schema: post_id, topic_id, topic_probability, model_type, predicted_at
         assignment_parquet_path = os.path.join(output_path, "post_topic_assignment")
         assignments_df.write.mode("overwrite").parquet(assignment_parquet_path)
         logger.info(f"Saving post-topic assignments Parquet → {assignment_parquet_path}")
@@ -1225,7 +1238,7 @@ def main() -> None:
 
         # 8. Gán topic cho từng bài viết/comment
         logger.info("Inferring best topic per document...")
-        assignments_df = infer_post_topic_assignment(lda_model, tfidf_df, topics)
+        assignments_df = infer_post_topic_assignment(lda_model, tfidf_df)
 
         # 8.5 Sweep k tự động (nếu được bật)
         if args.eval_k_values.strip():
@@ -1261,6 +1274,7 @@ def main() -> None:
             assignments_df,
             args.output_path,
             local=args.local,
+            k=args.k,
         )
         save_vocabulary(cv_model, args.output_path, local=args.local)
 
