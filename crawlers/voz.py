@@ -5,13 +5,13 @@ import random
 import os
 import tempfile
 import pandas as pd
-from pathlib import Path
 from bs4 import BeautifulSoup
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from remote_storage import RemoteStorage
 
 # =====================================================
 # CONFIG
@@ -46,14 +46,13 @@ Link_FORUM = [
               "https://voz.vn/f/may-tinh-xach-tay.72/",
               "https://voz.vn/f/dien-thoai-di-dong.76/"]
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-DATA_DIR = Path(os.getenv("DATA_DIR", str(SCRIPT_DIR / "data")))
-VOZ_DIR = DATA_DIR / "voz"
+STORAGE = None
+VOZ_DIR = "voz"
 
-CHECKPOINT_FILE = VOZ_DIR / "checkpoint.json"
+CHECKPOINT_FILE = "checkpoint.json"
 
-POST_FILE = VOZ_DIR / "posts.csv"
-COMMENT_FILE = VOZ_DIR / "comments.csv"
+POST_FILE = "posts.csv"
+COMMENT_FILE = "comments.csv"
 
 DELAY_MIN = 2
 DELAY_MAX = 5
@@ -75,6 +74,9 @@ logger = logging.getLogger(__name__)
 def create_driver():
     profile_dir = tempfile.TemporaryDirectory(prefix="voz-chrome-")
     options = Options()
+    # options.add_argument("--headless=new")
+    # options.add_argument("--no-sandbox")
+    # options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument(f"--user-data-dir={profile_dir.name}")
     options.add_argument("--no-first-run")
@@ -101,15 +103,13 @@ def create_driver():
 """
 
 def load_checkpoint():
-    if not CHECKPOINT_FILE.exists():
-        return {"forums": {}, "threads": {}}
-    with CHECKPOINT_FILE.open("r", encoding="utf-8") as f:
-        return json.load(f)
+    return STORAGE.read_json(
+        STORAGE.path(VOZ_DIR, CHECKPOINT_FILE),
+        {"forums": {}, "threads": {}},
+    )
 
 def save_checkpoint(cp):
-    CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with CHECKPOINT_FILE.open("w", encoding="utf-8") as f:
-        json.dump(cp, f, indent=2)
+    STORAGE.write_json(STORAGE.path(VOZ_DIR, CHECKPOINT_FILE), cp)
 
 # =====================================================
 # LOAD PAGE
@@ -180,7 +180,7 @@ def parse_posts(soup, driver, url):
         title = None
 
     try:
-        time_post = soup.select_one('time.u-dt').text.strip()
+        time_post = soup.select_one('time.u-dt').get('title')
     except:
         time_post = None
 
@@ -285,14 +285,10 @@ def parse_posts(soup, driver, url):
 def save_data(posts, comments):
 
     if posts:
-        POST_FILE.parent.mkdir(parents=True, exist_ok=True)
-        df = pd.DataFrame(posts)
-        df.to_csv(POST_FILE, mode="a", index=False, header=not POST_FILE.exists())
+        STORAGE.append_csv(STORAGE.path(VOZ_DIR, POST_FILE), posts)
 
     if comments:
-        COMMENT_FILE.parent.mkdir(parents=True, exist_ok=True)
-        df = pd.DataFrame(comments)
-        df.to_csv(COMMENT_FILE, mode="a", index=False, header=not COMMENT_FILE.exists())
+        STORAGE.append_csv(STORAGE.path(VOZ_DIR, COMMENT_FILE), comments)
 
 # =====================================================
 # CRAWL THREAD
@@ -335,14 +331,14 @@ def crawl_thread(driver, thread_url, checkpoint):
         }
         save_checkpoint(checkpoint)
 
+    save_data(posts, comments)
+
     # DONE THREAD
     checkpoint["threads"][thread_url] = {
         "done": True,
         "last_page": last_page
     }
     save_checkpoint(checkpoint)
-
-    save_data(posts, comments)
 
     logger.info(f"✅ DONE THREAD: {thread_url}")
 
@@ -391,9 +387,11 @@ def crawl_forum(driver, forum_url, checkpoint):
 # =====================================================
 
 def run():
+    global STORAGE
 
     logger.info("🚀 START PIPELINE")
 
+    STORAGE = RemoteStorage()
     driver, profile_dir = create_driver()
     checkpoint = load_checkpoint()
 
@@ -406,6 +404,7 @@ def run():
     finally:
         driver.quit()
         profile_dir.cleanup()
+        STORAGE.close()
 
     logger.info("🎯 FINISHED")
 
@@ -416,11 +415,4 @@ def run():
 if __name__ == "__main__":
     run()
 
-    print("\n===========================================")
-    print("🚀 Bắt đầu tự động đẩy dữ liệu lên HDFS...")
-    print("===========================================")
-    try:
-        from upload_to_hdfs import main as upload_main
-        upload_main()
-    except Exception as e:
-        print(f"❌ Lỗi khi tự động tải dữ liệu lên HDFS: {e}")
+    print("Data and checkpoint were written directly to HDFS.")

@@ -1,8 +1,6 @@
 import json
-import os
 import tempfile
 import time
-from pathlib import Path
 from urllib.parse import urlparse
 from bs4 import BeautifulSoup
 import pandas as pd
@@ -10,6 +8,7 @@ import hashlib
 from selenium import webdriver
 from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.chrome.options import Options
+from remote_storage import RemoteStorage
 
 # ==============================
 # CONFIG
@@ -23,13 +22,12 @@ URLS = [
     "https://vatvostudio.vn/category/tips-and-tricks/"
 ]
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-DATA_DIR = Path(os.getenv("DATA_DIR", str(SCRIPT_DIR / "data")))
-VATVO_DIR = DATA_DIR / "vatvo"
+STORAGE = None
+VATVO_DIR = "vatvo"
 
-PROGRESS_FILE = VATVO_DIR / "progress.json"
-CRAWLED_FILE = VATVO_DIR / "crawled_links.json"
-CSV_FILE = VATVO_DIR / "articles.csv"
+PROGRESS_FILE = "progress.json"
+CRAWLED_FILE = "crawled_links.json"
+CSV_FILE = "articles.csv"
 
 MAX_RETRY = 5
 DELAY = 2
@@ -37,7 +35,7 @@ TIMEOUT = 10
 BATCH_SIZE = 1
 
 def ensure_data_dir():
-    VATVO_DIR.mkdir(parents=True, exist_ok=True)
+    return None
 
 
 def create_driver():
@@ -46,6 +44,9 @@ def create_driver():
     # options.add_argument("--headless=new")
     options.page_load_strategy = "eager"
     options.add_argument("--disable-gpu")
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument(f"--user-data-dir={profile_dir.name}")
     options.add_argument("--no-first-run")
@@ -154,43 +155,31 @@ def load_rendered_html(driver_state, url):
 # UTILS JSON
 # ==============================
 def load_json(file):
-    if file.exists():
-        with file.open("r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    return STORAGE.read_json(STORAGE.path(VATVO_DIR, file), {})
 
 def save_json(file, data):
-    ensure_data_dir()
-    with file.open("w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    STORAGE.write_json(STORAGE.path(VATVO_DIR, file), data)
 
 # ==============================
 # CSV (PANDAS)
 # ==============================
 def init_csv():
-    ensure_data_dir()
-    if not CSV_FILE.exists():
-        df = pd.DataFrame(columns=["post_id", "article", "author","time", "content"])
-        df.to_csv(CSV_FILE, index=False, encoding="utf-8")
+    STORAGE.init_csv(
+        STORAGE.path(VATVO_DIR, CSV_FILE),
+        ["post_id", "article", "author", "time", "content"],
+    )
 
 def load_existing_ids():
-    if not CSV_FILE.exists():
-        return set()
-    df = pd.read_csv(CSV_FILE)
-    return set(df["post_id"].astype(str))
+    return STORAGE.read_csv_column_as_str_set(
+        STORAGE.path(VATVO_DIR, CSV_FILE),
+        "post_id",
+    )
 
 def save_batch(batch):
     if not batch:
         return
 
-    df = pd.DataFrame(batch)
-    df.to_csv(
-        CSV_FILE,
-        mode="a",
-        header=not CSV_FILE.exists(),
-        index=False,
-        encoding="utf-8"
-    )
+    STORAGE.append_csv(STORAGE.path(VATVO_DIR, CSV_FILE), batch)
     print(f"[BATCH SAVED] {len(batch)} articles")
 
 # ==============================
@@ -274,20 +263,20 @@ def crawl_article(url, existing_ids):
     # ==============================
     # 2. Title
     # ==============================
-    title_el = soup.select_one("h1.entry-title")
+    title_el = soup.select_one("h1.s-title.fw-headline")
     title = title_el.get_text(strip=True) if title_el else ""
 
     # ==============================
     # 3. Author
     # ==============================
-    author_el = soup.select_one('div.entry-meta a[rel="author"]')
+    author_el = soup.select_one('div.meta-el a.meta-author-url.meta-author')
     author = author_el.get_text(strip=True) if author_el else ""
 
     # ==============================
     # 4. Time
     # ==============================
-    time_tag = soup.select_one('time.time.published')
-    time_el = time_tag.get('title') if time_tag else None
+    time_tag = soup.select_one('time.updated-date')
+    time_el = time_tag.get('datetime') if time_tag else None
 
 
     # ==============================
@@ -402,6 +391,9 @@ def crawl_category(base_url, progress, crawled_data, existing_ids):
 # MAIN
 # ==============================
 def main():
+    global STORAGE
+
+    STORAGE = RemoteStorage()
     init_csv()
 
     progress = load_json(PROGRESS_FILE)
@@ -417,6 +409,7 @@ def main():
             crawl_category(url, progress, crawled_data, existing_ids)
     finally:
         close_driver(crawl_page.driver_state.get("driver"), crawl_page.driver_state.get("profile_dir"))
+        STORAGE.close()
 
     print("\nDONE ALL")
 
@@ -425,12 +418,4 @@ def main():
 # ==============================
 if __name__ == "__main__":
     main()
-
-    print("\n===========================================")
-    print("🚀 Bắt đầu tự động đẩy dữ liệu lên HDFS...")
-    print("===========================================")
-    try:
-        from upload_to_hdfs import main as upload_main
-        upload_main()
-    except Exception as e:
-        print(f"❌ Lỗi khi tự động tải dữ liệu lên HDFS: {e}")
+    print("Data and checkpoint were written directly to HDFS.")
