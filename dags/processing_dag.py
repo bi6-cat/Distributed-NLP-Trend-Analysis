@@ -6,15 +6,14 @@ Dự án: Vietnamese Social Media Trend & Controversy Analysis System
 
 File này chứa 2 DAGs:
 
-1. daily_processing_pipeline (từ Member 2 — STUB/TODO):
-    Schedule: 0 2 * * * (2:00 AM hàng ngày)
-    Pipeline: crawl → spark_cleaning → lda_topic_modeling → load_to_clickhouse
-    → Member 3 tích hợp LDA task vào pipeline chính
+1. daily_processing_pipeline (2:00 AM hàng ngày):
+    crawl → spark_cleaning → [lda | sentiment | cms_keyword_counting] song song
+    → save_lda_to_clickhouse + dbt_transform → pipeline_end
+    Nguồn dữ liệu chung: stg_posts_core (cleaning output)
 
-2. cms_keyword_streaming (Member 3):
-    Schedule: */15 * * * * (mỗi 15 phút)
-    Pipeline: read_new_data → run_cms_update → export_top_keywords
-    → Đếm tần suất keyword streaming bằng Count-Min Sketch
+2. bertopic_weekly_inference (Chủ nhật 3:00 AM):
+    load_model → run_inference_pipeline (stg_posts_core 7 ngày) → save_topics_to_clickhouse
+    Nguồn dữ liệu: stg_posts_core (cùng nguồn với LDA, filter 7 ngày)
 
 CMS Streaming Architecture:
     Mỗi 15 phút, DAG:
@@ -42,7 +41,7 @@ import json
 import logging
 import os
 import pickle
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from airflow import DAG
@@ -58,15 +57,24 @@ from airflow.utils.dates import days_ago
 logger = logging.getLogger("processing_dag")
 
 # ── Đường dẫn HDFS ──
-# TODO [Member 2]: Xác nhận đường dẫn HDFS thực tế
-HDFS_STAGED_PATH: str = "/data/staged/"
+# stg_posts_core là nguồn duy nhất dùng chung cho LDA và BERTopic
+STAGED_HDFS_PATH:    str = "hdfs://namenode:9000/user/zett/staged/stg_posts_core"
+RAW_HDFS_PATH:       str = "hdfs://namenode:9000/user/zett/raw_data"
+LDA_HDFS_OUTPUT:     str = "hdfs://namenode:9000/user/zett/results/lda"
 HDFS_CMS_STATE_PATH: str = "/data/results/cms/cms_state.pkl"
-HDFS_CMS_TOPK_PATH: str = "/data/results/cms/top_keywords.json"
+HDFS_CMS_TOPK_PATH:  str = "/data/results/cms/top_keywords.json"
 
-# ── Đường dẫn local (dev/test khi chưa có HDFS) ──
-LOCAL_STAGED_PATH: str = "data/fake/"
+# ── Đường dẫn local (Docker volume /opt/airflow) ──
+# cleaning ghi ra đây → LDA và BERTopic đọc từ đây (cùng nguồn)
+STAGED_LOCAL_PATH:   str = "/opt/airflow/data/preprocessed/stg_posts_core"
+RAW_LOCAL_PATH:      str = "/opt/airflow/crawlers/data"
+LDA_LOCAL_OUTPUT:    str = "/opt/airflow/output/lda"
 LOCAL_CMS_STATE_PATH: str = "output/cms/cms_state.pkl"
-LOCAL_CMS_TOPK_PATH: str = "output/cms/top_keywords.json"
+LOCAL_CMS_TOPK_PATH:  str = "output/cms/top_keywords.json"
+
+# Alias cho CMS tasks (giữ backward compat)
+HDFS_STAGED_PATH: str = STAGED_HDFS_PATH
+LOCAL_STAGED_PATH: str = "data/fake/"
 
 # ── CMS Config (theo TECH_STACK.md Section 5.3) ──
 CMS_DEPTH: int = 5       # d = 5 hàm hash
@@ -76,13 +84,13 @@ CMS_TOP_K: int = 50      # Xuất top-50 keywords
 # ── Chế độ chạy ──
 # True: dùng local file system (dev/test)
 # False: dùng HDFS (production trên cluster)
-USE_LOCAL: bool = True    # TODO [Member 2]: Đổi thành False khi deploy cluster
+USE_LOCAL: bool = True    # True = dùng local volume mount (Docker). False = dùng HDFS (production cluster thật).
 
 # ── ClickHouse config ──
 # TODO [Member 2/5]: Cấu hình ClickHouse connection
 CLICKHOUSE_HOST: str = "localhost"
 CLICKHOUSE_PORT: int = 8123
-CLICKHOUSE_DB: str = "nlp_db"
+CLICKHOUSE_DB: str = "tech_radar"
 CLICKHOUSE_TABLE: str = "stg_keyword_freq"
 
 
@@ -222,54 +230,85 @@ def _tokenize_text(text: str, stopwords: set, slang_dict: dict) -> List[str]:
 # AIRFLOW TASK FUNCTIONS — CMS Keyword Streaming
 # ============================================================================
 
-def task_read_new_data(**context) -> List[str]:
+def _load_stg_posts_core_window(window_minutes: int = 15):
     """
-    Task 1: Đọc dữ liệu mới (incremental) từ HDFS hoặc local.
+    Đọc stg_posts_core và filter 15 phút gần nhất theo crawled_at.
+    Dùng chung cho task_read_new_data (CMS streaming).
 
-    Strategy:
-        - Dùng execution_date từ Airflow context để xác định time window
-        - Chỉ đọc file mới trong 15 phút gần nhất (avoid reprocessing)
-        - Local mode: đọc toàn bộ CSV (cho dev/test)
+    Local: đọc parquet dir STAGED_LOCAL_PATH.
+    Cluster: đọc qua WebHDFS từ STAGED_HDFS_PATH.
 
     Returns:
-        List[str]: Danh sách văn bản mới cần xử lý.
+        DataFrame với columns: clean_text (hoặc segmented_text), source, crawled_at
     """
+    import io
     import pandas as pd
+    import requests as _req
 
-    texts: List[str] = []
+    window_start = datetime.now(tz=timezone.utc) - timedelta(minutes=window_minutes)
+
+    def _filter_and_select(df: pd.DataFrame) -> pd.DataFrame:
+        if "crawled_at" in df.columns:
+            df["crawled_at"] = pd.to_datetime(df["crawled_at"], utc=True, errors="coerce")
+            df = df[df["crawled_at"] >= window_start].copy()
+        text_col = next(
+            (c for c in ["clean_text", "segmented_text", "body"] if c in df.columns),
+            None,
+        )
+        if text_col is None:
+            return pd.DataFrame(columns=["text", "source"])
+        df = df.rename(columns={text_col: "text"})
+        src = df["source"].astype(str) if "source" in df.columns else pd.Series("unknown", index=df.index)
+        df["source"] = src.fillna("unknown").replace("nan", "unknown")
+        return df[["text", "source"]].dropna(subset=["text"])
 
     if USE_LOCAL:
-        # ── LOCAL MODE: đọc toàn bộ CSV (dev/test) ──
-        for csv_file in ["posts_5k.csv", "comments_5k.csv"]:
-            csv_path = os.path.join(LOCAL_STAGED_PATH, csv_file)
-            if os.path.exists(csv_path):
-                df = pd.read_csv(csv_path, encoding="utf-8")
-                text_cols = [
-                    c for c in ["tieu_de", "noi_dung", "comment", "title", "content"]
-                    if c in df.columns
-                ]
-                for _, row in df.iterrows():
-                    parts = [str(row[c]) for c in text_cols if pd.notna(row[c])]
-                    combined = " ".join(parts).strip()
-                    if combined:
-                        texts.append(combined)
-        logger.info(f"[LOCAL] Read {len(texts):,} texts from {LOCAL_STAGED_PATH}")
+        if not os.path.isdir(STAGED_LOCAL_PATH):
+            logger.warning(f"[LOCAL] {STAGED_LOCAL_PATH} chưa tồn tại — chạy cleaning trước")
+            return pd.DataFrame(columns=["text", "source"])
+        df = pd.read_parquet(STAGED_LOCAL_PATH)
+        logger.info(f"[LOCAL] Loaded stg_posts_core: {len(df):,} rows")
+        return _filter_and_select(df)
     else:
-        # ── CLUSTER MODE: đọc Parquet tăng dần từ HDFS ──
-        # TODO [Member 2]: Implement incremental read
-        # execution_date = context["execution_date"]
-        # window_start = execution_date - timedelta(minutes=15)
-        # df = spark.read.parquet(HDFS_STAGED_PATH) \
-        #     .filter(F.col("crawl_timestamp") >= window_start)
-        # texts = [row.text for row in df.select("text").collect()]
-        logger.warning("[CLUSTER] HDFS read not yet implemented — using empty list")
+        webhdfs = f"http://{os.getenv('WEBHDFS_HOST', 'namenode:9870')}/webhdfs/v1"
+        hdfs_path = "/user/zett/staged/stg_posts_core"
+        r = _req.get(f"{webhdfs}{hdfs_path}?op=LISTSTATUS", timeout=30)
+        r.raise_for_status()
+        files = [
+            s["pathSuffix"] for s in r.json()["FileStatuses"]["FileStatus"]
+            if s["pathSuffix"].endswith(".parquet") and s["type"] == "FILE"
+        ]
+        dfs = []
+        for fname in files:
+            resp = _req.get(f"{webhdfs}{hdfs_path}/{fname}?op=OPEN",
+                            allow_redirects=True, timeout=120)
+            resp.raise_for_status()
+            dfs.append(pd.read_parquet(io.BytesIO(resp.content)))
+        if not dfs:
+            logger.warning("[CLUSTER] stg_posts_core: không có parquet file")
+            return pd.DataFrame(columns=["text", "source"])
+        df = pd.concat(dfs, ignore_index=True)
+        logger.info(f"[CLUSTER] Loaded stg_posts_core: {len(df):,} rows")
+        return _filter_and_select(df)
 
-    # Push danh sách texts qua XCom để task tiếp theo dùng
-    context["ti"].xcom_push(key="new_texts", value=texts[:10000])
-    # Giới hạn 10K texts per XCom để tránh quá tải (XCom lưu trong DB Airflow)
-    logger.info(f"Pushed {min(len(texts), 10000):,} texts to XCom")
 
-    return texts
+def task_read_new_data(**context) -> None:
+    """
+    Task 1: Đọc stg_posts_core incremental (15 phút gần nhất).
+
+    Nguồn: stg_posts_core — cùng bảng cleaning_job ghi, LDA + BERTopic đọc.
+    Push XCom:
+        new_texts   — list[str] text content (tối đa 10K)
+        new_sources — list[str] source per text (voz/tinhte/vnexpress/youtube)
+    """
+    df = _load_stg_posts_core_window(window_minutes=15)
+    # Giới hạn 10K để tránh quá tải XCom (lưu trong Airflow metadata DB)
+    df = df.head(10000)
+    texts   = df["text"].tolist()
+    sources = df["source"].tolist()
+    logger.info(f"New data: {len(texts):,} texts | sources: {df['source'].value_counts().to_dict()}")
+    context["ti"].xcom_push(key="new_texts",   value=texts)
+    context["ti"].xcom_push(key="new_sources", value=sources)
 
 
 def task_run_cms_update(**context) -> Dict[str, Any]:
@@ -316,10 +355,13 @@ def task_run_cms_update(**context) -> Dict[str, Any]:
     cms = _load_cms_state()
     count_before = cms.total_count
 
-    # 2. Pull texts mới từ XCom
+    # 2. Pull texts + sources từ XCom
     texts: List[str] = context["ti"].xcom_pull(
         task_ids="read_new_data", key="new_texts"
     ) or []
+    sources: List[str] = context["ti"].xcom_pull(
+        task_ids="read_new_data", key="new_sources"
+    ) or ["unknown"] * len(texts)
     logger.info(f"Pulled {len(texts):,} texts from XCom")
 
     if not texts:
@@ -327,30 +369,33 @@ def task_run_cms_update(**context) -> Dict[str, Any]:
         context["ti"].xcom_push(key="cms_updated", value=False)
         return {"total_count": cms.total_count, "n_new_tokens": 0}
 
-    # 3. Tokenize & update CMS
+    # 3. Tokenize & update CMS; track per-source keyword sets
     n_new_tokens = 0
-    all_keywords: List[str] = []
+    # source_keywords: {source: set_of_unique_keywords}
+    source_keywords: Dict[str, set] = {}
 
-    for text in texts:
+    for text, src in zip(texts, sources):
         tokens = _tokenize_text(text, stopwords, slang_dict)
         for token in tokens:
             cms.add(token)
             n_new_tokens += 1
-            all_keywords.append(token)
+            source_keywords.setdefault(src, set()).add(token)
 
     # 4. Lưu CMS state mới
     _save_cms_state(cms)
 
-    # Push danh sách unique keywords cho task export
-    unique_keywords = list(set(all_keywords))
-    context["ti"].xcom_push(key="unique_keywords", value=unique_keywords[:5000])
+    # Push candidates cho export: {source: [unique_keywords]}
+    source_kw_export = {src: list(kws)[:2000] for src, kws in source_keywords.items()}
+    all_unique = list({kw for kws in source_keywords.values() for kw in kws})
+    context["ti"].xcom_push(key="source_keywords", value=source_kw_export)
+    context["ti"].xcom_push(key="unique_keywords", value=all_unique[:5000])
     context["ti"].xcom_push(key="cms_updated", value=True)
 
     stats = {
         "total_count": cms.total_count,
         "count_before": count_before,
         "n_new_tokens": n_new_tokens,
-        "n_unique_keywords": len(unique_keywords),
+        "n_unique_keywords": len(all_unique),
         "epsilon": cms.epsilon,
         "delta": cms.delta,
     }
@@ -361,138 +406,225 @@ def task_run_cms_update(**context) -> Dict[str, Any]:
 
 def task_export_top_keywords(**context) -> Optional[List[Dict]]:
     """
-    Task 3: Xuất top-K keywords từ CMS → ClickHouse / local JSON.
+    Task 3: Xuất top-K keywords per source từ CMS → ClickHouse stg_keyword_freq.
 
-    Output format:
-        [{"keyword": "iphone", "estimated_count": 1234, "rank": 1}, ...]
-
-    Cluster mode:
-        → Ghi vào ClickHouse bảng stg_keyword_freq
-        → Member 5 dùng cho dashboard Streamlit
-
-    Local mode:
-        → Ghi ra file JSON (dev/test)
-
-    Returns:
-        List[Dict] top-K keywords hoặc None nếu không có update.
+    Schema: keyword | window_start | window_end | estimated_count | source
+    Mỗi source (voz/tinhte/vnexpress/youtube) có top-K riêng trong cùng window.
     """
-    import sys
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    import pandas as pd
 
-    # Kiểm tra có update không
-    cms_updated = context["ti"].xcom_pull(
-        task_ids="run_cms_update", key="cms_updated"
-    )
+    cms_updated = context["ti"].xcom_pull(task_ids="run_cms_update", key="cms_updated")
     if not cms_updated:
         logger.info("CMS was not updated — skipping export.")
         return None
 
-    # Load CMS state
     cms = _load_cms_state()
 
-    # Pull unique keywords làm candidates cho top_k
-    unique_keywords: List[str] = context["ti"].xcom_pull(
-        task_ids="run_cms_update", key="unique_keywords"
-    ) or []
+    # source_keywords: {source: [unique_keywords]} từ task trước
+    source_keywords: Dict[str, List[str]] = context["ti"].xcom_pull(
+        task_ids="run_cms_update", key="source_keywords"
+    ) or {}
 
-    if not unique_keywords:
-        logger.warning("No unique keywords to query.")
+    if not source_keywords:
+        logger.warning("No source_keywords in XCom.")
         return None
 
-    # Lấy top-K keywords
-    top_keywords = cms.top_k(unique_keywords, k=CMS_TOP_K)
+    execution_date = context.get("execution_date") or datetime.now(tz=timezone.utc)
+    window_end   = execution_date if isinstance(execution_date, datetime) else datetime.now(tz=timezone.utc)
+    window_start = window_end - timedelta(minutes=15)
+    # strip tz for ClickHouse DateTime (no timezone support)
+    ws = window_start.replace(tzinfo=None)
+    we = window_end.replace(tzinfo=None)
 
-    # Format output
+    # Build per-source top-K rows (spec: stg_keyword_freq)
     results: List[Dict] = []
-    for rank, (keyword, count) in enumerate(top_keywords, start=1):
-        results.append({
-            "keyword": keyword,
-            "estimated_count": count,
-            "rank": rank,
-            "timestamp": datetime.utcnow().isoformat(),
-        })
+    for src, candidates in source_keywords.items():
+        for keyword, count in cms.top_k(candidates, k=CMS_TOP_K):
+            results.append({
+                "keyword":         keyword,
+                "window_start":    ws,
+                "window_end":      we,
+                "estimated_count": int(count),
+                "source":          src,
+            })
 
-    # Xuất kết quả
-    if USE_LOCAL:
-        # ── LOCAL: ghi JSON ──
-        output_path = LOCAL_CMS_TOPK_PATH
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
-        logger.info(f"Exported top-{CMS_TOP_K} keywords → {output_path}")
-    else:
-        # ── CLUSTER: ghi ClickHouse ──
-        # TODO [Member 2/5]: Implement ClickHouse writer
-        # Cần cài clickhouse-connect hoặc dùng Spark JDBC
-        # ─────────────────────────────────────────────────
-        # import clickhouse_connect
-        # client = clickhouse_connect.get_client(
-        #     host=CLICKHOUSE_HOST,
-        #     port=CLICKHOUSE_PORT,
-        #     database=CLICKHOUSE_DB,
-        # )
-        # client.insert(
-        #     CLICKHOUSE_TABLE,
-        #     data=[[r["keyword"], r["estimated_count"], r["rank"],
-        #            r["timestamp"]] for r in results],
-        #     column_names=["keyword", "estimated_count", "rank", "timestamp"],
-        # )
-        # ─────────────────────────────────────────────────
-        logger.warning("[CLUSTER] ClickHouse write not yet implemented")
+    if not results:
+        logger.warning("top_k returned no results.")
+        return None
+
+    # ── Ghi ClickHouse stg_keyword_freq ──
+    ch_host = os.environ.get("CLICKHOUSE_HOST", "clickhouse")
+    try:
+        import clickhouse_connect
+        client = clickhouse_connect.get_client(
+            host=ch_host, port=CLICKHOUSE_PORT,
+            username=os.environ.get("CLICKHOUSE_USER", "admin"),
+            password=os.environ.get("CLICKHOUSE_PASSWORD", "clickhouse_secret"),
+            database=CLICKHOUSE_DB,
+        )
+        df_out = pd.DataFrame(results)
+        df_out["estimated_count"] = df_out["estimated_count"].astype("int64")
+        client.insert_df(CLICKHOUSE_TABLE, df_out)
+        logger.info(f"Inserted {len(df_out)} rows → {CLICKHOUSE_DB}.{CLICKHOUSE_TABLE}")
+    except Exception as exc:
+        # Fallback local JSON khi test mà chưa có ClickHouse
+        logger.warning(f"ClickHouse unavailable ({exc}) — writing fallback JSON")
+        os.makedirs(os.path.dirname(LOCAL_CMS_TOPK_PATH), exist_ok=True)
+        with open(LOCAL_CMS_TOPK_PATH, "w", encoding="utf-8") as f:
+            json.dump(
+                [{**r, "window_start": r["window_start"].isoformat(),
+                       "window_end":   r["window_end"].isoformat()} for r in results],
+                f, ensure_ascii=False, indent=2,
+            )
+        logger.info(f"Fallback JSON → {LOCAL_CMS_TOPK_PATH}")
 
     # Log top-5 cho monitoring
-    logger.info(f"Top-5 keywords:")
-    for r in results[:5]:
-        logger.info(f"  #{r['rank']}: {r['keyword']} ({r['estimated_count']:,})")
+    logger.info("Top-5 keywords:")
+    for i, r in enumerate(results[:5], start=1):
+        logger.info(f"  #{i}: {r['keyword']} ({r['estimated_count']:,})")
 
     return results
 
 
+# cms_keyword_streaming DAG đã được gộp vào daily_processing_pipeline
+# (task cms_keyword_counting chạy sau spark_cleaning, song song với LDA + sentiment)
+
+
 # ============================================================================
-# DAG 1: CMS KEYWORD STREAMING (Member 3 — chạy mỗi 15 phút)
+# TASK — CMS daily batch (dùng trong daily_processing_pipeline)
 # ============================================================================
 
-with DAG(
-    dag_id="cms_keyword_streaming",
-    default_args=default_args,
-    description=(
-        "Count-Min Sketch keyword frequency streaming — "
-        "đếm tần suất keyword mỗi 15 phút bằng CMS (CS246). "
-        "Member 3 — Task 2.5"
-    ),
-    schedule_interval="*/15 * * * *",   # Mỗi 15 phút
-    catchup=False,
-    max_active_runs=1,                   # Chỉ chạy 1 instance tại 1 thời điểm
-    tags=["member3", "cms", "streaming", "phase2"],
-) as cms_dag:
+def task_run_cms_daily() -> None:
+    """
+    CMS keyword counting — chạy sau spark_cleaning trong daily_processing_pipeline.
 
-    start = DummyOperator(task_id="start")
+    Input:  stg_posts_core (STAGED_LOCAL_PATH hoặc STAGED_HDFS_PATH)
+            — cùng nguồn với LDA và BERTopic, window 24h (crawled_at hôm nay)
+            — cột dùng: clean_text (hoặc segmented_text), source, crawled_at
 
-    # Task 1: Đọc dữ liệu mới
-    read_data = PythonOperator(
-        task_id="read_new_data",
-        python_callable=task_read_new_data,
-        provide_context=True,
-    )
+    Output: ClickHouse tech_radar.stg_keyword_freq
+            schema: keyword | window_start | window_end | estimated_count | source
+            — top-K keywords per source (voz/tinhte/vnexpress/youtube)
+            — fallback ghi JSON local nếu ClickHouse chưa sẵn sàng
 
-    # Task 2: Cập nhật CMS
-    update_cms = PythonOperator(
-        task_id="run_cms_update",
-        python_callable=task_run_cms_update,
-        provide_context=True,
-    )
+    Reuses: _load_stg_posts_core_window, _tokenize_text,
+            _load_cms_state, _save_cms_state, cms.top_k
+    """
+    import sys as _sys
+    import pandas as _pd
 
-    # Task 3: Xuất top keywords
-    export_keywords = PythonOperator(
-        task_id="export_top_keywords",
-        python_callable=task_export_top_keywords,
-        provide_context=True,
-    )
+    _sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-    end = DummyOperator(task_id="end")
+    # ── 1. Input: stg_posts_core 24h window ──
+    df = _load_stg_posts_core_window(window_minutes=24 * 60)
+    if df.empty:
+        logger.warning("[CMS] Không có dữ liệu mới trong 24h — skip.")
+        return
+    logger.info(f"[CMS] Input: {len(df):,} rows | sources: {df['source'].value_counts().to_dict()}")
 
-    # DAG flow: start → read → update → export → end
-    start >> read_data >> update_cms >> export_keywords >> end
+    # ── 2. Load NLP resources (stopwords + slang) ──
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    stopwords: set = set()
+    slang_dict: dict = {}
+    try:
+        with open(os.path.join(root, "data", "stopwords_vi.txt"), encoding="utf-8") as f:
+            stopwords = {line.strip().lower() for line in f if line.strip()}
+    except FileNotFoundError:
+        logger.warning("[CMS] stopwords_vi.txt not found — proceeding without")
+    try:
+        with open(os.path.join(root, "data", "slang_dict.json"), encoding="utf-8") as f:
+            slang_dict = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        logger.warning("[CMS] slang_dict.json not found — proceeding without")
+
+    # ── 3. Tokenize + CMS update (per-source tracking) ──
+    # One CMS per source so top_k returns source-specific counts, not global counts
+    from algorithms.count_min_sketch import CountMinSketch as _CMS
+    source_cms: Dict[str, object] = {}
+    source_keywords: Dict[str, set] = {}
+
+    for _, row in df.iterrows():
+        tokens = _tokenize_text(str(row["text"]), stopwords, slang_dict)
+        src = str(row.get("source", "unknown"))
+        if src not in source_cms:
+            source_cms[src] = _CMS(depth=5, width=4096)
+        for token in tokens:
+            source_cms[src].add(token)
+            source_keywords.setdefault(src, set()).add(token)
+
+    _save_cms_state(_load_cms_state())
+    total_unique = sum(len(v) for v in source_keywords.values())
+    logger.info(f"[CMS] CMS updated — {total_unique:,} unique tokens across {len(source_cms)} sources")
+
+    # ── 4. Build output rows: top-K per source → stg_keyword_freq schema ──
+    now = datetime.now(tz=timezone.utc).replace(tzinfo=None)
+    window_start = now.replace(hour=0, minute=0, second=0, microsecond=0)  # midnight today
+
+    results: List[Dict] = []
+    for src, candidates in source_keywords.items():
+        for keyword, count in source_cms[src].top_k(list(candidates), k=CMS_TOP_K):
+            results.append({
+                "keyword":         keyword,           # String
+                "window_start":    window_start,      # DateTime (midnight)
+                "window_end":      now,               # DateTime (now)
+                "estimated_count": int(count),        # Int64
+                "source":          src,               # LowCardinality String
+            })
+
+    if not results:
+        logger.warning("[CMS] top_k returned no results — skip insert.")
+        return
+
+    # ── 5. Output: insert vào ClickHouse stg_keyword_freq ──
+    ch_host = os.environ.get("CLICKHOUSE_HOST", "clickhouse")
+    try:
+        import clickhouse_connect
+        client = clickhouse_connect.get_client(
+            host=ch_host, port=CLICKHOUSE_PORT,
+            username=os.environ.get("CLICKHOUSE_USER", "admin"),
+            password=os.environ.get("CLICKHOUSE_PASSWORD", "clickhouse_secret"),
+            database=CLICKHOUSE_DB,
+        )
+        df_out = _pd.DataFrame(results)
+        df_out["estimated_count"] = df_out["estimated_count"].astype("int64")
+        client.insert_df(CLICKHOUSE_TABLE, df_out)
+        logger.info(f"[CMS] Inserted {len(df_out)} rows → {CLICKHOUSE_DB}.{CLICKHOUSE_TABLE}")
+    except Exception as exc:
+        # Fallback JSON khi test mà ClickHouse chưa up
+        logger.warning(f"[CMS] ClickHouse unavailable ({exc}) — fallback JSON")
+        os.makedirs(os.path.dirname(LOCAL_CMS_TOPK_PATH), exist_ok=True)
+        with open(LOCAL_CMS_TOPK_PATH, "w", encoding="utf-8") as f:
+            json.dump(
+                [{**r,
+                  "window_start": r["window_start"].isoformat(),
+                  "window_end":   r["window_end"].isoformat()} for r in results],
+                f, ensure_ascii=False, indent=2,
+            )
+        logger.info(f"[CMS] Fallback → {LOCAL_CMS_TOPK_PATH}")
+
+
+# ============================================================================
+# HELPER FUNCTION — LDA → ClickHouse (dùng trong daily_processing_pipeline)
+# ============================================================================
+
+def task_save_lda_to_clickhouse() -> None:
+    """
+    Đọc LDA Parquet rồi insert vào ClickHouse.
+
+    Local/Docker: đọc parquet từ LDA_LOCAL_OUTPUT (volume mount).
+    Cluster:      đọc parquet từ LDA_HDFS_OUTPUT qua WebHDFS.
+    """
+    import sys as _sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _sys.path.insert(0, root)
+    from scripts.save_topics_to_ch import main as save_to_ch
+
+    ch_host = os.environ.get("CLICKHOUSE_HOST", "clickhouse")
+    if USE_LOCAL:
+        save_to_ch(input_dir=LDA_LOCAL_OUTPUT, host=ch_host, port=CLICKHOUSE_PORT)
+    else:
+        save_to_ch(hdfs_base="/user/zett/results/lda", host=ch_host, port=CLICKHOUSE_PORT)
+    logger.info("[LDA] Topics pushed to ClickHouse.")
 
 
 # ============================================================================
@@ -520,14 +652,10 @@ with DAG(
     crawl_sources = BashOperator(
         task_id="crawl_sources",
         bash_command=(
-            # SKIP TẠM THỜI: Dùng data có sẵn để tập trung vào phần processing
-            # "export HDFS_HOST='namenode' && "
-            # "python3 /opt/airflow/crawlers/vnexpress.py || true && "
-            # "python3 /opt/airflow/crawlers/voz.py || true && "
-            # "python3 /opt/airflow/crawlers/vatvo.py || true && "
-            # "python3 /opt/airflow/crawlers/upload_to_hdfs.py"
             "export HDFS_HOST='namenode' PYTHONUNBUFFERED=1 && "
-            "echo '[SKIP] crawlers - dùng data có sẵn' && "
+            "python3 -u /opt/airflow/crawlers/vnexpress.py || true && "
+            "python3 -u /opt/airflow/crawlers/voz.py || true && "
+            "python3 -u /opt/airflow/crawlers/vatvo.py || true && "
             "python3 -u /opt/airflow/crawlers/upload_to_hdfs.py"
         ),
         execution_timeout=timedelta(hours=2),
@@ -542,11 +670,11 @@ with DAG(
         task_id="spark_cleaning",
         application="/opt/airflow/spark_jobs/cleaning_job.py",
         conn_id="spark_default",
-        conf={"spark.master": "spark://spark-master:7077", "spark.pyspark.python": "/opt/bitnami/python/bin/python3", "spark.pyspark.driver.python": "/usr/local/bin/python3", "spark.executorEnv.PYSPARK_PYTHON": "/opt/bitnami/python/bin/python3", "spark.executorEnv.PYTHONPATH": "/opt/airflow"},
+        conf={"spark.master": "spark://spark-master:7077", "spark.pyspark.python": "/opt/bitnami/python/bin/python3", "spark.pyspark.driver.python": "/usr/local/bin/python3", "spark.executorEnv.PYSPARK_PYTHON": "/opt/bitnami/python/bin/python3", "spark.executorEnv.PYTHONPATH": "/opt/airflow", "spark.hadoop.fs.permissions.umask-mode": "000"},
         executor_memory="12g",
         env_vars={
-            "HDFS_INPUT": "hdfs://namenode:9000/user/zett/raw_data",
-            "HDFS_OUTPUT": "hdfs://namenode:9000/user/zett/staged/sentiment/",
+            "HDFS_INPUT":  RAW_LOCAL_PATH  if USE_LOCAL else RAW_HDFS_PATH,
+            "HDFS_OUTPUT": STAGED_LOCAL_PATH if USE_LOCAL else STAGED_HDFS_PATH,
             "CLICKHOUSE_HOST": "clickhouse",
             "PYTHONPATH": "/opt/airflow",
         }
@@ -557,12 +685,13 @@ with DAG(
         task_id="lda_topic_modeling",
         application="/opt/airflow/spark_jobs/lda_job.py",
         conn_id="spark_default",
-        conf={"spark.master": "spark://spark-master:7077", "spark.pyspark.python": "/opt/bitnami/python/bin/python3", "spark.pyspark.driver.python": "/usr/local/bin/python3", "spark.executorEnv.PYSPARK_PYTHON": "/opt/bitnami/python/bin/python3", "spark.executorEnv.PYTHONPATH": "/opt/airflow"},
+        conf={"spark.master": "spark://spark-master:7077", "spark.pyspark.python": "/opt/bitnami/python/bin/python3", "spark.pyspark.driver.python": "/usr/local/bin/python3", "spark.executorEnv.PYSPARK_PYTHON": "/opt/bitnami/python/bin/python3", "spark.executorEnv.PYTHONPATH": "/opt/airflow", "spark.hadoop.fs.permissions.umask-mode": "000"},
         executor_memory="12g",
         application_args=[
-            "--input-path", "hdfs://namenode:9000/user/zett/staged/",
-            "--output-path", "hdfs://namenode:9000/user/zett/results/lda/",
-            "--k", "20"
+            "--input-path", STAGED_LOCAL_PATH if USE_LOCAL else STAGED_HDFS_PATH,
+            "--output-path", LDA_LOCAL_OUTPUT  if USE_LOCAL else LDA_HDFS_OUTPUT,
+            "--k", "20",
+            *(["--local"] if USE_LOCAL else []),
         ]
     )
 
@@ -585,13 +714,150 @@ with DAG(
     dbt_transform = BashOperator(
         task_id="dbt_transform",
         bash_command="cd /opt/airflow/warehouse/dbt_project && dbt run --profiles-dir .",
+        trigger_rule="all_done",
     )
 
-    pipeline_end = DummyOperator(task_id="pipeline_end")
+    # ── Task từ Member 3: Push LDA results → ClickHouse ──
+    save_lda_to_ch = PythonOperator(
+        task_id="save_lda_to_clickhouse",
+        python_callable=task_save_lda_to_clickhouse,
+    )
+
+    # ── Task từ Member 3: CMS keyword frequency (daily batch) ──
+    run_cms = PythonOperator(
+        task_id="cms_keyword_counting",
+        python_callable=task_run_cms_daily,
+    )
+
+    pipeline_end = DummyOperator(task_id="pipeline_end", trigger_rule="all_done")
 
     # ── DAG Flow ──
-    # crawl → clean → [LDA + sentiment song song] → dbt 
-    # (Scoring & Load to Clickhouse đã nằm trong dbt & NLP jobs)
+    # crawl → clean → [LDA | sentiment | CMS] song song
+    #   LDA  → save_lda_to_ch ──┐
+    #   CMS  ───────────────────┼──► dbt_transform → end
+    #   sentiment ──────────────┘
     pipeline_start >> crawl_sources >> spark_cleaning
-    spark_cleaning >> [lda_topic_modeling, sentiment_analysis]
-    [lda_topic_modeling, sentiment_analysis] >> dbt_transform >> pipeline_end
+    spark_cleaning >> [lda_topic_modeling, sentiment_analysis, run_cms]
+    lda_topic_modeling >> save_lda_to_ch >> dbt_transform
+    sentiment_analysis >> dbt_transform
+    run_cms >> dbt_transform
+    dbt_transform >> pipeline_end
+
+
+# ============================================================================
+# DAG 3: BERTOPIC WEEKLY INFERENCE (Member 3 — chạy Chủ nhật 3h sáng)
+# ============================================================================
+# Tại sao dùng PythonOperator (không phải SparkSubmitOperator)?
+#   - BERTopic dùng PyTorch + HDBSCAN — không chạy trên Spark executor
+#   - Inference chạy single-machine: load model → batch transform → export
+#   - 1 tuần data ≈ 50K-200K docs — đủ với driver node 16-32GB RAM
+#   - Spark chỉ dùng cho LDA vì LDA gensim không scale → Spark MLlib
+# ============================================================================
+
+def task_bertopic_load_model(**context) -> None:
+    """
+    Task 1: Load BERTopic model từ HDFS → lưu path vào XCom.
+
+    Không load cả model vào XCom (quá lớn) — chỉ lưu đường dẫn tmp dir.
+    Để model sống trong driver memory, dùng một PythonOperator duy nhất
+    chạy toàn bộ pipeline (xem task_bertopic_run_pipeline bên dưới).
+    """
+    logger.info("[BERTopic] Checking model path...")
+    model_path = (
+        HDFS_MODEL_PATH if not USE_LOCAL else LOCAL_BERTOPIC_MODEL_PATH
+    )
+    logger.info(f"Model path: {model_path}")
+    context["ti"].xcom_push(key="model_path", value=model_path)
+
+
+def task_bertopic_run_pipeline() -> None:
+    """
+    Task 2 (chính): Load model → đọc staged data → inference → export.
+
+    Chạy toàn bộ trong 1 task để tránh phải serialize model qua XCom.
+    PythonOperator giữ process sống suốt runtime — model load 1 lần.
+    """
+    import sys as _sys
+    _sys.path.insert(
+        0,
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    )
+    from spark_jobs.bertopic_inference_job import main as bertopic_main
+
+    bertopic_main(
+        # Cùng nguồn với LDA: stg_posts_core do cleaning_job tạo ra
+        input_path=STAGED_LOCAL_PATH if USE_LOCAL else STAGED_HDFS_PATH,
+        model_path=None,
+        output_path=None,
+        local=USE_LOCAL,
+        window_days=7,     # chạy Chủ nhật → lấy 7 ngày tích lũy trong tuần
+    )
+    logger.info("[BERTopic] Weekly inference pipeline done.")
+
+
+def task_save_bertopic_to_clickhouse() -> None:
+    """
+    Task 3: Push BERTopic parquet results → ClickHouse tech_radar.
+
+    Reads output/bertopic_inference/{post_topic_assignment,topics}.parquet
+    and inserts into stg_post_topics + stg_topics.
+    Runs after task_bertopic_run_pipeline so parquet files are already written.
+    """
+    import sys as _sys
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _sys.path.insert(0, root)
+    from scripts.save_topics_to_ch import main as save_to_ch
+
+    # Inside Docker the service hostname is always "clickhouse", regardless of USE_LOCAL
+    ch_host = os.environ.get("CLICKHOUSE_HOST", "clickhouse")
+    save_to_ch(
+        input_dir="output/bertopic_inference",
+        host=ch_host,
+        port=CLICKHOUSE_PORT,
+    )
+    logger.info("[BERTopic] Topics pushed to ClickHouse.")
+
+
+# ── Cấu hình path riêng cho BERTopic ──
+HDFS_MODEL_PATH: str = "/data/models/bertopic/bertopic_model"
+LOCAL_BERTOPIC_MODEL_PATH: str = "output/task3.1_bertopic/output/bertopic_model"
+
+with DAG(
+    dag_id="bertopic_weekly_inference",
+    default_args=default_args,
+    description=(
+        "BERTopic weekly inference — chạy Chủ nhật 3h sáng. "
+        "Load model PhoBERT từ HDFS, inference 7 ngày dữ liệu, "
+        "export stg_post_topics + stg_topics. Member 3 — Task 3.x"
+    ),
+    schedule_interval="0 3 * * 0",        # Chủ nhật 3:00 AM
+    catchup=False,
+    max_active_runs=1,
+    tags=["member3", "bertopic", "weekly", "inference"],
+) as bertopic_dag:
+
+    bt_start = DummyOperator(task_id="bertopic_start")
+
+    # Task 1: Kiểm tra model tồn tại (lightweight check)
+    bt_check_model = PythonOperator(
+        task_id="check_model_path",
+        python_callable=task_bertopic_load_model,
+        provide_context=True,
+    )
+
+    # Task 2: Chạy toàn bộ inference pipeline → parquet
+    bt_run = PythonOperator(
+        task_id="run_inference_pipeline",
+        python_callable=task_bertopic_run_pipeline,
+        execution_timeout=timedelta(hours=3),   # tối đa 3h cho 200K docs
+    )
+
+    # Task 3: Push parquet kết quả → ClickHouse tech_radar
+    bt_save_ch = PythonOperator(
+        task_id="save_topics_to_clickhouse",
+        python_callable=task_save_bertopic_to_clickhouse,
+    )
+
+    bt_end = DummyOperator(task_id="bertopic_end")
+
+    bt_start >> bt_check_model >> bt_run >> bt_save_ch >> bt_end

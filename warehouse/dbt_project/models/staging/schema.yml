@@ -20,8 +20,7 @@ sources:
             tests:
               - not_null
               - accepted_values:
-                  arguments:
-                    values: ['voz', 'tinhte', 'vnexpress', 'youtube']
+                  values: ['voz', 'tinhte', 'vnexpress', 'youtube']
 
       - name: stg_posts_nlp
         description: >
@@ -80,8 +79,7 @@ models:
         tests:
           - not_null
           - accepted_values:
-              arguments:
-                values: ['voz', 'tinhte', 'vnexpress', 'youtube']
+              values: ['voz', 'tinhte', 'vnexpress', 'youtube']
       - name: engagement
         description: >
           Weighted engagement score computed by dbt from atomic metrics:
@@ -92,8 +90,7 @@ models:
         description: "Derived platform type: forum, news, video"
         tests:
           - accepted_values:
-              arguments:
-                values: ['forum', 'news', 'video', 'unknown']
+              values: ['forum', 'news', 'video', 'unknown']
       - name: created_at
         tests:
           - not_null
