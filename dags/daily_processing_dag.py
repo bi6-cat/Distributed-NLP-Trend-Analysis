@@ -51,12 +51,12 @@ from airflow.utils.dates import days_ago
 
 # ── Cấu hình ──────────────────────────────────────────────────────────────────
 
-SPARK_MASTER      = "spark://192.168.56.11:7077"
-CLICKHOUSE_HOST   = "192.168.56.14"
+SPARK_MASTER      = "spark://spark-master:7077"
+CLICKHOUSE_HOST   = "clickhouse"
 CLICKHOUSE_DB     = "tech_radar"
-JDBC_JAR          = "/opt/spark/jars/clickhouse-jdbc-0.6.0-all.jar"
-IF_MODEL_PATH     = "/opt/models/isolation_forest_hourly.pkl"
-CLF_MODEL_PATH    = "/opt/models/crisis_classifier.pkl"
+HDFS_STG_POSTS_CORE = "hdfs://namenode:9000/user/zett/staged/stg_posts_core"
+IF_MODEL_PATH     = "/opt/airflow/models/isolation_forest_hourly.pkl"
+CLF_MODEL_PATH    = "/opt/airflow/models/crisis_classifier.pkl"
 SPARK_SUBMIT_CONN = "spark_default"   # Airflow Connection ID cho Spark
 
 default_args = {
@@ -126,20 +126,24 @@ with DAG(
         conn_id=SPARK_SUBMIT_CONN,
         application="spark_jobs/crisis_detection.py",
         name="crisis_detection_daily_{{ ds }}",
-        master=SPARK_MASTER,
+        conf={
+            "spark.master": SPARK_MASTER,
+            "spark.executorEnv.PYTHONPATH": "/opt/airflow",
+        },
         executor_memory="2g",
         driver_memory="1g",
         total_executor_cores=4,
-        jars=JDBC_JAR,
         env_vars={
+            "PYTHONPATH":         "/opt/airflow",
             "CLICKHOUSE_HOST":    CLICKHOUSE_HOST,
             "CLICKHOUSE_DB":      CLICKHOUSE_DB,
-            "CLICKHOUSE_USER":    "default",
+            "CLICKHOUSE_USER":    "app",
             "CLICKHOUSE_PASS":    "",
+            "HDFS_STG_POSTS_CORE": HDFS_STG_POSTS_CORE,
             "IF_MODEL_PATH":      IF_MODEL_PATH,
             "CLF_MODEL_PATH":     CLF_MODEL_PATH,
             "Z_SCORE_THRESHOLD":  "2.0",
-            "TARGET_DATE":        "{{ ds }}",   # YYYY-MM-DD của execution_date
+            "TARGET_DATE":        "{{ dag_run.conf.get('target_date', '2026-04-29') }}",
         },
         verbose=False,
     )

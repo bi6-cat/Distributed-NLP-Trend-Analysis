@@ -80,9 +80,9 @@ USE_LOCAL: bool = True    # TODO [Member 2]: Đổi thành False khi deploy clus
 
 # ── ClickHouse config ──
 # TODO [Member 2/5]: Cấu hình ClickHouse connection
-CLICKHOUSE_HOST: str = "localhost"
+CLICKHOUSE_HOST: str = "clickhouse"
 CLICKHOUSE_PORT: int = 8123
-CLICKHOUSE_DB: str = "nlp_db"
+CLICKHOUSE_DB: str = "tech_radar"
 CLICKHOUSE_TABLE: str = "stg_keyword_freq"
 
 
@@ -543,10 +543,11 @@ with DAG(
         application="/opt/airflow/spark_jobs/cleaning_job.py",
         conn_id="spark_default",
         conf={"spark.master": "spark://spark-master:7077", "spark.pyspark.python": "/opt/bitnami/python/bin/python3", "spark.pyspark.driver.python": "/usr/local/bin/python3", "spark.executorEnv.PYSPARK_PYTHON": "/opt/bitnami/python/bin/python3", "spark.executorEnv.PYTHONPATH": "/opt/airflow"},
-        executor_memory="12g",
+        executor_memory="2g",
+        driver_memory="1g",
         env_vars={
             "HDFS_INPUT": "hdfs://namenode:9000/user/zett/raw_data",
-            "HDFS_OUTPUT": "hdfs://namenode:9000/user/zett/staged/sentiment/",
+            "HDFS_OUTPUT": "hdfs://namenode:9000/user/zett/staged/stg_posts_core",
             "CLICKHOUSE_HOST": "clickhouse",
             "PYTHONPATH": "/opt/airflow",
         }
@@ -558,9 +559,10 @@ with DAG(
         application="/opt/airflow/spark_jobs/lda_job.py",
         conn_id="spark_default",
         conf={"spark.master": "spark://spark-master:7077", "spark.pyspark.python": "/opt/bitnami/python/bin/python3", "spark.pyspark.driver.python": "/usr/local/bin/python3", "spark.executorEnv.PYSPARK_PYTHON": "/opt/bitnami/python/bin/python3", "spark.executorEnv.PYTHONPATH": "/opt/airflow"},
-        executor_memory="12g",
+        executor_memory="2g",
+        driver_memory="1g",
         application_args=[
-            "--input-path", "hdfs://namenode:9000/user/zett/staged/",
+            "--input-path", "hdfs://namenode:9000/user/zett/staged/stg_posts_core",
             "--output-path", "hdfs://namenode:9000/user/zett/results/lda/",
             "--k", "20"
         ]
@@ -571,11 +573,25 @@ with DAG(
         task_id="sentiment_analysis",
         application="/opt/airflow/spark_jobs/sentiment_job.py",
         conn_id="spark_default",
-        conf={"spark.master": "spark://spark-master:7077", "spark.pyspark.python": "/opt/bitnami/python/bin/python3", "spark.pyspark.driver.python": "/usr/local/bin/python3", "spark.executorEnv.PYSPARK_PYTHON": "/opt/bitnami/python/bin/python3", "spark.executorEnv.PYTHONPATH": "/opt/airflow", "spark.executorEnv.KAGGLE_MODEL_HANDLE": "nquanggnguyn/phobert-/transformers/default"},
-        executor_memory="12g",
+          conf={
+              "spark.master": "spark://spark-master:7077",
+              "spark.cores.max": "2",
+              "spark.executor.cores": "1",
+              "spark.pyspark.python": "/opt/bitnami/python/bin/python3",
+              "spark.pyspark.driver.python": "/usr/local/bin/python3",
+              "spark.executorEnv.PYSPARK_PYTHON": "/opt/bitnami/python/bin/python3",
+              "spark.executorEnv.PYTHONPATH": "/opt/airflow",
+              "spark.executorEnv.KAGGLE_MODEL_HANDLE": "nquanggnguyn/phobert-/transformers/default",
+              "spark.network.timeout": "800s",
+              "spark.executor.heartbeatInterval": "60s",
+          },
+        executor_memory="2g",
+        driver_memory="1g",
         env_vars={
-            "HDFS_INPUT": "hdfs://namenode:9000/user/zett/staged/",
+            "HDFS_INPUT": "hdfs://namenode:9000/user/zett/staged/stg_posts_core",
             "CLICKHOUSE_HOST": "clickhouse",
+            "CLICKHOUSE_USER": "app",
+            "CLICKHOUSE_PASS": "",
             "KAGGLE_MODEL_HANDLE": "nquanggnguyn/phobert-/transformers/default",
             "PYTHONPATH": "/opt/airflow",
         }
