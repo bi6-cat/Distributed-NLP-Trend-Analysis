@@ -1,0 +1,186 @@
+version: '3.8'
+
+x-airflow-common:
+  &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile.airflow
+  environment:
+    &airflow-common-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    HADOOP_USER_NAME: root
+  volumes:
+    - ./:/opt/airflow
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  # ==========================================
+  # 1. HADOOP (HDFS)
+  # ==========================================
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode
+    restart: always
+    ports:
+      - "9870:9870"
+      - "9000:9000"
+    volumes:
+      - hadoop_namenode:/hadoop/dfs/name
+    environment:
+      - CLUSTER_NAME=nlp_cluster
+      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+    networks:
+      - nlp_network
+
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode
+    restart: always
+    depends_on:
+      - namenode
+    volumes:
+      - hadoop_datanode:/hadoop/dfs/data
+    environment:
+      SERVICE_PRECONDITION: "namenode:9870"
+      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+    networks:
+      - nlp_network
+
+  # ==========================================
+  # 2. APACHE SPARK
+  # ==========================================
+  spark-master:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master
+      - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
+      - PYSPARK_DRIVER_PYTHON=/opt/bitnami/python/bin/python3
+      - HADOOP_USER_NAME=root
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+    volumes:
+      - ./:/opt/spark/work-dir
+      - ./:/opt/airflow
+      - /root/.kaggle/access_token:/root/.kaggle/access_token:ro
+    networks:
+      - nlp_network
+
+  # Gộp thành 1 Worker lớn (6 Cores, 24G RAM)
+  spark-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    container_name: spark-worker
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=24G
+      - SPARK_WORKER_CORES=6
+      - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
+      - PYSPARK_DRIVER_PYTHON=/opt/bitnami/python/bin/python3
+      - HADOOP_USER_NAME=root
+    depends_on:
+      - spark-master
+    volumes:
+      - ./:/opt/spark/work-dir
+      - ./:/opt/airflow
+      - /root/.kaggle/access_token:/root/.kaggle/access_token:ro
+    networks:
+      - nlp_network
+
+  # ==========================================
+  # 3. CLICKHOUSE
+  # ==========================================
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.3
+    container_name: clickhouse
+    ports:
+      - "8123:8123"
+      - "9001:9000" # Dùng nội bộ cho giao tiếp, đổi host port qua 9001 tránh trùng Hadoop
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+    networks:
+      - nlp_network
+
+  # ==========================================
+  # 4. AIRFLOW (Orchestration)
+  # ==========================================
+  postgres:
+    image: postgres:13
+    container_name: postgres
+    environment:
+      - POSTGRES_USER=airflow
+      - POSTGRES_PASSWORD=airflow
+      - POSTGRES_DB=airflow
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      retries: 5
+    networks:
+      - nlp_network
+
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    command: version
+    environment:
+      <<: *airflow-common-env
+      _AIRFLOW_DB_UPGRADE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: admin
+    networks:
+      - nlp_network
+
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    command: webserver
+    ports:
+      - "8081:8080" # Map ra cổng 8081 để không trùng với Spark
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - nlp_network
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    environment:
+      <<: *airflow-common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    networks:
+      - nlp_network
+    volumes:
+      - ./:/opt/airflow
+
+volumes:
+  hadoop_namenode:
+  hadoop_datanode:
+  postgres_data:
+  clickhouse_data:
+
+networks:
+  nlp_network:
+    driver: bridge

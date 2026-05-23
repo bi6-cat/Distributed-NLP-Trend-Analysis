@@ -1,52 +1,45 @@
-# Cluster Infrastructure Overview: Distributed NLP Trend Analysis
+# Server / Docker Infrastructure Guide: Distributed NLP Trend Analysis
 
-Tài liệu này cung cấp thông tin chi tiết về cơ sở hạ tầng cụm (cluster) hiện tại để các thành viên trong nhóm có thể tham chiếu và kết nối.
+Tài liệu này cung cấp thông tin chi tiết về cơ sở hạ tầng cụm (cluster) hiện tại để các thành viên trong nhóm có thể tham chiếu và kết nối. Chúng ta đã chia tay Vagrant/máy ảo local và chuyển toàn bộ hệ thống sang **Docker Compose**.
 
-## 🖥️ Thông tin các Node (Máy chủ)
+## 🖥️ Cấu trúc Container (Docker)
 
-Hệ thống hiện tại bao gồm các node trên dải mạng `192.168.56.x`:
+Hệ thống hiện tại chạy hoàn toàn trên Docker và có thể truy cập qua `localhost` nếu chạy trực tiếp trên máy, hoặc IP của Server nếu deploy từ xa. Các services chạy trên cùng chung 1 mạng lưới:
 
-| Vai trò | Địa chỉ IP | Mô tả |
+| Container / Dịch vụ | Tên Service (Docker) | Mô tả |
 | :--- | :--- | :--- |
-| **Master** | `192.168.56.11` | Chạy NameNode (Hadoop), Spark Master và điều phối cụm. |
-| **Workers 1** | `192.168.56.12` | Chạy DataNode (Hadoop) và Spark Worker. |
-| **Workers 2** | `192.168.56.13` | Chạy DataNode (Hadoop) và Spark Worker. |
-| **Storage** | `192.168.56.14` | Chạy ClickHouse (OLAP Database) và DataNode (Hadoop). |
+| **NameNode / Master** | `namenode` | Chạy HDFS NameNode và đóng vai trò gateway chính. |
+| **DataNode 1 & 2** | `datanode1`, `datanode2` | Chạy HDFS DataNode lưu trữ phân tán. |
+| **Spark Master** | `spark-master` | Điều phối tính toán Spark. |
+| **Spark Workers** | `spark-worker-1`, `spark-worker-2` | Chạy tác vụ Spark. |
+| **Airflow** | `airflow` | Đảm nhiệm lập lịch DAGs. |
+| **ClickHouse** | `clickhouse-server` | OLAP Database cho Dashboard. |
 
-> [!NOTE]
-> Người dùng quản trị (Ansible): `zett` (có quyền sudo).
+> **Thao tác nhanh**: Để vào terminal của một container bất kỳ, dùng lệnh:
+> `docker exec -it <tên_container> bash`
 
 ---
 
 ## 🐘 Apache Hadoop HDFS
 
-Hệ thống lưu trữ phân tán dùng để lưu trữ dữ liệu lớn (Big Data).
+Hệ thống lưu trữ phân tán dùng để lưu trữ dữ liệu lớn (Big Data). Dữ liệu được map thẳng vào Volume của Docker.
 
-- **Phiên bản**: `3.3.6`
-- **Vị trí cài đặt**: `/opt/hadoop` (Symlink của `/opt/hadoop-3.3.6`)
-- **Dữ liệu HDFS**: 
-  - NameNode (Master): `/data/hdfs/namenode`
-  - DataNode (Workers): `/data/hdfs/datanode`
-
-| Thành phần | URL / Connection String | Cổng mặc định |
-| :--- | :--- | :--- |
-| **HDFS Web UI** | [http://192.168.56.11:9870](http://192.168.56.11:9870) | `9870` |
-| **HDFS RPC Service** | `hdfs://192.168.56.11:9000` | `9000` |
+| Thành phần | URL / Connection String |
+| :--- | :--- |
+| **HDFS Web UI** | [http://localhost:9870](http://localhost:9870) |
+| **Lệnh HDFS Client** | `docker exec -it namenode hdfs dfs -ls /` |
 
 ---
 
 ## 🎇 Apache Spark
 
 Nền tảng tính toán phân tán cho xử lý NLP.
+Bạn không cần SSH vào máy ảo nữa, chạy job trực tiếp bằng script trong thư mục root hoặc lệnh docker.
 
-- **Phiên bản**: `3.5.8` (Build với Hadoop 3)
-- **Vị trí cài đặt**: `/opt/spark` (Symlink của `/opt/spark-3.5.8-bin-hadoop3`)
-- **Tài nguyên Worker**: 2 Cores / 4GB RAM mỗi node.
-
-| Thành phần | URL / Connection String | Cổng mặc định |
-| :--- | :--- | :--- |
-| **Spark Master Web UI** | [http://192.168.56.11:8080](http://192.168.56.11:8080) | `8080` |
-| **Spark Master Submit** | `spark://192.168.56.11:7077` | `7077` |
+| Thành phần | URL / Connection String |
+| :--- | :--- |
+| **Spark Master Web UI** | [http://localhost:8080](http://localhost:8080) |
+| **Spark Master Submit** | Dùng script `./scripts/spark_submit_cluster.sh` |
 
 ---
 
@@ -54,12 +47,9 @@ Nền tảng tính toán phân tán cho xử lý NLP.
 
 Hệ thống lập lịch và điều phối Data Pipeline.
 
-- **Phiên bản**: `2.9.0`
-- **Môi trường**: Chạy trong Conda env `nlp-trend`.
-
-| Thành phần | URL / Connection String | Cổng mặc định |
-| :--- | :--- | :--- |
-| **Airflow Web UI** | [http://192.168.56.11:8081](http://192.168.56.11:8081) | `8081` |
+| Thành phần | URL / Connection String |
+| :--- | :--- |
+| **Airflow Web UI** | [http://localhost:8081](http://localhost:8081) (Đổi sang 8081 tránh trùng Spark) |
 
 > [!NOTE]
 > Username / Password mặc định của Airflow là: `admin` / `admin`
@@ -69,33 +59,21 @@ Hệ thống lập lịch và điều phối Data Pipeline.
 ## 📊 ClickHouse
 
 Cơ sở dữ liệu OLAP dạng cột cho Analytics và Dashboard.
-Được cấu hình trên Storage Node (192.168.56.14).
+Để query, bạn có thể gọi thẳng client từ Docker.
 
-| Thành phần | URL / Connection String | Cổng mặc định |
-| :--- | :--- | :--- |
-| **HTTP Interface** | `192.168.56.14:8123` | `8123` |
-| **Native Client** | `192.168.56.14:9000` | `9000` |
-
----
-
-## 🐍 Conda & Python Environment
-
-Môi trường thực thi code Python và các thư viện NLP.
-
-- **Cài đặt tại**: `/opt/miniconda`
-- **Tên môi trường**: `nlp-trend`
-- **Phiên bản Python**: `3.10`
-- **Lệnh kích hoạt**:
-  ```bash
-  source /etc/profile.d/conda.sh
-  conda activate nlp-trend
-  ```
+| Thành phần | URL / Connection String |
+| :--- | :--- |
+| **ClickHouse HTTP (Playground)** | [http://localhost:8123/play](http://localhost:8123/play) |
+| **Quản lý bằng DBeaver** | `localhost:9001` (Map từ port 9000 nội bộ) |
+| **Lệnh Console SQL** | `docker exec -it clickhouse-server clickhouse-client` |
 
 ---
 
-## 🛡️ Kết nối từ xa (Tailscale)
+## 🚀 Thao Tác Cơ Bản Với Server Lifecycle
 
-Nếu bạn không ở trong cùng dải mạng LAN `192.168.56.x`, hãy sử dụng **Tailscale**:
-1. Cài đặt và đăng nhập vào Tailscale network chung của nhóm.
-2. Thay thế IP `192.168.56.11` bằng IP Tailscale của máy Master (ví dụ: `100.x.y.z`).
-3. Truy cập vào các đường dẫn Web UI và RPC như bình thường.
+- **Mở Cluster**: `docker-compose up -d`
+- **Tắt Cluster**: `docker-compose down`
+- **Reset hạ tầng (Cẩn thận mất dữ liệu!)**: `docker-compose down -v`
+- **Xem logs**: `docker-compose logs --tail=100 -f <tên_service>` (ví dụ: `docker-compose logs -f airflow`)
+- **Chạy toàn bộ pipeline**: `./run_pipeline.sh`
+- **Mở Dashboard**: `streamlit run dashboard/app.py`

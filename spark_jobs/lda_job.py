@@ -571,7 +571,7 @@ def infer_post_topic_assignment(
         .withColumn("topic_prob", F.array_max(F.col("topic_probs")))
         .withColumn(
             "topic_id",
-            (F.array_position(F.col("topic_probs"), F.col("topic_prob")) - F.lit(1)).cast("int"),
+            (F.expr("array_position(topic_probs, array_max(topic_probs))") - F.lit(1)).cast("int"),
         )
         .withColumn("topic_label", label_expr[F.col("topic_id")])
         .select(

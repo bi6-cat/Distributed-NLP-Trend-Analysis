@@ -23,12 +23,13 @@ set -euo pipefail
 export HADOOP_USER_NAME=zett
 
 # ── Cấu hình cluster — điền từ docs/CLUSTER_INFO.md ─────────────────────────
-# Master Node: 192.168.56.11 (Spark Master + HDFS NameNode)
-# Storage Node: 192.168.56.14 (ClickHouse)
-SPARK_MASTER="${SPARK_MASTER_URL:-spark://192.168.56.11:7077}"
-HDFS_BASE="${HDFS_NAMENODE:-hdfs://192.168.56.11:9000}"
-WORKER_PYTHON="${WORKER_PYTHON_PATH:-/opt/miniconda/envs/nlp-trend/bin/python}"
-CLICKHOUSE_HOST="${CLICKHOUSE_HOST:-192.168.56.14}"
+# Master Node: spark-master (Docker)
+# Storage Node: clickhouse (Docker)
+SPARK_MASTER="${SPARK_MASTER_URL:-spark://spark-master:7077}"
+HDFS_BASE="${HDFS_NAMENODE:-hdfs://namenode:9000}"
+# Path python mặc định trong base image của bitnami spark
+WORKER_PYTHON="${WORKER_PYTHON_PATH:-/opt/bitnami/python/bin/python}"
+CLICKHOUSE_HOST="${CLICKHOUSE_HOST:-clickhouse}"
 
 # ── Cấu hình job ─────────────────────────────────────────────────────────────
 NUM_EXECUTORS="${NUM_EXECUTORS:-2}"
@@ -62,17 +63,15 @@ log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 upload_to_hdfs() {
     log "Upload model lên HDFS..."
-    /opt/hadoop/bin/hdfs dfs -mkdir -p "$HDFS_MODEL"
-    # /opt/hadoop/bin/hdfs dfs -put -f "$PROJECT_ROOT/models/phobert_finetuned/final" \
-    #     "$(dirname "$HDFS_MODEL")/"
+    docker exec -e HADOOP_USER_NAME=zett namenode hdfs dfs -mkdir -p "$HDFS_MODEL"
 
     log "Upload data files (slang + stopwords) lên HDFS..."
-    /opt/hadoop/bin/hdfs dfs -mkdir -p "$(dirname "$HDFS_SLANG")"
-    /opt/hadoop/bin/hdfs dfs -put -f "$PROJECT_ROOT/data/slang_dict.json"   "$HDFS_SLANG"
-    /opt/hadoop/bin/hdfs dfs -put -f "$PROJECT_ROOT/data/stopwords_vi.txt"  "$HDFS_STOPWORDS"
+    docker exec -e HADOOP_USER_NAME=zett namenode hdfs dfs -mkdir -p "$(dirname "$HDFS_SLANG")"
+    docker exec -e HADOOP_USER_NAME=zett namenode hdfs dfs -put -f "/opt/hadoop/dfs/name/slang_dict.json"   "$HDFS_SLANG" || true
+    docker exec -e HADOOP_USER_NAME=zett namenode hdfs dfs -put -f "/opt/hadoop/dfs/name/stopwords_vi.txt"  "$HDFS_STOPWORDS" || true
 
     log "Upload hoàn tất."
-    /opt/hadoop/bin/hdfs dfs -ls "$HDFS_MODEL" || true
+    docker exec -e HADOOP_USER_NAME=zett namenode hdfs dfs -ls "$HDFS_MODEL" || true
 }
 
 build_zip() {
@@ -95,7 +94,8 @@ submit_job() {
     log "  HDFS output  : $HDFS_OUTPUT"
     log "  ClickHouse   : $CLICKHOUSE_HOST:8123"
 
-    /opt/spark/bin/spark-submit \
+    docker exec -e PYSPARK_PYTHON="$WORKER_PYTHON" -e PYSPARK_DRIVER_PYTHON="$WORKER_PYTHON" spark-master \
+    /opt/bitnami/spark/bin/spark-submit \
         --master "$SPARK_MASTER" \
         --deploy-mode client \
         --num-executors "$NUM_EXECUTORS" \
@@ -110,7 +110,7 @@ submit_job() {
         --conf "spark.sql.shuffle.partitions=200" \
         --conf "spark.serializer=org.apache.spark.serializer.KryoSerializer" \
         \
-        --py-files "$ZIP_PATH" \
+        --py-files "/opt/spark/work-dir/dist/nlp_trend.zip" \
         \
         --conf "spark.executorEnv.NLP_MODEL_PATH=$HDFS_MODEL" \
         --conf "spark.executorEnv.NLP_SLANG_DICT=$HDFS_SLANG" \
@@ -122,7 +122,7 @@ submit_job() {
         --conf "spark.executorEnv.CLICKHOUSE_DB=tech_radar" \
         --conf "spark.executorEnv.CLICKHOUSE_USER=default" \
         \
-        "$PROJECT_ROOT/spark_jobs/cleaning_job.py"
+        "/opt/spark/work-dir/spark_jobs/cleaning_job.py"
 }
 
 # =============================================================================
