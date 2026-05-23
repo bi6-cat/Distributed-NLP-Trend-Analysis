@@ -80,6 +80,7 @@ class CrisisDetector:
         user: str = "default",
         password: str = "",
         write_back: bool = True,
+        limit: Optional[int] = None,
     ) -> pd.DataFrame:
         try:
             import clickhouse_connect
@@ -88,8 +89,10 @@ class CrisisDetector:
 
         client = clickhouse_connect.get_client(host=host, database=database, username=user, password=password)
 
+        limit_clause = f"LIMIT {limit}" if limit else ""
+
         print("[CrisisDetector] Đọc stg_posts_core (comments only)...")
-        posts_df = client.query_df("""
+        posts_df = client.query_df(f"""
             SELECT
                 parent_id      AS id_post,
                 body           AS comment,
@@ -98,6 +101,7 @@ class CrisisDetector:
                 comment_count
             FROM stg_posts_core
             WHERE parent_id IS NOT NULL
+            {limit_clause}
         """)
         posts_df = posts_df.dropna(subset=["time"])
         posts_df["time"] = pd.to_datetime(posts_df["time"]).dt.strftime("%b %d, %Y at %I:%M %p")
@@ -106,11 +110,12 @@ class CrisisDetector:
         print(f"[CrisisDetector] comments: {len(posts_df)} rows")
 
         print("[CrisisDetector] Đọc stg_posts_nlp (comments only)...")
-        sentiments_df = client.query_df("""
+        sentiments_df = client.query_df(f"""
             SELECT c.parent_id AS post_id, n.sentiment_label
             FROM stg_posts_nlp n
             JOIN stg_posts_core c ON c.post_id = n.post_id
             WHERE c.parent_id IS NOT NULL
+            {limit_clause}
         """)
         print(f"[CrisisDetector] stg_posts_nlp comments: {len(sentiments_df)} rows")
 
@@ -141,6 +146,47 @@ class CrisisDetector:
             df["detected_at"] = pd.to_datetime(df["detected_at"]).dt.tz_localize(None)
         client.insert_df(table, df)
         print(f"[CrisisDetector] Đã ghi {len(df)} events vào {table}")
+
+    def write_hourly_events(
+        self,
+        hourly_df: pd.DataFrame,
+        host: str,
+        database: str = "tech_radar",
+        user: str = "default",
+        password: str = "",
+        table: str = "stg_crisis_events",
+    ) -> None:
+        """
+        Ghi DataFrame hourly aggregation vào bảng stg_crisis_events.
+
+        hourly_df phải có các cột:
+            date, hour, comment_count, z_score,
+            global_spike, if_spike, is_spike, is_crisis,
+            neg_ratio, neg_score_avg
+        """
+        try:
+            import clickhouse_connect
+        except ImportError:
+            raise ImportError("Chạy: pip install clickhouse-connect")
+
+        HOURLY_COLUMNS = [
+            "date", "hour", "comment_count", "z_score",
+            "global_spike", "if_spike", "is_spike", "is_crisis",
+            "neg_ratio", "neg_score_avg",
+        ]
+        missing = [c for c in HOURLY_COLUMNS if c not in hourly_df.columns]
+        if missing:
+            raise ValueError(f"hourly_df thiếu cột: {missing}")
+
+        client = clickhouse_connect.get_client(host=host, database=database, username=user, password=password)
+        df = hourly_df[HOURLY_COLUMNS].copy()
+        df["date"] = pd.to_datetime(df["date"]).dt.date
+        df["hour"] = df["hour"].astype("uint8")
+        df["comment_count"] = df["comment_count"].astype("uint32")
+        for col in ("global_spike", "if_spike", "is_spike", "is_crisis"):
+            df[col] = df[col].astype("uint8")
+        client.insert_df(table, df)
+        print(f"[CrisisDetector] Đã ghi {len(df)} hourly events vào {table}")
 
     def _combine(
         self,
@@ -233,6 +279,13 @@ if __name__ == "__main__":
     parser.add_argument("--freq",           default="1h")
     parser.add_argument("--output",         default=None)
     parser.add_argument("--top",            type=int,   default=10)
+    
+    # Clickhouse args
+    parser.add_argument("--clickhouse-host", default=None, help="Host của ClickHouse để đọc/ghi trực tiếp (thay vì CSV)")
+    parser.add_argument("--clickhouse-db",   default="tech_radar")
+    parser.add_argument("--clickhouse-user", default="default")
+    parser.add_argument("--clickhouse-pass", default="")
+    parser.add_argument("--clickhouse-limit", type=int, default=None, help="Giới hạn số lượng records khi truy vấn ClickHouse")
     args = parser.parse_args()
 
     detector = CrisisDetector(
@@ -243,7 +296,20 @@ if __name__ == "__main__":
         freq=args.freq,
     )
 
-    events = detector.run_from_files(args.comments, args.posts, args.sentiments)
+    if args.clickhouse_host:
+        print(f"[CrisisDetector] Chế độ ClickHouse (Host: {args.clickhouse_host})")
+        events = detector.run_from_clickhouse(
+            host=args.clickhouse_host,
+            database=args.clickhouse_db,
+            user=args.clickhouse_user,
+            password=args.clickhouse_pass,
+            write_back=True,
+            limit=args.clickhouse_limit
+        )
+    else:
+        print("[CrisisDetector] Chế độ File CSV/Local")
+        events = detector.run_from_files(args.comments, args.posts, args.sentiments)
+        
     print_report(events, top_n=args.top)
 
     out = args.output or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "output", "crisis_events.csv")
