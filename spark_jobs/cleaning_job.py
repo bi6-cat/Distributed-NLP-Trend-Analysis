@@ -16,7 +16,7 @@ Luồng:
 
 Cách chạy trên cluster (từ master node):
     spark-submit \\
-        --master spark://spark-master:7077 \\
+        --master spark://192.168.56.11:7077 \\
         --num-executors 2 \\
         --executor-cores 2 \\
         --executor-memory 4g \\
@@ -26,11 +26,11 @@ Cách chạy trên cluster (từ master node):
         --conf spark.executorEnv.NLP_STOPWORDS=hdfs:///user/zett/ref/stopwords_vi.txt \\
         spark_jobs/cleaning_job.py
 
-    # Bỏ qua bước dedup (test nhanh):
-        spark_jobs/cleaning_job.py --no-dedup
+    # Bật MinHash LSH dedup (mặc định tắt — khớp build_stg_core):
+        spark_jobs/cleaning_job.py --with-dedup
 
 Biến môi trường (tuỳ chỉnh qua --conf spark.executorEnv.*):
-    HDFS_BASE       : hdfs://namenode:9000
+    HDFS_BASE       : hdfs://192.168.56.11:9000
     NLP_SLANG_DICT  : path slang_dict.json trên HDFS
     NLP_STOPWORDS   : path stopwords_vi.txt trên HDFS
     HDFS_OUTPUT     : đường dẫn HDFS ghi kết quả Parquet
@@ -39,11 +39,16 @@ Biến môi trường (tuỳ chỉnh qua --conf spark.executorEnv.*):
 import argparse
 import logging
 import os
+import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
+
+# ── Date filter — khớp với build_stg_core.py ─────────────────────────────────
+_DATE_FROM = date(2026, 4, 28)
+_DATE_TO   = date(2026, 4, 30)
 
 from pyspark.sql import SparkSession
 from pyspark.sql.types import (
@@ -52,7 +57,7 @@ from pyspark.sql.types import (
 )
 
 # ── Config (override bằng env var hoặc spark-submit --conf) ──────────────────
-HDFS_BASE  = os.environ.get("HDFS_BASE",    "hdfs://namenode:9000")
+HDFS_BASE  = os.environ.get("HDFS_BASE",    "hdfs://192.168.56.11:9000")
 HDFS_RAW   = os.environ.get("HDFS_INPUT",   f"{HDFS_BASE}/user/zett/raw_data")
 HDFS_OUT   = os.environ.get("HDFS_OUTPUT",  f"{HDFS_BASE}/user/zett/staged/stg_posts_core")
 
@@ -69,9 +74,9 @@ OUTPUT_SCHEMA = StructType([
     StructField("clean_text",     StringType(),  True),   # clean() output
     StructField("segmented_text", StringType(),  True),   # preprocess() output
     StructField("parent_id",      StringType(),  True),
-    StructField("reaction_count", IntegerType(), True),
-    StructField("view_count",     IntegerType(), True),
-    StructField("comment_count",  IntegerType(), True),
+    StructField("reaction_count", LongType(), True),
+    StructField("view_count",     LongType(), True),
+    StructField("comment_count",  LongType(), True),
     StructField("created_at",     TimestampType(), True), 
     StructField("crawled_at",     TimestampType(), False),
 ])
@@ -327,23 +332,36 @@ def process_vnexpress_comments(iterator, slang_path: str, stop_path: str, crawle
 # ── Helper functions ──────────────────────────────────────────────────────────
 
 def _safe_int(val) -> int | None:
-    """Chuyển giá trị sang int, trả None nếu không hợp lệ."""
+    """
+    Chuyển giá trị sang int, trả None nếu không hợp lệ.
+    Xử lý được "Views\\n13,430" → 13430 (lấy số cuối cùng, khớp build_stg_core).
+    """
     if val is None:
         return None
+    s = str(val).replace(",", "").strip()
+    nums = re.findall(r"\d+", s)
+    if not nums:
+        return None
     try:
-        return int(float(str(val)))
-    except (ValueError, TypeError):
+        return int(nums[-1])
+    except ValueError:
         return None
 
-def _to_datetime(ts_val):
-    from datetime import datetime, timezone
+
+def _to_datetime(ts_val) -> datetime | None:
+    """
+    Unix timestamp int/float → datetime UTC. Trả None nếu không hợp lệ.
+    Adapter luôn trả về int timestamp — không trả Epoch giả khi None
+    để tránh ghi dữ liệu rác vào ClickHouse.
+    """
     if ts_val is None:
-        return datetime.fromtimestamp(0, tz=timezone.utc)
+        return None
     try:
-        ts = float(str(ts_val))
-        return datetime.fromtimestamp(ts, tz=timezone.utc)
-    except (ValueError, TypeError):
-        return datetime.fromtimestamp(0, tz=timezone.utc)
+        return datetime.fromtimestamp(float(str(ts_val)), tz=timezone.utc)
+    except (ValueError, TypeError, OSError):
+        return None
+
+
 
 
 def _resolve_hdfs(path: str) -> str:
@@ -377,8 +395,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-dedup",
         action="store_true",
+        default=True,
+        help="Bỏ qua bước MinHash LSH deduplication (mặc định: True — khớp build_stg_core)",
+    )
+    parser.add_argument(
+        "--with-dedup",
+        action="store_true",
         default=False,
-        help="Bỏ qua bước MinHash LSH deduplication (dùng khi test nhanh)",
+        help="Bật MinHash LSH deduplication (tắt theo mặc định)",
     )
     # spark-submit truyền thêm các args không liên quan — bỏ qua
     args, _ = parser.parse_known_args()
@@ -393,7 +417,8 @@ def main():
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
     cli_args = _parse_args()
-    enable_dedup = not cli_args.no_dedup
+    # --with-dedup override --no-dedup nếu cả 2 được truyền cùng lúc
+    enable_dedup = cli_args.with_dedup and not cli_args.no_dedup
 
     spark = SparkSession.builder \
         .appName("M2_CleaningJob") \
@@ -423,7 +448,6 @@ def main():
 
     voz_comments_raw = read_csv(f"{HDFS_RAW}/voz/comments.csv")
     voz_posts_raw    = read_csv(f"{HDFS_RAW}/voz/posts.csv")
-    vatvo_raw        = read_csv(f"{HDFS_RAW}/vatvo/articles.csv")
     vne_posts_raw    = read_csv(f"{HDFS_RAW}/vnexpress/post_vnexpress.csv")
     vne_cmts_raw     = read_csv(f"{HDFS_RAW}/vnexpress/comment_vnexpress.csv")
 
@@ -433,42 +457,139 @@ def main():
         lambda it: process_voz_comments(it, SLANG_PATH, STOP_PATH, crawled_ts))
     voz_p_rdd  = voz_posts_raw.rdd.mapPartitions(
         lambda it: process_voz_posts(it, SLANG_PATH, STOP_PATH, crawled_ts))
-    vatvo_rdd  = vatvo_raw.rdd.mapPartitions(
-        lambda it: process_vatvo(it, SLANG_PATH, STOP_PATH, crawled_ts))
     vne_p_rdd  = vne_posts_raw.rdd.mapPartitions(
         lambda it: process_vnexpress_posts(it, SLANG_PATH, STOP_PATH, crawled_ts))
     vne_c_rdd  = vne_cmts_raw.rdd.mapPartitions(
         lambda it: process_vnexpress_comments(it, SLANG_PATH, STOP_PATH, crawled_ts))
 
     # ── Union tất cả nguồn → DataFrame duy nhất ──────────────────────────────
-    all_rdd = sc.union([voz_c_rdd, voz_p_rdd, vatvo_rdd, vne_p_rdd, vne_c_rdd])
+    all_rdd = sc.union([voz_c_rdd, voz_p_rdd, vne_p_rdd, vne_c_rdd])
     result_df = spark.createDataFrame(all_rdd, OUTPUT_SCHEMA)
 
-    # Lọc body rỗng (do adapter skip hoặc content quá ngắn)
+    from pyspark.sql.functions import col, expr, lit, to_date, when
+
+    # ── Fix 1: Lọc body rỗng ─────────────────────────────────────────────────
     result_df = result_df.filter(
         result_df.body.isNotNull() & (result_df.body != "")
     )
 
-    # ── Fix 1: Xóa chính xác các bản ghi trùng lặp 100% (do lỗi crawler) ──────
+    # ── Fix 2: Lọc date range [DATE_FROM, DATE_TO] — khớp build_stg_core ─────
+    # created_at = None (adapter skip) bị loại, tránh ghi Epoch vào ClickHouse
+    date_from_lit = lit(str(_DATE_FROM))
+    date_to_lit   = lit(str(_DATE_TO))
+    result_df = result_df.filter(
+        col("created_at").isNotNull()
+        & (to_date(col("created_at")) >= date_from_lit)
+        & (to_date(col("created_at")) <= date_to_lit)
+    )
+    logger.info(f"[DateFilter] Giữ lại records từ {_DATE_FROM} đến {_DATE_TO}")
+
+    # ── Fix 3: Xoá trùng lặp 100% ────────────────────────────────────────────
     result_df = result_df.dropDuplicates()
 
-    # ── Fix 2: Cấp UUID cho các bản ghi bị lỗi post_id = "None" ───────────────
-    from pyspark.sql.functions import col, expr, when
+    # ── Fix 4: Cấp UUID cho post_id = None / "None" ───────────────────────────
     result_df = result_df.withColumn(
         "post_id",
         when(col("post_id").isNull() | (col("post_id") == "None"), expr("uuid()")).otherwise(col("post_id"))
     )
 
-    # Cần cache() vì pipeline rất nặng (NLP) và uuid() là non-deterministic
+    # cache() trước khi làm include_post_ids join và orphan filter
+    # uuid() là non-deterministic — cache tránh re-evaluate
+    result_df = result_df.cache()
+
+    # ── Fix 5: Include posts có comment trong range (OR logic) ────────────────
+    # Một post có thể được tạo trước DATE_FROM nhưng vẫn nhận comment trong range
+    # → giữ lại post đó để orphan filter không xoá comment hợp lệ
+    comments_df = result_df.filter(col("parent_id").isNotNull())
+    parent_ids  = comments_df.select(col("parent_id").alias("post_id")).distinct()
+
+    # Posts nằm ngoài range nhưng có comment trong range → thêm lại từ raw
+    # (các post này đã bị lọc ở Fix 2 nếu created_at ngoài range)
+    # Giải pháp: nới lỏng filter cho posts (parent_id IS NULL) — chỉ yêu cầu
+    # post_id xuất hiện trong parent_ids của comments đã lọc
+    posts_in_range = result_df.filter(col("parent_id").isNull())
+
+    # Đọc lại posts raw để lấy những post ngoài range nhưng có comment trong range
+    extra_posts_rdd = sc.union([
+        voz_posts_raw.rdd.mapPartitions(
+            lambda it: process_voz_posts(it, SLANG_PATH, STOP_PATH, crawled_ts)),
+        vne_posts_raw.rdd.mapPartitions(
+            lambda it: process_vnexpress_posts(it, SLANG_PATH, STOP_PATH, crawled_ts)),
+    ])
+    all_posts_df = spark.createDataFrame(extra_posts_rdd, OUTPUT_SCHEMA) \
+        .filter(col("body").isNotNull() & (col("body") != "")) \
+        .filter(col("parent_id").isNull())
+
+    # Lấy posts ngoài range nhưng post_id có trong parent_ids
+    orphan_parent_posts = all_posts_df \
+        .join(parent_ids, on="post_id", how="inner") \
+        .filter(
+            to_date(col("created_at")).isNull()
+            | (to_date(col("created_at")) < date_from_lit)
+            | (to_date(col("created_at")) > date_to_lit)
+        )
+
+    result_df = posts_in_range.union(orphan_parent_posts).union(comments_df)
+    result_df = result_df.dropDuplicates(["post_id"])
+    result_df = result_df.cache()
+
+    # ── Fix 6: Xoá orphan comments (parent_id không có trong post_id) ─────────
+    # Xảy ra sau dedup nếu post bị xoá nhưng comment giữ lại
+    valid_post_ids = result_df.filter(col("parent_id").isNull()) \
+                              .select(col("post_id").alias("_pid"))
+    orphan_comments = result_df.filter(col("parent_id").isNotNull()) \
+        .join(valid_post_ids, result_df["parent_id"] == col("_pid"), how="left_anti")
+    n_orphan = orphan_comments.count()
+    if n_orphan > 0:
+        logger.warning(f"[Orphan] Xoá {n_orphan:,} orphan comments (post gốc không tồn tại)")
+    result_df = result_df.filter(col("parent_id").isNull()).union(
+        result_df.filter(col("parent_id").isNotNull())
+                 .join(valid_post_ids, result_df["parent_id"] == col("_pid"), how="inner")
+                 .drop("_pid")
+    )
     result_df = result_df.cache()
 
     if enable_dedup:
-        logger.info("[Dedup] Bắt đầu Spark MinHashLSH dedup...")
+        logger.info("[Dedup] Starting Spark MinHashLSH dedup...")
+
         from algorithms.minhash_dedup import MinHashDeduplicator
-        deduplicator = MinHashDeduplicator(num_perm=128, threshold=0.8, k=5)
+        from pyspark import StorageLevel
+
+        # 1. Repartition BEFORE LSH (critical)
+        target_partitions = spark.sparkContext.defaultParallelism * 3
+        result_df = result_df.repartition(target_partitions)
+
+        # 2. Persist to avoid recomputation / lineage explosion
+        result_df = result_df.persist(StorageLevel.MEMORY_AND_DISK)
+
+        # 3. Optional: checkpoint to cut lineage (VERY important for LSH)
+        spark.sparkContext.setCheckpointDir(f"{HDFS_BASE}/tmp/spark-checkpoints")
+        result_df = result_df.checkpoint()
+        result_df.count() 
+
+        # 4. Init deduplicator with safer params
+        deduplicator = MinHashDeduplicator(
+            num_perm=128,           # 128 bands
+            num_rows=4,             # 4 rows per band → 512 total permutations
+            threshold=0.85,
+            ngram_size=5,           # character 5-grams
+            num_features=1 << 18,
+            text_col="clean_text",
+            checkpoint_dir=f"{HDFS_BASE}/tmp/spark-checkpoints/dedup/",
+            use_graphframes=False,
+        )
+
+        # 5. Run LSH
         result_df = deduplicator.fit_transform(result_df, spark)
 
-    logger.info("[Cleaning] Ghi output...")
+        # 6. Repartition AFTER LSH to rebalance
+        result_df = result_df.repartition(target_partitions)
+
+        # 7. Persist final result
+        result_df = result_df.persist(StorageLevel.MEMORY_AND_DISK)
+
+        logger.info("[Dedup] Completed MinHashLSH dedup")
+
 
     # ── Ghi ra HDFS Parquet ───────────────────────────────────────────────────
     result_df.write \
@@ -476,7 +597,42 @@ def main():
         .partitionBy("source") \
         .parquet(HDFS_OUT)
 
-    logger.info(f"[DONE] Đã ghi bản ghi → {HDFS_OUT}")
+    logger.info(f"[DONE] Đã ghi Parquet → {HDFS_OUT}")
+
+    # ── Ingest stg_posts_core → ClickHouse ───────────────────────────────────
+    # partitionBy("source") xoá cột source khỏi Parquet data, chỉ còn trong
+    # tên thư mục (source=voz/, source=vnexpress/, ...).
+    # Dùng virtual column _path của ClickHouse để extract source từ path.
+    try:
+        from spark_jobs.clickhouse_hdfs import execute_sql
+
+        hdfs_glob = f"{HDFS_OUT.rstrip('/')}/*/*.parquet"
+        execute_sql("TRUNCATE TABLE IF EXISTS stg_posts_core")
+        execute_sql(
+            f"INSERT INTO stg_posts_core"
+            f" (post_id, source, author, title, body, segmented_text, parent_id,"
+            f"  reaction_count, comment_count, view_count, created_at, crawled_at)"
+            f" SELECT"
+            f"  post_id,"
+            f"  extract(_path, 'source=([^/]+)/') AS source,"
+            f"  ifNull(author, ''),"
+            f"  title,"
+            f"  ifNull(body, ''),"
+            f"  ifNull(segmented_text, ''),"
+            f"  parent_id,"
+            f"  ifNull(toInt32(reaction_count), 0),"
+            f"  ifNull(toInt32(comment_count), 0),"
+            f"  toNullable(toInt32(view_count)),"
+            f"  created_at,"
+            f"  crawled_at"
+            f" FROM hdfs('{hdfs_glob}', 'Parquet')"
+            f" WHERE isNotNull(created_at)"
+        )
+        logger.info("[INGEST] Đã ingest stg_posts_core → ClickHouse ✓")
+    except Exception as exc:
+        logger.error(f"[INGEST] Lỗi khi ingest stg_posts_core → ClickHouse: {exc}")
+        logger.warning("[INGEST] HDFS Parquet đã ghi thành công, ClickHouse ingest bị skip")
+
     spark.stop()
 
 
