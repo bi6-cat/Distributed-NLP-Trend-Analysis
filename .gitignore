@@ -250,3 +250,5 @@ nlp-worker-2/
 __pycache__/
 
 data/
+crawlers/data/
+server_data/
