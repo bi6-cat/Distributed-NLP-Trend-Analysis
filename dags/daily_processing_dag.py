@@ -120,6 +120,32 @@ with DAG(
         soft_fail=False,
     )
 
+    # ── Compute Hourly Baseline ───────────────────────────────────────────────
+    compute_baseline = SparkSubmitOperator(
+        task_id="compute_baseline",
+        conn_id=SPARK_SUBMIT_CONN,
+        application="spark_jobs/compute_baseline.py",
+        name="compute_baseline_{{ ds }}",
+        conf={
+            "spark.master": SPARK_MASTER,
+            "spark.cores.max": "1",
+            "spark.executor.cores": "1",
+            "spark.executorEnv.PYTHONPATH": "/opt/airflow",
+            "spark.executorEnv.CLICKHOUSE_HOST": CLICKHOUSE_HOST,
+        },
+        executor_memory="1g",
+        driver_memory="512m",
+        env_vars={
+            "PYTHONPATH":           "/opt/airflow",
+            "CLICKHOUSE_HOST":      CLICKHOUSE_HOST,
+            "CLICKHOUSE_DB":        CLICKHOUSE_DB,
+            "CLICKHOUSE_USER":      "app",
+            "CLICKHOUSE_PASS":      "",
+            "HDFS_STG_POSTS_CORE":  HDFS_STG_POSTS_CORE,
+        },
+        verbose=False,
+    )
+
     # ── Crisis Detection Spark job ────────────────────────────────────────────
     crisis_detection = SparkSubmitOperator(
         task_id="crisis_detection_spark",
@@ -143,7 +169,7 @@ with DAG(
             "IF_MODEL_PATH":      IF_MODEL_PATH,
             "CLF_MODEL_PATH":     CLF_MODEL_PATH,
             "Z_SCORE_THRESHOLD":  "2.0",
-            "TARGET_DATE":        "{{ dag_run.conf.get('target_date', '2026-04-29') }}",
+            "TARGET_DATE":        "{{ dag_run.conf.get('target_date', '2026-03-02') }}",
         },
         verbose=False,
     )
@@ -153,4 +179,4 @@ with DAG(
     # ── Flow ──────────────────────────────────────────────────────────────────
     # Cả 2 sensor chạy song song (không phụ thuộc nhau)
     # Crisis job chỉ bắt đầu khi cả 2 upstream đều success
-    start >> [wait_for_stg_core, wait_for_sentiment] >> crisis_detection >> end
+    start >> [wait_for_stg_core, wait_for_sentiment] >> compute_baseline >> crisis_detection >> end
