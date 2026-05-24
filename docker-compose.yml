@@ -5,17 +5,19 @@ x-airflow-common:
   build:
     context: .
     dockerfile: Dockerfile.airflow
+  env_file:
+    - .env
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__FERNET_KEY: ''
-    AIRFLOW__WEBSERVER__SECRET_KEY: 'distributed-nlp-airflow-shared-secret'
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY:-distributed-nlp-airflow-shared-secret}
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-    HADOOP_USER_NAME: root
-    HDFS_USER: root
+    HADOOP_USER_NAME: ${HADOOP_USER_NAME:-root}
+    HDFS_USER: ${HDFS_USER:-root}
   volumes:
     - ./:/opt/airflow
   depends_on:
@@ -30,6 +32,8 @@ services:
     image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
     container_name: namenode
     restart: always
+    env_file:
+      - .env
     ports:
       - "9870:9870"
       - "9000:9000"
@@ -37,7 +41,7 @@ services:
       - hadoop_namenode:/hadoop/dfs/name
     environment:
       - CLUSTER_NAME=nlp_cluster
-      - CORE_CONF_fs_defaultFS=hdfs://namenode:9000
+      - CORE_CONF_fs_defaultFS=hdfs://${HDFS_NAMENODE:-namenode:9000}
     networks:
       - nlp_network
 
@@ -45,13 +49,15 @@ services:
     image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
     container_name: datanode
     restart: always
+    env_file:
+      - .env
     depends_on:
       - namenode
     volumes:
       - hadoop_datanode:/hadoop/dfs/data
     environment:
       SERVICE_PRECONDITION: "namenode:9870"
-      CORE_CONF_fs_defaultFS: hdfs://namenode:9000
+      CORE_CONF_fs_defaultFS: hdfs://${HDFS_NAMENODE:-namenode:9000}
     networks:
       - nlp_network
 
@@ -63,12 +69,14 @@ services:
       context: .
       dockerfile: Dockerfile.spark
     container_name: spark-master
+    env_file:
+      - .env
     environment:
       - SPARK_MODE=master
       - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
       - PYSPARK_DRIVER_PYTHON=/opt/bitnami/python/bin/python3
-      - HADOOP_USER_NAME=root
-      - HDFS_USER=root
+      - HADOOP_USER_NAME=${HADOOP_USER_NAME:-root}
+      - HDFS_USER=${HDFS_USER:-root}
     ports:
       - "8080:8080"
       - "7077:7077"
@@ -85,15 +93,17 @@ services:
       context: .
       dockerfile: Dockerfile.spark
     container_name: spark-worker
+    env_file:
+      - .env
     environment:
       - SPARK_MODE=worker
-      - SPARK_MASTER_URL=spark://spark-master:7077
-      - SPARK_WORKER_MEMORY=24G
-      - SPARK_WORKER_CORES=6
+      - SPARK_MASTER_URL=${SPARK_MASTER_URL:-spark://spark-master:7077}
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-24G}
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-6}
       - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
       - PYSPARK_DRIVER_PYTHON=/opt/bitnami/python/bin/python3
-      - HADOOP_USER_NAME=root
-      - HDFS_USER=root
+      - HADOOP_USER_NAME=${HADOOP_USER_NAME:-root}
+      - HDFS_USER=${HDFS_USER:-root}
     depends_on:
       - spark-master
     volumes:
@@ -109,11 +119,19 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:24.3
     container_name: clickhouse
+    env_file:
+      - .env
     ports:
       - "8123:8123"
       - "9001:9000" # Dùng nội bộ cho giao tiếp, đổi host port qua 9001 tránh trùng Hadoop
+    environment:
+      - CLICKHOUSE_DB=${CLICKHOUSE_DB:-tech_radar}
+      - CLICKHOUSE_USER=${CLICKHOUSE_USER:-root}
+      - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-root}
+      - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
     volumes:
       - clickhouse_data:/var/lib/clickhouse
+      - ./warehouse/clickhouse/init_schema.sql:/docker-entrypoint-initdb.d/init_schema.sql:ro
     networks:
       - nlp_network
 
