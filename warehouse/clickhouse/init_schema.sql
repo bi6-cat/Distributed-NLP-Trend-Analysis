@@ -68,18 +68,23 @@ PARTITION BY toYYYYMM(window_start)
 ORDER BY (keyword, window_start);
 
 -- 6. stg_crisis_events
-CREATE TABLE IF NOT EXISTS tech_radar.stg_crisis_events (
+
+CREATE TABLE tech_radar.stg_crisis_events (
     event_id           String,
     detected_at        DateTime,
-    severity           LowCardinality(String),  -- 'LOW','MEDIUM','HIGH'
-    anomaly_score      Float64,
-    trigger_conditions String,                  -- JSON-encoded list of trigger labels
+    duration_hours     UInt8,
+    event_type         LowCardinality(String),  -- 'TRENDING' | 'CRISIS'
+    severity           LowCardinality(String),  -- 'LOW' | 'MEDIUM' | 'HIGH'
+    anomaly_score      Float32,
+    trigger_conditions String,
     affected_topics    Array(Int32),
     neg_ratio          Float32,
     mention_velocity   Float32,
-    duration_hours     Float32 DEFAULT 0,
-    evidence_post_ids  Array(String)            -- References stg_posts_core.post_id
-) ENGINE = ReplacingMergeTree(loaded_at)
+    trending_post_ids  Array(String),           -- posts đang sôi nổi
+    crisis_post_ids    Array(String),           -- posts tiêu cực (CRISIS only)
+    loaded_at          DateTime DEFAULT now()
+)
+ENGINE = ReplacingMergeTree(loaded_at)
 ORDER BY (detected_at, event_id);
 
 -- 7. stg_crisis_hourly

@@ -100,51 +100,101 @@ def _clf_predict(pdf: pd.DataFrame, pipeline, features: list) -> np.ndarray:
     return pipeline.predict(X).astype(int)
 
 
-def build_crisis_events(
+def build_all_events(
     pdf: pd.DataFrame,
     target_date: str,
+    trending_by_hour: dict[int, list[str]] | None = None,
     post_ids_by_hour: dict[int, list[str]] | None = None,
 ) -> pd.DataFrame:
-    crisis_hours = pdf[pdf["is_crisis"] == 1].sort_values("hour").reset_index(drop=True)
-    if crisis_hours.empty:
-        return pd.DataFrame()
-
-    crisis_hours["gap"] = crisis_hours["hour"].diff().fillna(0) > 1
-    crisis_hours["event_group"] = crisis_hours["gap"].cumsum()
 
     def _severity(z_max: float) -> str:
-        if z_max > 4:
-            return "HIGH"
-        if z_max > 2:
-            return "MEDIUM"
+        if z_max > 4: return "HIGH"
+        if z_max > 2: return "MEDIUM"
         return "LOW"
 
+    def _group(hours_df: pd.DataFrame) -> pd.DataFrame:
+        h = hours_df.sort_values("hour").reset_index(drop=True)
+        h["gap"]         = h["hour"].diff().fillna(0) > 1
+        h["event_group"] = h["gap"].cumsum()
+        return h
+
     rows = []
-    for _, grp in crisis_hours.groupby("event_group"):
-        z_max = grp["z_score"].max()
-        evidence: list[str] = []
-        if post_ids_by_hour:
-            for h in grp["hour"].tolist():
-                evidence.extend(post_ids_by_hour.get(int(h), []))
-        rows.append({
-            "event_id":           hashlib.md5(
-                                      f"{target_date} {grp['hour'].min():02d}:00:00".encode()
-                                  ).hexdigest()[:16],
-            "detected_at":        f"{target_date} {grp['hour'].min():02d}:00:00",
-            "duration_hours":     int(len(grp)),
-            "severity":           _severity(z_max),
-            "anomaly_score":      float(grp["if_score"].min()),
-            "neg_ratio":          float(grp["neg_ratio"].mean()),
-            "mention_velocity":   float(grp["velocity_ratio"].max()),
-            "trigger_conditions": (
-                f"global_spike=1,if_spike=1,"
-                f"z_score={z_max:.2f},"
-                f"neg_ratio={grp['neg_ratio'].mean():.2f}"
-            ),
-            "affected_topics":    [],
-            "evidence_post_ids":  evidence,
-        })
+
+    # ── TRENDING events (global_spike=1) ─────────────────────────────────
+    trending_hours = pdf[pdf["global_spike"] == 1].copy()
+    if not trending_hours.empty:
+        for _, grp in _group(trending_hours).groupby("event_group"):
+            z_max = grp["z_score"].max()
+            posts = []
+            if trending_by_hour:
+                for h in grp["hour"].tolist():
+                    posts.extend(trending_by_hour.get(int(h), []))
+            rows.append({
+                "event_id":           hashlib.md5(
+                    f"TRENDING-{target_date}-{grp['hour'].min():02d}".encode()
+                ).hexdigest()[:16],
+                "detected_at":        f"{target_date} {grp['hour'].min():02d}:00:00",
+                "duration_hours":     int(len(grp)),
+                "event_type":         "TRENDING",
+                "severity":           _severity(z_max),
+                "anomaly_score":      float(grp["if_score"].min()),
+                "neg_ratio":          float(grp["neg_ratio"].mean()),
+                "mention_velocity":   float(grp["velocity_ratio"].max()),
+                "trigger_conditions": "global_spike=1",
+                "affected_topics":    [],
+                "trending_post_ids":  posts,
+                "crisis_post_ids":    [],
+            })
+
+    # ── CRISIS events (is_crisis=1) ───────────────────────────────────────
+    crisis_hours = pdf[pdf["is_crisis"] == 1].copy()
+    if not crisis_hours.empty:
+        for _, grp in _group(crisis_hours).groupby("event_group"):
+            z_max = grp["z_score"].max()
+            trending_in_hour, evidence = [], []
+            if trending_by_hour:
+                for h in grp["hour"].tolist():
+                    trending_in_hour.extend(trending_by_hour.get(int(h), []))
+            if post_ids_by_hour:
+                for h in grp["hour"].tolist():
+                    evidence.extend(post_ids_by_hour.get(int(h), []))
+            rows.append({
+                "event_id":           hashlib.md5(
+                    f"CRISIS-{target_date}-{grp['hour'].min():02d}".encode()
+                ).hexdigest()[:16],
+                "detected_at":        f"{target_date} {grp['hour'].min():02d}:00:00",
+                "duration_hours":     int(len(grp)),
+                "event_type":         "CRISIS",
+                "severity":           _severity(z_max),
+                "anomaly_score":      float(grp["if_score"].min()),
+                "neg_ratio":          float(grp["neg_ratio"].mean()),
+                "mention_velocity":   float(grp["velocity_ratio"].max()),
+                "trigger_conditions": "global_spike=1,if_spike=1,is_crisis=1",
+                "affected_topics":    [],
+                "trending_post_ids":  trending_in_hour,
+                "crisis_post_ids":    evidence,
+            })
+
     return pd.DataFrame(rows)
+
+
+def get_trending_posts(core_with_time, spike_hour_set: set, min_cmts: int = 3):
+    """
+    Lấy top posts đang được thảo luận nhiều nhất trong global_spike hours.
+    Không filter neg_ratio — chỉ cần nhiều người thảo luận.
+    """
+    if not spike_hour_set:
+        return []
+    return (
+        core_with_time
+        .filter(col("hour").isin(list(spike_hour_set)))
+        .filter(col("parent_id").isNotNull())
+        .groupBy("hour", "parent_id")
+        .agg(count("*").alias("cmt_count"))
+        .filter(col("cmt_count") >= min_cmts)
+        .orderBy("hour", col("cmt_count").desc())
+        .collect()
+    )
 
 
 def get_evidence_posts(core_with_time, nlp, crisis_hour_set,
@@ -387,23 +437,47 @@ def main() -> None:
     final.orderBy("hour").show(24, truncate=False)
 
     print("[crisis] Step 9/9: build and ingest stg_crisis_events")
-    crisis_hour_set = set(pdf.loc[pdf["is_crisis"] == 1, "hour"].tolist())
+
+    # Lấy spike hours và crisis hours
+    spike_hour_set  = set(int(h) for h in pdf.loc[pdf["global_spike"] == 1, "hour"].tolist())
+    crisis_hour_set = set(int(h) for h in pdf.loc[pdf["is_crisis"]    == 1, "hour"].tolist())
+
+    # Trending posts — top posts sôi nổi trong global_spike hours
+    trending_by_hour: dict[int, list[str]] = {}
+    for row in get_trending_posts(core_with_time, spike_hour_set):
+        hour = int(row["hour"])
+        if hour not in trending_by_hour:
+            trending_by_hour[hour] = []
+        if len(trending_by_hour[hour]) < 5:
+            trending_by_hour[hour].append(str(row["parent_id"]))
+    print(f"[crisis] Trending hours: {len(spike_hour_set)} | posts: {sum(len(v) for v in trending_by_hour.values())}")
+
+    # Crisis posts — posts tiêu cực trong crisis hours
     post_ids_by_hour: dict[int, list[str]] = {}
     if crisis_hour_set:
-        evidence_rows = get_evidence_posts(core_with_time, nlp, crisis_hour_set)
-        for row in evidence_rows:
-            post_ids_by_hour.setdefault(int(row["hour"]), []).append(row["parent_id"])
-        print(f"[crisis] Evidence posts (qualified): {len(evidence_rows)}")
+        for row in get_evidence_posts(core_with_time, nlp, crisis_hour_set):
+            post_ids_by_hour.setdefault(int(row["hour"]), []).append(str(row["parent_id"]))
+        print(f"[crisis] Crisis hours: {len(crisis_hour_set)} | evidence posts: {len(post_ids_by_hour)}")
 
-    events_pdf = build_crisis_events(pdf, TARGET_DATE, post_ids_by_hour)
+    # Build cả TRENDING và CRISIS events
+    events_pdf = build_all_events(
+        pdf, TARGET_DATE,
+        trending_by_hour=trending_by_hour,
+        post_ids_by_hour=post_ids_by_hour,
+    )
+
     if not events_pdf.empty:
-        print(f"[crisis] Events detected: {len(events_pdf)}")
-        print(events_pdf[["detected_at", "severity", "duration_hours", "neg_ratio"]].to_string())
+        n_trending = (events_pdf["event_type"] == "TRENDING").sum()
+        n_crisis   = (events_pdf["event_type"] == "CRISIS").sum()
+        print(f"[crisis] Events: {n_trending} TRENDING | {n_crisis} CRISIS")
+        print(events_pdf[["detected_at","event_type","severity","neg_ratio","duration_hours"]].to_string())
+
         events_spark = spark.createDataFrame(events_pdf[[
-            "event_id", "detected_at", "severity",
+            "event_id", "detected_at", "event_type", "severity",
             "anomaly_score", "neg_ratio", "mention_velocity",
             "trigger_conditions", "duration_hours",
-            "evidence_post_ids", 
+            "trending_post_ids",
+            "crisis_post_ids",
         ]])
         write_parquet_and_ingest(
             events_spark,
@@ -412,7 +486,7 @@ def main() -> None:
             truncate=False,
         )
     else:
-        print("[crisis] No crisis events today.")
+        print("[crisis] No events today.")
     spark.stop()
 
 
