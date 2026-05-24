@@ -170,13 +170,14 @@ def build_crisis_events(pdf: pd.DataFrame, target_date: str) -> pd.DataFrame:
             "anomaly_score":      float(grp["if_score"].min()),
             "neg_ratio":          float(grp["neg_ratio"].mean()),
             "mention_velocity":   float(grp["velocity_ratio"].max()),
-            "trigger_conditions": (
-                f"global_spike=1,if_spike=1,"
-                f"z_score={z_max:.2f},"
-                f"neg_ratio={grp['neg_ratio'].mean():.2f}"
-            ),
-            "affected_topics":    None,
-            "evidence_post_ids":  None,
+            "trigger_conditions": [
+                "global_spike=1",
+                "if_spike=1",
+                f"z_score={z_max:.2f}",
+                f"neg_ratio={grp['neg_ratio'].mean():.2f}",
+            ],
+            "affected_topics":    [],
+            "evidence_post_ids":  [],
         })
     return pd.DataFrame(rows)
 
@@ -401,7 +402,7 @@ def main() -> None:
         events_spark = spark.createDataFrame(events_pdf[[
             "event_id", "detected_at", "severity",
             "anomaly_score", "neg_ratio", "mention_velocity",
-            "trigger_conditions", "duration_hours",
+            "trigger_conditions", "affected_topics", "evidence_post_ids",
         ]])
         write_parquet_and_ingest(
             events_spark,

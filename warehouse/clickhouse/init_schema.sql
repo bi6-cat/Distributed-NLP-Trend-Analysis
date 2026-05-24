@@ -36,7 +36,7 @@ ORDER BY (post_id);
 
 -- 3. stg_post_topics
 CREATE TABLE IF NOT EXISTS tech_radar.stg_post_topics (
-    post_id           String,                -- FK → stg_posts_core.post_id
+    post_id           String,                -- FK → stg_posts_core.post_id; one best assignment per post
     topic_id          Int32,                 -- LDA/BERTopic assignment
     topic_probability Float32,               -- Assignment confidence 0.0–1.0
     model_type        LowCardinality(String), -- 'lda' | 'bertopic'

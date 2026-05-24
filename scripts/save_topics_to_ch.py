@@ -233,6 +233,8 @@ def load_stg_post_topics_csv(filepath: str) -> pd.DataFrame:
     df["topic_id"] = df["topic_id"].astype("int32")
     df["topic_probability"] = pd.to_numeric(df["topic_probability"], errors="coerce").fillna(0.0).astype("float32")
     df["model_type"] = df["model_type"].fillna("lda").astype(str)
+    df["predicted_at"] = pd.to_datetime(df["predicted_at"], errors="coerce", utc=True)
+    df["predicted_at"] = df["predicted_at"].fillna(pd.Timestamp.now(tz="UTC")).dt.tz_localize(None)
 
     valid_model_types = {"lda", "bertopic"}
     invalid = set(df["model_type"].unique()) - valid_model_types
@@ -249,6 +251,21 @@ def load_stg_post_topics_csv(filepath: str) -> pd.DataFrame:
             f"Hãy dùng export_post_topics(real_post_ids, ...) từ bertopic_model.py."
         )
         df = df[~fake_mask].reset_index(drop=True)
+
+    before = len(df)
+    df = (
+        df.sort_values(
+            by=["post_id", "predicted_at", "topic_probability"],
+            ascending=[True, False, False],
+        )
+        .drop_duplicates(subset=["post_id"], keep="first")
+        .reset_index(drop=True)
+    )
+    dropped = before - len(df)
+    if dropped > 0:
+        logger.warning(
+            f"  ⚠️  Loại {dropped:,} dòng topic trùng post_id để giữ 1 assignment/post cho dashboard."
+        )
 
     logger.info(
         f"  stg_post_topics: {len(df):,} assignments — "
@@ -329,7 +346,9 @@ def insert_stg_topics(client, df: pd.DataFrame, database: str) -> None:
         database: Tên database.
     """
     # Chuẩn bị data theo đúng column order của table
-    insert_df = df[["topic_id", "label", "top_keywords", "coherence_score", "model_version"]].copy()
+    insert_df = df[["topic_id", "label", "top_keywords", "coherence_score", "model_version", "created_at"]].copy()
+    insert_df["created_at"] = pd.to_datetime(insert_df["created_at"], errors="coerce", utc=True)
+    insert_df["created_at"] = insert_df["created_at"].fillna(pd.Timestamp.now(tz="UTC")).dt.tz_localize(None)
 
     # ClickHouse nhận top_keywords là list Python → Array(String) tự động
     # qua clickhouse-connect
@@ -339,7 +358,7 @@ def insert_stg_topics(client, df: pd.DataFrame, database: str) -> None:
     client.insert_df(
         f"{database}.stg_topics",
         insert_df,
-        column_names=["topic_id", "label", "top_keywords", "coherence_score", "model_version"],
+        column_names=["topic_id", "label", "top_keywords", "coherence_score", "model_version", "created_at"],
     )
     logger.info(f"  ✅ stg_topics: {n:,} rows inserted")
 
