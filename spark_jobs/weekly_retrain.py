@@ -31,6 +31,8 @@ from pyspark.sql.functions import (
 )
 from pyspark.sql.types import FloatType, StringType, StructField, StructType
 
+import sys, os as _os
+sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
 from spark_jobs.clickhouse_hdfs import query_df, tmp_hdfs_dir, write_parquet_and_ingest
 
 

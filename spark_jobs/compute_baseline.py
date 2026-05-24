@@ -44,7 +44,7 @@ def main() -> None:
         spark.read.parquet(HDFS_STG_POSTS_CORE)
         .select("post_id", "created_at", "parent_id")
         .where(col("parent_id").isNotNull())
-        .where(to_date(col("created_at")) >= date_sub(current_date(), LOOKBACK_DAYS))
+        # .where(to_date(col("created_at")) >= date_sub(current_date(), LOOKBACK_DAYS))
     )
 
     n_total = core.count()

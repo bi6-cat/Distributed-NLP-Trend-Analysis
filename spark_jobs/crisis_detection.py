@@ -100,7 +100,11 @@ def _clf_predict(pdf: pd.DataFrame, pipeline, features: list) -> np.ndarray:
     return pipeline.predict(X).astype(int)
 
 
-def build_crisis_events(pdf: pd.DataFrame, target_date: str) -> pd.DataFrame:
+def build_crisis_events(
+    pdf: pd.DataFrame,
+    target_date: str,
+    post_ids_by_hour: dict[int, list[str]] | None = None,
+) -> pd.DataFrame:
     crisis_hours = pdf[pdf["is_crisis"] == 1].sort_values("hour").reset_index(drop=True)
     if crisis_hours.empty:
         return pd.DataFrame()
@@ -118,6 +122,10 @@ def build_crisis_events(pdf: pd.DataFrame, target_date: str) -> pd.DataFrame:
     rows = []
     for _, grp in crisis_hours.groupby("event_group"):
         z_max = grp["z_score"].max()
+        evidence: list[str] = []
+        if post_ids_by_hour:
+            for h in grp["hour"].tolist():
+                evidence.extend(post_ids_by_hour.get(int(h), []))
         rows.append({
             "event_id":           hashlib.md5(
                                       f"{target_date} {grp['hour'].min():02d}:00:00".encode()
@@ -133,10 +141,37 @@ def build_crisis_events(pdf: pd.DataFrame, target_date: str) -> pd.DataFrame:
                 f"z_score={z_max:.2f},"
                 f"neg_ratio={grp['neg_ratio'].mean():.2f}"
             ),
-            "affected_topics":    None,
-            "evidence_post_ids":  None,
+            "affected_topics":    [],
+            "evidence_post_ids":  evidence,
         })
     return pd.DataFrame(rows)
+
+
+def get_evidence_posts(core_with_time, nlp, crisis_hour_set,
+                       min_cmts=5, neg_threshold=0.55):
+    """
+    Lấy posts là evidence cho crisis:
+    - Có >= min_cmts comments trong giờ crisis
+    - neg_ratio >= neg_threshold
+    """
+    evidence_rows = (
+        core_with_time
+        .filter(col("hour").isin(list(crisis_hour_set)))
+        .filter(col("parent_id").isNotNull())
+        .join(nlp.select("post_id", "sentiment_label"), on="post_id", how="inner")
+        .withColumn("is_neg",
+            when(col("sentiment_label") == "negative", 1.0).otherwise(0.0))
+        .groupBy("hour", "parent_id")
+        .agg(
+            count("*").alias("cmt_count"),
+            avg("is_neg").alias("post_neg_ratio")
+        )
+        .filter(col("cmt_count") >= min_cmts)
+        .filter(col("post_neg_ratio") >= neg_threshold)
+        .orderBy("hour", col("cmt_count").desc())
+        .collect()
+    )
+    return evidence_rows
 
 
 def load_nlp(spark: SparkSession):
@@ -352,7 +387,15 @@ def main() -> None:
     final.orderBy("hour").show(24, truncate=False)
 
     print("[crisis] Step 9/9: build and ingest stg_crisis_events")
-    events_pdf = build_crisis_events(pdf, TARGET_DATE)
+    crisis_hour_set = set(pdf.loc[pdf["is_crisis"] == 1, "hour"].tolist())
+    post_ids_by_hour: dict[int, list[str]] = {}
+    if crisis_hour_set:
+        evidence_rows = get_evidence_posts(core_with_time, nlp, crisis_hour_set)
+        for row in evidence_rows:
+            post_ids_by_hour.setdefault(int(row["hour"]), []).append(row["parent_id"])
+        print(f"[crisis] Evidence posts (qualified): {len(evidence_rows)}")
+
+    events_pdf = build_crisis_events(pdf, TARGET_DATE, post_ids_by_hour)
     if not events_pdf.empty:
         print(f"[crisis] Events detected: {len(events_pdf)}")
         print(events_pdf[["detected_at", "severity", "duration_hours", "neg_ratio"]].to_string())
@@ -360,6 +403,7 @@ def main() -> None:
             "event_id", "detected_at", "severity",
             "anomaly_score", "neg_ratio", "mention_velocity",
             "trigger_conditions", "duration_hours",
+            "evidence_post_ids", 
         ]])
         write_parquet_and_ingest(
             events_spark,
