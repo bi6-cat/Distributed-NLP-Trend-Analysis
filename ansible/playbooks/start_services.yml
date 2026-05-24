@@ -7,7 +7,7 @@
 - name: Khởi động Hadoop NameNode, Spark Master và Airflow trên Master
   hosts: master
   become: yes
-  become_user: zett
+  become_user: "{{ ansible_user }}"
   vars_files:
     - ../roles/airflow/vars/main.yml
   tasks:
@@ -38,7 +38,7 @@
 - name: Khởi động Hadoop DataNode và Spark Worker trên Workers
   hosts: workers
   become: yes
-  become_user: zett
+  become_user: "{{ ansible_user }}"
   vars_files:
     - ../roles/spark/vars/main.yml
   tasks:

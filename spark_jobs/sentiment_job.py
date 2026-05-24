@@ -39,8 +39,11 @@ from pyspark.sql.types import (
     StringType, FloatType, TimestampType,
 )
 
-HDFS_INPUT    = os.environ.get("HDFS_INPUT",        "hdfs://192.168.56.11:9000/user/zett/staged/stg_posts_core")
-MODEL_PATH    = os.environ.get("NLP_MODEL_PATH",    "hdfs://192.168.56.11:9000/user/zett/models/phobert_finetuned/final")
+HDFS_BASE     = os.environ.get("HDFS_BASE", "hdfs://namenode:9000")
+HDFS_USER     = os.environ.get("HDFS_USER", os.environ.get("HADOOP_USER_NAME", "root"))
+HDFS_HOME     = os.environ.get("HDFS_HOME", f"/user/{HDFS_USER}")
+HDFS_INPUT    = os.environ.get("HDFS_INPUT",        f"{HDFS_BASE}{HDFS_HOME}/staged/stg_posts_core")
+MODEL_PATH    = os.environ.get("NLP_MODEL_PATH",    f"{HDFS_BASE}{HDFS_HOME}/models/phobert_finetuned/final")
 MODEL_VERSION = os.environ.get("NLP_MODEL_VERSION", "phobert_v1")
 KAGGLE_MODEL_HANDLE  = os.environ.get("KAGGLE_MODEL_HANDLE", "")
 KAGGLE_MODEL_VERSION = os.environ.get("KAGGLE_MODEL_VERSION", "")

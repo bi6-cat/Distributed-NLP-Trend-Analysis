@@ -47,10 +47,12 @@ logger = logging.getLogger("bertopic_inference_job")
 # LDA đọc từ:          hdfs://namenode:9000/user/zett/staged/  (cùng nguồn)
 HDFS_NAMENODE: str       = os.getenv("HDFS_NAMENODE", "namenode:9000")
 WEBHDFS_HOST: str        = os.getenv("WEBHDFS_HOST",  "namenode:9870")
-HDFS_STAGED_PATH: str    = "/user/zett/staged/stg_posts_core"   # Parquet từ cleaning_job
-HDFS_MODEL_PATH: str     = "/user/zett/models/bertopic/bertopic_model"
-HDFS_OUTPUT_TOPICS: str  = "/user/zett/results/bertopic/post_topics/"
-HDFS_OUTPUT_TOPIC_DEFS: str = "/user/zett/results/bertopic/topics/"
+HDFS_USER: str           = os.getenv("HDFS_USER", os.getenv("HADOOP_USER_NAME", "root"))
+HDFS_HOME: str           = os.getenv("HDFS_HOME", f"/user/{HDFS_USER}")
+HDFS_STAGED_PATH: str    = f"{HDFS_HOME}/staged/stg_posts_core"   # Parquet từ cleaning_job
+HDFS_MODEL_PATH: str     = f"{HDFS_HOME}/models/bertopic/bertopic_model"
+HDFS_OUTPUT_TOPICS: str  = f"{HDFS_HOME}/results/bertopic/post_topics/"
+HDFS_OUTPUT_TOPIC_DEFS: str = f"{HDFS_HOME}/results/bertopic/topics/"
 
 LOCAL_MODEL_PATH: str   = "output/task3.1_bertopic/output/bertopic_model"
 LOCAL_OUTPUT_PATH: str  = "output/bertopic_inference/"
@@ -82,7 +84,7 @@ def _webhdfs_read_parquet(hdfs_path: str) -> pd.DataFrame:
     base = f"http://{WEBHDFS_HOST}/webhdfs/v1"
 
     # List files trong directory
-    r = _req.get(f"{base}{hdfs_path}?op=LISTSTATUS", timeout=30)
+    r = _req.get(f"{base}{hdfs_path}?op=LISTSTATUS&user.name={HDFS_USER}", timeout=30)
     r.raise_for_status()
     statuses = r.json()["FileStatuses"]["FileStatus"]
     parquet_files = [s["pathSuffix"] for s in statuses
@@ -95,7 +97,7 @@ def _webhdfs_read_parquet(hdfs_path: str) -> pd.DataFrame:
     dfs = []
     for fname in parquet_files:
         file_path = f"{hdfs_path}/{fname}"
-        resp = _req.get(f"{base}{file_path}?op=OPEN", allow_redirects=True, timeout=300)
+        resp = _req.get(f"{base}{file_path}?op=OPEN&user.name={HDFS_USER}", allow_redirects=True, timeout=300)
         resp.raise_for_status()
         dfs.append(pd.read_parquet(io.BytesIO(resp.content)))
 
@@ -111,9 +113,9 @@ def _webhdfs_upload(local_path: str, hdfs_path: str) -> None:
     base = f"http://{WEBHDFS_HOST}/webhdfs/v1"
 
     parent = os.path.dirname(hdfs_path)
-    _req.put(f"{base}{parent}?op=MKDIRS", timeout=30)
+    _req.put(f"{base}{parent}?op=MKDIRS&user.name={HDFS_USER}", timeout=30)
 
-    r = _req.put(f"{base}{hdfs_path}?op=CREATE&overwrite=true",
+    r = _req.put(f"{base}{hdfs_path}?op=CREATE&overwrite=true&user.name={HDFS_USER}",
                  allow_redirects=False, timeout=30)
     if r.status_code == 307:
         upload_url = r.headers["Location"]
@@ -136,14 +138,14 @@ def _webhdfs_download_dir(hdfs_dir: str, local_dir: str) -> None:
     base = f"http://{WEBHDFS_HOST}/webhdfs/v1"
     os.makedirs(local_dir, exist_ok=True)
 
-    r = _req.get(f"{base}{hdfs_dir}?op=LISTSTATUS", timeout=30)
+    r = _req.get(f"{base}{hdfs_dir}?op=LISTSTATUS&user.name={HDFS_USER}", timeout=30)
     r.raise_for_status()
     statuses = r.json()["FileStatuses"]["FileStatus"]
 
     for s in statuses:
         name = s["pathSuffix"]
         if s["type"] == "FILE":
-            resp = _req.get(f"{base}{hdfs_dir}/{name}?op=OPEN",
+            resp = _req.get(f"{base}{hdfs_dir}/{name}?op=OPEN&user.name={HDFS_USER}",
                             allow_redirects=True, timeout=300)
             resp.raise_for_status()
             local_file = os.path.join(local_dir, name)

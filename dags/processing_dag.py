@@ -56,11 +56,17 @@ from airflow.utils.dates import days_ago
 
 logger = logging.getLogger("processing_dag")
 
+HDFS_NAMENODE: str = os.getenv("HDFS_NAMENODE", "namenode:9000")
+WEBHDFS_HOST: str = os.getenv("WEBHDFS_HOST", "namenode:9870")
+HDFS_USER: str = os.getenv("HDFS_USER", os.getenv("HADOOP_USER_NAME", "root"))
+HDFS_USER_DIR: str = f"/user/{HDFS_USER}"
+HDFS_URI_PREFIX: str = f"hdfs://{HDFS_NAMENODE}"
+
 # ── Đường dẫn HDFS ──
 # stg_posts_core là nguồn duy nhất dùng chung cho LDA và BERTopic
-STAGED_HDFS_PATH:    str = "hdfs://namenode:9000/user/zett/staged/stg_posts_core"
-RAW_HDFS_PATH:       str = "hdfs://namenode:9000/user/zett/raw_data"
-LDA_HDFS_OUTPUT:     str = "hdfs://namenode:9000/user/zett/results/lda"
+STAGED_HDFS_PATH:    str = f"{HDFS_URI_PREFIX}{HDFS_USER_DIR}/staged/stg_posts_core"
+RAW_HDFS_PATH:       str = f"{HDFS_URI_PREFIX}{HDFS_USER_DIR}/raw_data"
+LDA_HDFS_OUTPUT:     str = f"{HDFS_URI_PREFIX}{HDFS_USER_DIR}/results/lda"
 HDFS_CMS_STATE_PATH: str = "/data/results/cms/cms_state.pkl"
 HDFS_CMS_TOPK_PATH:  str = "/data/results/cms/top_keywords.json"
 
@@ -270,9 +276,12 @@ def _load_stg_posts_core_window(window_minutes: int = 15):
         logger.info(f"[LOCAL] Loaded stg_posts_core: {len(df):,} rows")
         return _filter_and_select(df)
     else:
-        webhdfs = f"http://{os.getenv('WEBHDFS_HOST', 'namenode:9870')}/webhdfs/v1"
-        hdfs_path = "/user/zett/staged/stg_posts_core"
-        r = _req.get(f"{webhdfs}{hdfs_path}?op=LISTSTATUS", timeout=30)
+        webhdfs = f"http://{WEBHDFS_HOST}/webhdfs/v1"
+        hdfs_path = f"{HDFS_USER_DIR}/staged/stg_posts_core"
+        r = _req.get(
+            f"{webhdfs}{hdfs_path}?op=LISTSTATUS&user.name={HDFS_USER}",
+            timeout=30,
+        )
         r.raise_for_status()
         files = [
             s["pathSuffix"] for s in r.json()["FileStatuses"]["FileStatus"]
@@ -280,7 +289,7 @@ def _load_stg_posts_core_window(window_minutes: int = 15):
         ]
         dfs = []
         for fname in files:
-            resp = _req.get(f"{webhdfs}{hdfs_path}/{fname}?op=OPEN",
+            resp = _req.get(f"{webhdfs}{hdfs_path}/{fname}?op=OPEN&user.name={HDFS_USER}",
                             allow_redirects=True, timeout=120)
             resp.raise_for_status()
             dfs.append(pd.read_parquet(io.BytesIO(resp.content)))
@@ -623,7 +632,7 @@ def task_save_lda_to_clickhouse() -> None:
     if USE_LOCAL:
         save_to_ch(input_dir=LDA_LOCAL_OUTPUT, host=ch_host, port=CLICKHOUSE_PORT)
     else:
-        save_to_ch(hdfs_base="/user/zett/results/lda", host=ch_host, port=CLICKHOUSE_PORT)
+        save_to_ch(hdfs_base=f"{HDFS_USER_DIR}/results/lda", host=ch_host, port=CLICKHOUSE_PORT)
     logger.info("[LDA] Topics pushed to ClickHouse.")
 
 
@@ -652,62 +661,80 @@ with DAG(
     crawl_sources = BashOperator(
         task_id="crawl_sources",
         bash_command=(
-            "export HDFS_HOST='namenode' PYTHONUNBUFFERED=1 && "
-            "python3 -u /opt/airflow/crawlers/vnexpress.py || true && "
-            "python3 -u /opt/airflow/crawlers/voz.py || true && "
-            "python3 -u /opt/airflow/crawlers/vatvo.py || true && "
+            f"export HDFS_HOST='namenode' HDFS_USER='{HDFS_USER}' PYTHONUNBUFFERED=1 && "
+            # Tạm thời tắt crawl mạng để chạy data có sẵn:
+            # "python3 -u /opt/airflow/crawlers/vnexpress.py || true && "
+            # "python3 -u /opt/airflow/crawlers/voz.py || true && "
+            # "python3 -u /opt/airflow/crawlers/vatvo.py || true && "
             "python3 -u /opt/airflow/crawlers/upload_to_hdfs.py"
         ),
         execution_timeout=timedelta(hours=2),
     )
 
-    # ── Task từ Member 2: Spark Cleaning + Dedup LSH ──
-    from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
+    spark_common_conf = (
+        "--master spark://spark-master:7077 "
+        "--conf spark.pyspark.python=/opt/bitnami/python/bin/python3 "
+        "--conf spark.pyspark.driver.python=/usr/local/bin/python3 "
+        "--conf spark.executorEnv.PYSPARK_PYTHON=/opt/bitnami/python/bin/python3 "
+        "--conf spark.executorEnv.PYTHONPATH=/opt/airflow "
+        f"--conf spark.executorEnv.HADOOP_USER_NAME={HDFS_USER} "
+        f"--conf spark.executorEnv.HDFS_USER={HDFS_USER} "
+        "--conf spark.hadoop.fs.permissions.umask-mode=000 "
+        "--executor-memory 12g "
+    )
 
-    # Note: SparkSubmitOperator yêu cầu connection 'spark_default' đã được tạo với host 'spark://spark-master:7077'
-    # Hoặc chúng ta override trực tiếp tham số:
-    spark_cleaning = SparkSubmitOperator(
+    # ── Task từ Member 2: Spark Cleaning + Dedup LSH ──
+    spark_cleaning = BashOperator(
         task_id="spark_cleaning",
-        application="/opt/airflow/spark_jobs/cleaning_job.py",
-        conn_id="spark_default",
-        conf={"spark.master": "spark://spark-master:7077", "spark.pyspark.python": "/opt/bitnami/python/bin/python3", "spark.pyspark.driver.python": "/usr/local/bin/python3", "spark.executorEnv.PYSPARK_PYTHON": "/opt/bitnami/python/bin/python3", "spark.executorEnv.PYTHONPATH": "/opt/airflow", "spark.hadoop.fs.permissions.umask-mode": "000"},
-        executor_memory="12g",
-        env_vars={
-            "HDFS_INPUT":  RAW_LOCAL_PATH  if USE_LOCAL else RAW_HDFS_PATH,
-            "HDFS_OUTPUT": STAGED_LOCAL_PATH if USE_LOCAL else STAGED_HDFS_PATH,
-            "CLICKHOUSE_HOST": "clickhouse",
-            "PYTHONPATH": "/opt/airflow",
-        }
+        bash_command=(
+            "export PYTHONPATH='/opt/airflow' "
+            f"HADOOP_USER_NAME='{HDFS_USER}' "
+            f"HDFS_INPUT='{RAW_LOCAL_PATH if USE_LOCAL else RAW_HDFS_PATH}' "
+            f"HDFS_OUTPUT='{STAGED_LOCAL_PATH if USE_LOCAL else STAGED_HDFS_PATH}' "
+            f"HDFS_USER='{HDFS_USER}' "
+            "CLICKHOUSE_HOST='clickhouse' "
+            "&& spark-submit "
+            f"{spark_common_conf}"
+            "/opt/airflow/spark_jobs/cleaning_job.py"
+        ),
+        execution_timeout=timedelta(hours=2),
     )
 
     # ── Task từ Member 3: LDA Topic Modeling ──
-    lda_topic_modeling = SparkSubmitOperator(
+    lda_local_flag = "--local" if USE_LOCAL else ""
+    lda_topic_modeling = BashOperator(
         task_id="lda_topic_modeling",
-        application="/opt/airflow/spark_jobs/lda_job.py",
-        conn_id="spark_default",
-        conf={"spark.master": "spark://spark-master:7077", "spark.pyspark.python": "/opt/bitnami/python/bin/python3", "spark.pyspark.driver.python": "/usr/local/bin/python3", "spark.executorEnv.PYSPARK_PYTHON": "/opt/bitnami/python/bin/python3", "spark.executorEnv.PYTHONPATH": "/opt/airflow", "spark.hadoop.fs.permissions.umask-mode": "000"},
-        executor_memory="12g",
-        application_args=[
-            "--input-path", STAGED_LOCAL_PATH if USE_LOCAL else STAGED_HDFS_PATH,
-            "--output-path", LDA_LOCAL_OUTPUT  if USE_LOCAL else LDA_HDFS_OUTPUT,
-            "--k", "20",
-            *(["--local"] if USE_LOCAL else []),
-        ]
+        bash_command=(
+            "export PYTHONPATH='/opt/airflow' "
+            f"HADOOP_USER_NAME='{HDFS_USER}' "
+            f"HDFS_USER='{HDFS_USER}' "
+            "&& spark-submit "
+            f"{spark_common_conf}"
+            "/opt/airflow/spark_jobs/lda_job.py "
+            f"--input-path '{STAGED_LOCAL_PATH if USE_LOCAL else STAGED_HDFS_PATH}' "
+            f"--output-path '{LDA_LOCAL_OUTPUT if USE_LOCAL else LDA_HDFS_OUTPUT}' "
+            "--k 20 "
+            f"{lda_local_flag}"
+        ),
+        execution_timeout=timedelta(hours=2),
     )
 
     # ── Task từ Member 4: Sentiment Analysis ──
-    sentiment_analysis = SparkSubmitOperator(
+    sentiment_analysis = BashOperator(
         task_id="sentiment_analysis",
-        application="/opt/airflow/spark_jobs/sentiment_job.py",
-        conn_id="spark_default",
-        conf={"spark.master": "spark://spark-master:7077", "spark.pyspark.python": "/opt/bitnami/python/bin/python3", "spark.pyspark.driver.python": "/usr/local/bin/python3", "spark.executorEnv.PYSPARK_PYTHON": "/opt/bitnami/python/bin/python3", "spark.executorEnv.PYTHONPATH": "/opt/airflow", "spark.executorEnv.KAGGLE_MODEL_HANDLE": "nquanggnguyn/phobert-/transformers/default"},
-        executor_memory="12g",
-        env_vars={
-            "HDFS_INPUT": "hdfs://namenode:9000/user/zett/staged/",
-            "CLICKHOUSE_HOST": "clickhouse",
-            "KAGGLE_MODEL_HANDLE": "nquanggnguyn/phobert-/transformers/default",
-            "PYTHONPATH": "/opt/airflow",
-        }
+        bash_command=(
+            "export PYTHONPATH='/opt/airflow' "
+            f"HADOOP_USER_NAME='{HDFS_USER}' "
+            f"HDFS_INPUT='{HDFS_URI_PREFIX}{HDFS_USER_DIR}/staged/' "
+            f"HDFS_USER='{HDFS_USER}' "
+            "CLICKHOUSE_HOST='clickhouse' "
+            "KAGGLE_MODEL_HANDLE='nquanggnguyn/phobert-/transformers/default' "
+            "&& spark-submit "
+            f"{spark_common_conf}"
+            "--conf spark.executorEnv.KAGGLE_MODEL_HANDLE=nquanggnguyn/phobert-/transformers/default "
+            "/opt/airflow/spark_jobs/sentiment_job.py"
+        ),
+        execution_timeout=timedelta(hours=2),
     )
 
     # ── Task từ Member 5: Trend Scoring (bằng dbt) ──
@@ -819,7 +846,7 @@ def task_save_bertopic_to_clickhouse() -> None:
 
 
 # ── Cấu hình path riêng cho BERTopic ──
-HDFS_MODEL_PATH: str = "/data/models/bertopic/bertopic_model"
+HDFS_MODEL_PATH: str = f"{HDFS_USER_DIR}/models/bertopic/bertopic_model"
 LOCAL_BERTOPIC_MODEL_PATH: str = "output/task3.1_bertopic/output/bertopic_model"
 
 with DAG(

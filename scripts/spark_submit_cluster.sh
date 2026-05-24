@@ -20,7 +20,8 @@
 
 set -euo pipefail
 
-export HADOOP_USER_NAME=zett
+export HADOOP_USER_NAME="${HADOOP_USER_NAME:-root}"
+export HDFS_USER="${HDFS_USER:-$HADOOP_USER_NAME}"
 
 # ── Cấu hình cluster — điền từ docs/CLUSTER_INFO.md ─────────────────────────
 # Master Node: spark-master (Docker)
@@ -43,12 +44,12 @@ PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 ZIP_PATH="$PROJECT_ROOT/dist/nlp_trend.zip"
 
 # ── Đường dẫn HDFS ───────────────────────────────────────────────────────────
-# Dùng /user/zett/ — khớp với upload_to_hdfs.py (HDFS_USER=zett)
-HDFS_RAW="$HDFS_BASE/user/zett/raw_data"         # nơi M1 đã upload CSV
-HDFS_STAGED="$HDFS_BASE/user/zett/staged"         # output sau khi xử lý
-HDFS_MODEL="$HDFS_BASE/user/zett/models/phobert_finetuned/final"
-HDFS_SLANG="$HDFS_BASE/user/zett/ref/slang_dict.json"
-HDFS_STOPWORDS="$HDFS_BASE/user/zett/ref/stopwords_vi.txt"
+HDFS_HOME="/user/$HDFS_USER"
+HDFS_RAW="$HDFS_BASE$HDFS_HOME/raw_data"         # nơi M1 đã upload CSV
+HDFS_STAGED="$HDFS_BASE$HDFS_HOME/staged"        # output sau khi xử lý
+HDFS_MODEL="$HDFS_BASE$HDFS_HOME/models/phobert_finetuned/final"
+HDFS_SLANG="$HDFS_BASE$HDFS_HOME/ref/slang_dict.json"
+HDFS_STOPWORDS="$HDFS_BASE$HDFS_HOME/ref/stopwords_vi.txt"
 # Đọc cả 3 nguồn CSV — M1 upload dạng CSV (không phải JSON, không partition by date)
 HDFS_INPUT_VOZ="$HDFS_RAW/voz"
 HDFS_INPUT_VATVO="$HDFS_RAW/vatvo"
@@ -63,15 +64,15 @@ log() { echo "[$(date '+%H:%M:%S')] $*"; }
 
 upload_to_hdfs() {
     log "Upload model lên HDFS..."
-    docker exec -e HADOOP_USER_NAME=zett namenode hdfs dfs -mkdir -p "$HDFS_MODEL"
+    docker exec -e HADOOP_USER_NAME="$HDFS_USER" namenode hdfs dfs -mkdir -p "$HDFS_MODEL"
 
     log "Upload data files (slang + stopwords) lên HDFS..."
-    docker exec -e HADOOP_USER_NAME=zett namenode hdfs dfs -mkdir -p "$(dirname "$HDFS_SLANG")"
-    docker exec -e HADOOP_USER_NAME=zett namenode hdfs dfs -put -f "/opt/hadoop/dfs/name/slang_dict.json"   "$HDFS_SLANG" || true
-    docker exec -e HADOOP_USER_NAME=zett namenode hdfs dfs -put -f "/opt/hadoop/dfs/name/stopwords_vi.txt"  "$HDFS_STOPWORDS" || true
+    docker exec -e HADOOP_USER_NAME="$HDFS_USER" namenode hdfs dfs -mkdir -p "$(dirname "$HDFS_SLANG")"
+    docker exec -e HADOOP_USER_NAME="$HDFS_USER" namenode hdfs dfs -put -f "/opt/hadoop/dfs/name/slang_dict.json"   "$HDFS_SLANG" || true
+    docker exec -e HADOOP_USER_NAME="$HDFS_USER" namenode hdfs dfs -put -f "/opt/hadoop/dfs/name/stopwords_vi.txt"  "$HDFS_STOPWORDS" || true
 
     log "Upload hoàn tất."
-    docker exec -e HADOOP_USER_NAME=zett namenode hdfs dfs -ls "$HDFS_MODEL" || true
+    docker exec -e HADOOP_USER_NAME="$HDFS_USER" namenode hdfs dfs -ls "$HDFS_MODEL" || true
 }
 
 build_zip() {
@@ -94,7 +95,7 @@ submit_job() {
     log "  HDFS output  : $HDFS_OUTPUT"
     log "  ClickHouse   : $CLICKHOUSE_HOST:8123"
 
-    docker exec -e PYSPARK_PYTHON="$WORKER_PYTHON" -e PYSPARK_DRIVER_PYTHON="$WORKER_PYTHON" spark-master \
+    docker exec -e PYSPARK_PYTHON="$WORKER_PYTHON" -e PYSPARK_DRIVER_PYTHON="$WORKER_PYTHON" -e HADOOP_USER_NAME="$HDFS_USER" -e HDFS_USER="$HDFS_USER" spark-master \
     /opt/bitnami/spark/bin/spark-submit \
         --master "$SPARK_MASTER" \
         --deploy-mode client \
@@ -117,6 +118,8 @@ submit_job() {
         --conf "spark.executorEnv.NLP_STOPWORDS=$HDFS_STOPWORDS" \
         --conf "spark.executorEnv.HDFS_INPUT=$HDFS_INPUT_VOZ" \
         --conf "spark.executorEnv.HDFS_OUTPUT=$HDFS_OUTPUT" \
+        --conf "spark.executorEnv.HADOOP_USER_NAME=$HDFS_USER" \
+        --conf "spark.executorEnv.HDFS_USER=$HDFS_USER" \
         --conf "spark.executorEnv.CLICKHOUSE_HOST=$CLICKHOUSE_HOST" \
         --conf "spark.executorEnv.CLICKHOUSE_PORT=8123" \
         --conf "spark.executorEnv.CLICKHOUSE_DB=tech_radar" \

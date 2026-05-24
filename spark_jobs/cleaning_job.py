@@ -53,11 +53,13 @@ from pyspark.sql.types import (
 
 # ── Config (override bằng env var hoặc spark-submit --conf) ──────────────────
 HDFS_BASE  = os.environ.get("HDFS_BASE",    "hdfs://namenode:9000")
-HDFS_RAW   = os.environ.get("HDFS_INPUT",   f"{HDFS_BASE}/user/zett/raw_data")
-HDFS_OUT   = os.environ.get("HDFS_OUTPUT",  f"{HDFS_BASE}/user/zett/staged/stg_posts_core")
+HDFS_USER  = os.environ.get("HDFS_USER", os.environ.get("HADOOP_USER_NAME", "root"))
+HDFS_HOME  = os.environ.get("HDFS_HOME", f"/user/{HDFS_USER}")
+HDFS_RAW   = os.environ.get("HDFS_INPUT",   f"{HDFS_BASE}{HDFS_HOME}/raw_data")
+HDFS_OUT   = os.environ.get("HDFS_OUTPUT",  f"{HDFS_BASE}{HDFS_HOME}/staged/stg_posts_core")
 
-SLANG_PATH = os.environ.get("NLP_SLANG_DICT", f"{HDFS_BASE}/user/zett/ref/slang_dict.json")
-STOP_PATH  = os.environ.get("NLP_STOPWORDS",  f"{HDFS_BASE}/user/zett/ref/stopwords_vi.txt")
+SLANG_PATH = os.environ.get("NLP_SLANG_DICT", f"{HDFS_BASE}{HDFS_HOME}/ref/slang_dict.json")
+STOP_PATH  = os.environ.get("NLP_STOPWORDS",  f"{HDFS_BASE}{HDFS_HOME}/ref/stopwords_vi.txt")
 
 # ── Output Schema (khớp với ClickHouse stg_posts_core) ───────────────────────
 OUTPUT_SCHEMA = StructType([

@@ -6,7 +6,8 @@
 CLICKHOUSE_HOST=${1:-"clickhouse"}
 CLICKHOUSE_PORT=${2:-"8123"}
 DB_TABLE=${3:-"tech_radar.stg_posts_core"}
-HDFS_PATH=${4:-"hdfs://namenode:9000/user/zett/staged/stg_posts_core/**/*.parquet"}
+HDFS_USER=${HDFS_USER:-${HADOOP_USER_NAME:-root}}
+HDFS_PATH=${4:-"hdfs://namenode:9000/user/$HDFS_USER/staged/stg_posts_core/**/*.parquet"}
 
 echo "--------------------------------------------------------"
 echo "[INFO] Bắt đầu nạp dữ liệu từ HDFS vào ClickHouse"
