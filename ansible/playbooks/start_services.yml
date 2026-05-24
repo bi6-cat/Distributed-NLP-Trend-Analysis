@@ -1,0 +1,70 @@
+---
+# Playbook dùng để bật nhanh các dịch vụ (Hadoop, Spark, Airflow, ClickHouse)
+# thay vì chạy lại toàn bộ quy trình cài đặt. Rất hữu ích khi bạn khởi động lại máy ảo.
+# Cách chạy:
+#   ansible-playbook -i ansible/inventory/hosts.ini ansible/playbooks/start_services.yml
+
+- name: Khởi động Hadoop NameNode, Spark Master và Airflow trên Master
+  hosts: master
+  become: yes
+  become_user: zett
+  vars_files:
+    - ../roles/airflow/vars/main.yml
+  tasks:
+    - name: Khởi động Hadoop NameNode
+      shell: "nohup /opt/hadoop/bin/hdfs --daemon start namenode > /dev/null 2>&1 &"
+      ignore_errors: yes
+
+    - name: Khởi động Spark Master
+      shell: "/opt/spark/sbin/start-master.sh"
+      ignore_errors: yes
+
+    - name: Khởi động Airflow Webserver
+      shell: "AIRFLOW_HOME={{ airflow_home }} /opt/miniconda/envs/nlp-trend/bin/airflow webserver --port {{ airflow_port }} -D"
+      args:
+        creates: "{{ airflow_home }}/airflow-webserver.pid"
+      async: 60
+      poll: 0
+      ignore_errors: yes
+
+    - name: Khởi động Airflow Scheduler
+      shell: "AIRFLOW_HOME={{ airflow_home }} /opt/miniconda/envs/nlp-trend/bin/airflow scheduler -D"
+      args:
+        creates: "{{ airflow_home }}/airflow-scheduler.pid"
+      async: 60
+      poll: 0
+      ignore_errors: yes
+
+- name: Khởi động Hadoop DataNode và Spark Worker trên Workers
+  hosts: workers
+  become: yes
+  become_user: zett
+  vars_files:
+    - ../roles/spark/vars/main.yml
+  tasks:
+    - name: Cập nhật cấu hình Core cho Spark Worker
+      become_user: root
+      lineinfile:
+        path: "/opt/spark/conf/spark-env.sh"
+        regexp: '^export SPARK_WORKER_CORES='
+        line: "export SPARK_WORKER_CORES={{ spark_worker_cores }}"
+      ignore_errors: yes
+
+    - name: Khởi động Hadoop DataNode
+      shell: "nohup /opt/hadoop/bin/hdfs --daemon start datanode > /dev/null 2>&1 &"
+      ignore_errors: yes
+
+    - name: Khởi động Spark Worker
+      shell: "/opt/spark/sbin/start-worker.sh spark://{{ hostvars[groups['master'][0]]['ansible_host'] | default(groups['master'][0]) }}:{{ spark_master_port | default('7077') }}"
+      ignore_errors: yes
+
+- name: Khởi động ClickHouse Server trên Storage Node
+  hosts: storage
+  become: yes
+  tasks:
+    - name: Đảm bảo ClickHouse Service đang chạy
+      systemd:
+        name: clickhouse-server
+        state: started
+        enabled: yes
+      ignore_errors: yes

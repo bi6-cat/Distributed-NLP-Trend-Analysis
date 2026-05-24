@@ -198,7 +198,7 @@ Order By: (source, date, topic_id)
 ```python
 df.write \
     .format("jdbc") \
-    .option("url", "jdbc:clickhouse://storage-node:8123/nlp_db") \
+    .option("url", "jdbc:clickhouse://192.168.56.14:8123/nlp_db") \
     .option("dbtable", "stg_processed_posts") \
     .option("driver", "com.clickhouse.jdbc.ClickHouseDriver") \
     .mode("append") \
@@ -622,7 +622,7 @@ Ansible Playbooks:
 Cluster: HPC Semi-Lab
   ├── Master Node (1 node)
   │     └── HDFS NameNode, Spark Master, Airflow, Streamlit, dbt
-  ├── Worker Nodes (3–4 nodes)
+  ├── Worker Nodes (2 nodes)
   │     └── HDFS DataNode, Spark Worker
   │     └── Chạy PhoBERT inference (nếu có GPU)
   └── Storage Node (1 node)

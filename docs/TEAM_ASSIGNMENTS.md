@@ -164,8 +164,8 @@
 | 3.1 | **Triển khai BERTopic** với PhoBERT embeddings (`vinai/phobert-base`) | `models/bertopic_model.py` |
 | 3.2 | Tune BERTopic: `min_topic_size`, `nr_topics`, `umap_model` | `notebooks/bertopic_tuning.ipynb` |
 | 3.3 | So sánh LDA vs BERTopic: coherence, phân bố topic, qualitative | `reports/topic_comparison.md` |
-| 3.4 | Lưu topic clusters vào PostgreSQL (`topic_clusters` table) | `scripts/save_topics_to_pg.py` |
-| 3.5 | Cung cấp `topic_id` và `topic_label` cho Member 5 dùng trong dashboard | Schema PostgreSQL |
+| 3.4 | Lưu topic clusters vào ClickHouse (`topic_clusters` table) | `scripts/save_topics_to_ch.py` |
+| 3.5 | Cung cấp `topic_id` và `topic_label` cho Member 5 dùng trong dashboard | Schema ClickHouse |
 
 **Phase 4: Hoàn thiện**
 
@@ -216,7 +216,7 @@
 | 3.2 | Test throughput: đo records/giây trên 1 vs 3 workers | `benchmarks/sentiment_throughput.md` |
 | 3.3 | **Triển khai Isolation Forest** với features: mention_count, neg_ratio, velocity, engagement | `models/isolation_forest.py` |
 | 3.4 | **Triển khai Rolling Mean threshold**: spike = rolling_mean + 2σ | `models/rolling_threshold.py` |
-| 3.5 | Định nghĩa Crisis Alert: ≥2/3 điều kiện → ghi vào `crisis_alerts` PostgreSQL | `scripts/crisis_detector.py` |
+| 3.5 | Định nghĩa Crisis Alert: ≥2/3 điều kiện → ghi vào `crisis_alerts` ClickHouse | `scripts/crisis_detector.py` |
 | 3.6 | Tích hợp vào Airflow DAG: task `sentiment_job` + `crisis_detection` | Cập nhật DAG |
 
 **Phase 4: Đánh giá**
@@ -259,7 +259,7 @@
 | 2.2 | Tính **Mention Velocity** V(t): số mentions / giờ theo time window | `scoring/velocity.py` |
 | 2.3 | Tính **Acceleration** A(t): đạo hàm bậc 1 của V theo thời gian | `scoring/acceleration.py` |
 | 2.4 | Tính **Engagement Weight** E(t): likes + shares + comments với weight | `scoring/engagement.py` |
-| 2.5 | Lưu `trend_scores` vào PostgreSQL theo ngày/tuần | `scripts/save_trends.py` |
+| 2.5 | Lưu `trend_scores` vào ClickHouse theo ngày/tuần | `scripts/save_trends_ch.py` |
 | 2.6 | Tích hợp TrendScorer vào Airflow DAG | Cập nhật DAG |
 
 **Phase 3: Dashboard hoàn thiện**
@@ -294,7 +294,7 @@ Phase │ M1 (Crawl)        │ M2 (Infra)         │ M3 (Topic)        │ M4 
      │ VOZ crawler       │ Ansible inventory  │ Research LDA      │ Research PhoBERT   │ DB schema SQL
      │ VnExpress crawler │ Java + Hadoop setup│ Stopwords dict    │ VnCoreNLP setup    │ Streamlit proto
   1  │ YouTube API       │ Spark cluster      │ Slang dict        │ Label 1K data      │ Layout design
-     │ MongoDB setup     │ Airflow + verify   │ LDA prototype     │ Label 1K data      │ Mock dashboard
+     │ HDFS setup        │ Airflow + verify   │ LDA prototype     │ Label 1K data      │ Mock dashboard
 ─────┼───────────────────┼────────────────────┼───────────────────┼────────────────────┼────────────────
      │ HDFS write setup │ Airflow + verify   │ LDA prototype     │ Label 1K data      │ Mock dashboard
 ─────├───────────────────├────────────────────├───────────────────├────────────────────├────────────────
@@ -383,7 +383,7 @@ Mỗi khi một thành viên hoàn thành phần mình để người khác dùn
 Bước 1: Tạo PR vào branch develop, tag người nhận vào để review
 Bước 2: Ghi vào file HANDOFF_LOG.md:
          - Tên artifact (file, table, model checkpoint)
-         - Đường dẫn chính xác (HDFS path / PostgreSQL table / folder)
+         - Đường dẫn chính xác (HDFS path / ClickHouse table / folder)
          - Schema / format (ví dụ: CSV với columns gì, HDFS Parquet với schema gì)
          - Ví dụ đầu vào/đầu ra
 Bước 3: Ping người nhận trên nhóm chat, confirm họ đã chạy test được
