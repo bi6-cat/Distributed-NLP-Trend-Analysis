@@ -94,7 +94,7 @@ USE_LOCAL: bool = True    # True = dùng local volume mount (Docker). False = d�
 
 # ── ClickHouse config ──
 # TODO [Member 2/5]: Cấu hình ClickHouse connection
-CLICKHOUSE_HOST: str = "localhost"
+CLICKHOUSE_HOST: str = "clickhouse"
 CLICKHOUSE_PORT: int = 8123
 CLICKHOUSE_DB: str = "tech_radar"
 CLICKHOUSE_TABLE: str = "stg_keyword_freq"

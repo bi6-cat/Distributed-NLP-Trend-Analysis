@@ -34,9 +34,9 @@ CLICKHOUSE_HOST="${CLICKHOUSE_HOST:-clickhouse}"
 
 # ── Cấu hình job ─────────────────────────────────────────────────────────────
 NUM_EXECUTORS="${NUM_EXECUTORS:-2}"
-EXECUTOR_CORES="${EXECUTOR_CORES:-4}"
-EXECUTOR_MEMORY="${EXECUTOR_MEMORY:-2g}"
-DRIVER_MEMORY="${DRIVER_MEMORY:-2g}"
+EXECUTOR_CORES="${EXECUTOR_CORES:-2}"
+EXECUTOR_MEMORY="${EXECUTOR_MEMORY:-3g}"
+DRIVER_MEMORY="${DRIVER_MEMORY:-3g}"
 
 # ── Đường dẫn local (relative từ project root) ───────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

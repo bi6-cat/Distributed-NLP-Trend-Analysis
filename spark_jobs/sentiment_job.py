@@ -45,8 +45,6 @@ HDFS_HOME     = os.environ.get("HDFS_HOME", f"/user/{HDFS_USER}")
 HDFS_INPUT    = os.environ.get("HDFS_INPUT",        f"{HDFS_BASE}{HDFS_HOME}/staged/stg_posts_core")
 MODEL_PATH    = os.environ.get("NLP_MODEL_PATH",    f"{HDFS_BASE}{HDFS_HOME}/models/phobert_finetuned/final")
 MODEL_VERSION = os.environ.get("NLP_MODEL_VERSION", "phobert_v1")
-KAGGLE_MODEL_HANDLE  = os.environ.get("KAGGLE_MODEL_HANDLE", "")
-KAGGLE_MODEL_VERSION = os.environ.get("KAGGLE_MODEL_VERSION", "")
 
 CLICKHOUSE_HOST = os.environ.get("CLICKHOUSE_HOST", "192.168.56.14")
 CLICKHOUSE_PORT = os.environ.get("CLICKHOUSE_PORT", "8123")
@@ -74,6 +72,7 @@ OUTPUT_SCHEMA = StructType([
 # bất kể có bao nhiêu partition được xử lý.
 # ---------------------------------------------------------------------------
 _MODEL_CACHE: dict = {}
+_RESOLVED_MODEL_PATH: dict = {}   # cache kaggle/hdfs → local path, per executor process
 
 
 def _hdfs_to_local(hdfs_path: str, local_name: str) -> str:
@@ -212,6 +211,7 @@ def process_partition(iterator):
       - Model load 1 lần / executor process (FIX ②)
       - Stream qua iterator theo batch, không load hết RAM (FIX ③)
     """
+    import os
     import sys
     import traceback
     from datetime import datetime, timezone
@@ -228,47 +228,35 @@ def process_partition(iterator):
     except Exception:
         pass
 
+    kaggle_handle = os.environ.get("KAGGLE_MODEL_HANDLE")
     model_path    = os.environ.get("NLP_MODEL_PATH",    "models/phobert_finetuned/final")
     model_version = os.environ.get("NLP_MODEL_VERSION", "phobert_v1")
-    kaggle_handle = os.environ.get("KAGGLE_MODEL_HANDLE", "")
-    kaggle_version = os.environ.get("KAGGLE_MODEL_VERSION", "")
-
-    def _load_kaggle_access_token() -> str:
-        token = os.environ.get("KAGGLEHUB_ACCESS_TOKEN", "").strip()
-        if token:
-            return token
-        token_path = os.environ.get("KAGGLEHUB_ACCESS_TOKEN_FILE", "/root/.kaggle/access_token")
-        if os.path.exists(token_path):
-            with open(token_path, "r", encoding="utf-8") as f:
-                token = f.read().strip()
-            if token:
-                os.environ["KAGGLEHUB_ACCESS_TOKEN"] = token
-        return token
-
-    def _download_kaggle_model(handle: str, version: str = "") -> str:
-        if not handle:
-            return ""
-        try:
-            import kagglehub
-        except Exception as e:
-            raise RuntimeError(
-                "kagglehub is required to download Kaggle models. "
-                "Install it or provide a local model path."
-            ) from e
-        if version:
-            return kagglehub.model_download(handle, version=version)
-        return kagglehub.model_download(handle)
-
-    if model_path.startswith("kaggle://"):
-        kaggle_handle = model_path.replace("kaggle://", "", 1)
-        model_path = ""
 
     if kaggle_handle:
-        _load_kaggle_access_token()
-        model_path = _download_kaggle_model(kaggle_handle, kaggle_version)
+        if kaggle_handle in _RESOLVED_MODEL_PATH:
+            model_path = _RESOLVED_MODEL_PATH[kaggle_handle]
+            print(f"[MODEL] Reusing cached Kaggle path: {model_path}", flush=True)
+        else:
+            import tempfile
+            os.environ["HOME"] = tempfile.gettempdir()
+            os.environ["KAGGLE_CONFIG_DIR"] = tempfile.gettempdir()
+            os.environ["KAGGLEHUB_CACHE"] = os.path.join(tempfile.gettempdir(), "kaggle_cache")
 
-    # Copy HDFS model về local (với lock, với retry timeout đúng)
-    model_path = _hdfs_to_local(model_path, "phobert_finetuned")
+            import kagglehub
+            print(f"[MODEL] Đang tải từ Kaggle: {kaggle_handle}", flush=True)
+            base_path = kagglehub.model_download(kaggle_handle)
+
+            model_path = base_path
+            for root_dir, dirs, files in os.walk(base_path):
+                if "config.json" in files:
+                    model_path = root_dir
+                    break
+            _RESOLVED_MODEL_PATH[kaggle_handle] = model_path
+            print(f"[MODEL] Đường dẫn thực tế chứa model: {model_path}", flush=True)
+
+    else:
+        # Copy HDFS model về local (với lock, với retry timeout đúng)
+        model_path = _hdfs_to_local(model_path, "phobert_finetuned")
 
     try:
         import torch
