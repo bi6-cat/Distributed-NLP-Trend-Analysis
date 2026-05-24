@@ -193,8 +193,8 @@ docker exec spark-master spark-submit \
 docker exec spark-master spark-submit \
   --master spark://spark-master:7077 \
   /opt/airflow/spark_jobs/lda_job.py \
-  --input-path hdfs://namenode:9000/user/zett/staged/ \
-  --output-path hdfs://namenode:9000/user/zett/results/lda/ \
+  --input-path hdfs://namenode:9000/user/<hdfs_user>/staged/ \
+  --output-path hdfs://namenode:9000/user/<hdfs_user>/results/lda/ \
   --k 10 --max-iter 60
 ```
 
@@ -230,7 +230,7 @@ BERTopic và LDA đọc từ **cùng một nguồn**: HDFS Parquet output của 
 BERTopic không chạy trên Spark nên dùng **WebHDFS REST API** để đọc/ghi thay vì Hadoop CLI.
 
 ```
-HDFS /user/zett/staged/stg_posts_core/   ← cùng nguồn với LDA
+HDFS /user/<hdfs_user>/staged/stg_posts_core/   ← cùng nguồn với LDA
     │  (WebHDFS HTTP, không cần hdfs CLI)
     ▼
 bertopic_inference_job.py
@@ -240,7 +240,7 @@ bertopic_inference_job.py
   PhoBERT (vinai/phobert-base) → UMAP (5-dim) → HDBSCAN → c-TF-IDF
     │
     ▼
-HDFS /user/zett/results/bertopic/
+HDFS /user/<hdfs_user>/results/bertopic/
   ├── post_topic_assignment.parquet
   └── topics.parquet
     │

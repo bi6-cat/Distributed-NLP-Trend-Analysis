@@ -11,9 +11,11 @@ x-airflow-common:
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
     AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__WEBSERVER__SECRET_KEY: 'distributed-nlp-airflow-shared-secret'
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     HADOOP_USER_NAME: root
+    HDFS_USER: root
   volumes:
     - ./:/opt/airflow
   depends_on:
@@ -66,6 +68,7 @@ services:
       - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
       - PYSPARK_DRIVER_PYTHON=/opt/bitnami/python/bin/python3
       - HADOOP_USER_NAME=root
+      - HDFS_USER=root
     ports:
       - "8080:8080"
       - "7077:7077"
@@ -90,6 +93,7 @@ services:
       - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
       - PYSPARK_DRIVER_PYTHON=/opt/bitnami/python/bin/python3
       - HADOOP_USER_NAME=root
+      - HDFS_USER=root
     depends_on:
       - spark-master
     volumes:

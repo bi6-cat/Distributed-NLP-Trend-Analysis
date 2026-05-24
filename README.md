@@ -68,7 +68,7 @@ Member 5 (Full-stack)      →  Biến tất cả thành thứ người thườn
    └── BERTopic/LDA → phân cụm chủ đề
           │  result
           ▼
-     PostgreSQL (structured results)
+     ClickHouse (structured results)
           │  query
           ▼
    Streamlit Dashboard  ← user xem ở đây
