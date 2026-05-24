@@ -4,11 +4,47 @@
     )
 }}
 
+WITH latest_sentiment AS (
+    SELECT
+        post_id,
+        sentiment_label,
+        sentiment_score
+    FROM (
+        SELECT
+            post_id,
+            sentiment_label,
+            sentiment_score,
+            row_number() OVER (
+                PARTITION BY post_id
+                ORDER BY predicted_at DESC, loaded_at DESC
+            ) AS rn
+        FROM {{ source('tech_radar', 'stg_posts_nlp') }}
+    )
+    WHERE rn = 1
+),
+latest_topics AS (
+    SELECT
+        post_id,
+        topic_id,
+        topic_probability
+    FROM (
+        SELECT
+            post_id,
+            topic_id,
+            topic_probability,
+            row_number() OVER (
+                PARTITION BY post_id
+                ORDER BY predicted_at DESC, loaded_at DESC, topic_probability DESC
+            ) AS rn
+        FROM {{ source('tech_radar', 'stg_post_topics') }}
+    )
+    WHERE rn = 1
+)
+
 SELECT
     c.post_id           AS post_id,
     c.source            AS source,
-    c.author_id         AS author_id,
-    c.author_name       AS author_name,
+    c.author            AS author,
     c.title             AS title,
     c.body              AS body,
     c.segmented_text    AS segmented_text,
@@ -47,8 +83,8 @@ SELECT
     c.crawled_at        AS crawled_at
 
 FROM {{ source('tech_radar', 'stg_posts_core') }}       AS c
-LEFT JOIN {{ source('tech_radar', 'stg_posts_nlp') }}    AS n ON c.post_id = n.post_id
-LEFT JOIN {{ source('tech_radar', 'stg_post_topics') }}  AS t ON c.post_id = t.post_id
+LEFT JOIN latest_sentiment                               AS n ON c.post_id = n.post_id
+LEFT JOIN latest_topics                                  AS t ON c.post_id = t.post_id
 
 WHERE c.body != ''
   AND c.created_at >= today() - INTERVAL 90 DAY

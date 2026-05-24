@@ -1,9 +1,9 @@
 # Vietnamese Tech Trend & Controversy Radar
 ## Tech Stack & System Architecture — Final Reference Document
 
-> **Phiên bản:** v3.0 — Cập nhật: Tháng 3/2026  
-> **Trạng thái:** Phase 1 — Thiết kế & Thu thập dữ liệu  
-> **Thay đổi v3.0:** Bỏ MongoDB, thay PostgreSQL → ClickHouse + dbt  
+> **Phiên bản:** v4.0 — Cập nhật: Theo tiến độ mới nhất
+> **Trạng thái:** Phase 4 — Tổng hợp Benchmark, Báo cáo & Chuẩn bị Demo Live
+> **Thay đổi:** Bỏ MongoDB, Vagrant/Ansible, chuyển sang ClickHouse + Docker Compose hoàn toàn.
 
 ---
 
@@ -28,12 +28,12 @@
 
 ## 1. Kiến trúc tổng quan
 
-Hệ thống theo kiến trúc **7 lớp phân tách rõ ràng**, vận hành trên cụm **HPC Semi-Lab** và quản lý tự động bằng **Ansible**.
+Hệ thống theo kiến trúc **7 lớp phân tách rõ ràng**, vận hành trên Server/Cloud thông qua **Docker Compose**.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                  ORCHESTRATION & DEVOPS LAYER                   │
-│             Ansible · Airflow · Git · Docker · Conda            │
+│             Docker Compose · Airflow · Git · Conda              │
 └────────────────────────────┬────────────────────────────────────┘
                              │
 ┌────────────────────────────▼────────────────────────────────────┐

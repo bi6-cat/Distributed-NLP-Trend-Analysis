@@ -58,6 +58,10 @@ def append_unique(lst, value):
 def create_driver():
     profile_dir = tempfile.TemporaryDirectory(prefix="vnexpress-chrome-")
     options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument(f"--user-data-dir={profile_dir.name}")
     options.add_argument("--no-first-run")

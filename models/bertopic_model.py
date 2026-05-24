@@ -608,6 +608,100 @@ class VietnameseBERTopicModel:
         }
 
 
+    def get_post_topics_df(self, post_ids: List[str]) -> pd.DataFrame:
+        """
+        Export post-topic assignments theo spec schema cho stg_post_topics.
+
+        Returns:
+            DataFrame với columns:
+              post_id, topic_id, topic_probability, model_type, predicted_at
+        """
+        if self.topics_ is None:
+            raise ValueError("Model chưa được train. Hãy gọi fit() trước.")
+        if len(post_ids) != len(self.topics_):
+            raise ValueError(
+                f"post_ids ({len(post_ids)}) phải bằng số documents đã train ({len(self.topics_)})"
+            )
+
+        probs = self.probs_
+        if probs is not None and hasattr(probs, "shape") and len(probs.shape) == 2:
+            topic_probs = probs.max(axis=1).tolist()
+        else:
+            topic_probs = [1.0] * len(self.topics_)
+
+        return pd.DataFrame({
+            "post_id": post_ids,
+            "topic_id": [int(t) for t in self.topics_],
+            "topic_probability": [float(p) for p in topic_probs],
+            "model_type": "bertopic",
+            "predicted_at": pd.Timestamp.utcnow(),
+        })
+
+    def get_topics_df(
+        self,
+        model_version: str = "bertopic_v1",
+        coherence_score: Optional[float] = None,
+    ) -> pd.DataFrame:
+        """
+        Export topics lookup table theo spec schema cho stg_topics.
+
+        Returns:
+            DataFrame với columns:
+              topic_id, label, top_keywords, coherence_score, model_version, created_at
+        """
+        if self.topics_ is None:
+            raise ValueError("Model chưa được train. Hãy gọi fit() trước.")
+
+        topics_dict = self.get_topics()
+        rows = []
+        now = pd.Timestamp.utcnow()
+        for topic_id in sorted(topics_dict.keys()):
+            words = [word for word, _ in topics_dict[topic_id]]
+            rows.append({
+                "topic_id": int(topic_id),
+                "label": "_".join(words[:3]),
+                "top_keywords": words,
+                "coherence_score": coherence_score,
+                "model_version": model_version,
+                "created_at": now,
+            })
+        return pd.DataFrame(rows)
+
+    def export_parquet(
+        self,
+        output_path: str,
+        post_ids: List[str],
+        model_version: str = "bertopic_v1",
+        coherence_score: Optional[float] = None,
+    ) -> None:
+        """
+        Xuất post-topic assignments và topics lookup ra Parquet.
+
+        Writes:
+            {output_path}/post_topic_assignment.parquet  — stg_post_topics schema
+            {output_path}/topics.parquet                 — stg_topics schema
+
+        Args:
+            output_path: Thư mục output.
+            post_ids: List post_id tương ứng với documents đã train/transform.
+            model_version: Tên version model (e.g., "bertopic_v1").
+            coherence_score: Coherence C_V score từ calculate_coherence().
+        """
+        os.makedirs(output_path, exist_ok=True)
+
+        post_topics_df = self.get_post_topics_df(post_ids)
+        post_topics_path = os.path.join(output_path, "post_topic_assignment.parquet")
+        post_topics_df.to_parquet(post_topics_path, index=False)
+        if self.verbose:
+            print(f"✅ Post-topic assignments → {post_topics_path}")
+
+        topics_df = self.get_topics_df(model_version=model_version, coherence_score=coherence_score)
+        topics_path = os.path.join(output_path, "topics.parquet")
+        topics_df.to_parquet(topics_path, index=False)
+        if self.verbose:
+            print(f"✅ Topics table → {topics_path}")
+
+
 # Helper function cho batch processing (nếu dataset lớn)
 def train_bertopic_batch(
     documents: List[str],

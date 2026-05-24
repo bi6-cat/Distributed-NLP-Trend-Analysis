@@ -1,1 +1,0 @@
-{"repos": [{"repoId": "vinai/phobert-base", "repoType": "model", "commitHash": "c1e37c5c86f918761049cef6fa216b4779d0d01d", "filePaths": ["tokenizer.json", "bpe.codes", "config.json", "pytorch_model.bin", "vocab.txt"]}, {"repoId": "vinai/phobert-base", "repoType": "model", "commitHash": "92f45c73e86450797c850a26ba9410a95dd7d897", "filePaths": ["model.safetensors"]}]}

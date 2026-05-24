@@ -507,12 +507,16 @@ Distributed-NLP-Trend-Analysis/
 
 ## Checklist Phase Gate
 
-### ✅ Phase 1 Done khi:
-- [ ] Cluster chạy được Spark job multi-node (M2)
-- [ ] ≥ 100K raw records trong HDFS (M1)
-- [ ] ClickHouse + dbt setup xong (M2)
-- [ ] VnCoreNLP chạy được trên mọi node (M4)
-- [ ] ClickHouse schema khởi tạo xong (M5)
+### ✅ Phase 1, Phase 2, Phase 3 Đã hoàn thành (Done)
+- [x] Cluster Docker Compose chạy ổn định (M2) thay vì Vagrant
+- [x] ≥ 100K raw records đã được xử lý (M1)
+- [x] Spark pipelines + NLP models (Trích xuất chủ đề, Sentiment Analysis) hoàn tất (M3, M4)
+- [x] Cơ sở dữ liệu, Streamlit UI và Automations hoạt động end-to-end (M5)
+
+### 🚀 Phase 4 (Gần hoàn thành)
+- [ ] Soạn Benchmark (so sánh Docker vs Local)
+- [ ] Wrap-up tài liệu báo cáo đầy đủ
+- [ ] Ready Demo Live
 
 ### ✅ Phase 2 Done khi:
 - [ ] LSH dedup pipeline ra kết quả, Jaccard ≥ 0.8 (M2)

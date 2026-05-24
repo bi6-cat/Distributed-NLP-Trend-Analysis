@@ -9,6 +9,17 @@ data/*.db
 !data/stopwords_vi.txt
 !data/slang_dict.json
 
+# ── Preprocessed / output data (generated, không commit) ──────
+data/preprocessed/stg_posts_core/source=*/
+data/preprocessed/*.csv
+data/preprocessed/*.parquet
+output/
+crawlers/data/
+
+# ── Runtime files ──────────────────────────────────────────────
+*.pid
+airflow-webserver.pid
+
 # ── Vagrant & Tutorial work ──────────
 .vagrant/
 tutorial_work/

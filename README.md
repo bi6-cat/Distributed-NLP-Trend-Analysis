@@ -1,7 +1,7 @@
 # Vietnamese Tech Trend & Controversy Radar
 ### Hệ thống phân tích xu hướng & dư luận mạng xã hội Việt Nam — Big Data + NLP trên HPC Cluster
 
-> **Trạng thái:** 🟢 Phase 1 — Thiết kế & Thu thập dữ liệu
+> **Trạng thái:** 🟢 Phase 4 — Tổng hợp Benchmark, Báo cáo & Chuẩn bị Demo Live (Gần hoàn thành)
 
 ---
 
@@ -36,7 +36,7 @@ Dự án coi là **hoàn thành** khi đáp ứng đủ các tiêu chí sau:
 ```
 Member 1 (Data Engineer)   →  Thu thập bài đăng từ VOZ, VnExpress, YouTube
 
-Member 2 (DevOps/Infra)    →  Dựng HPC cluster, Spark, HDFS bằng Ansible
+Member 2 (DevOps/Infra)    →  Dựng Server hạ tầng, Spark, HDFS bằng Docker Compose
 
 Member 3 (ML Engineer)     →  Trả lời câu hỏi: "Người ta đang nói về chủ đề gì?"
                                LDA + BERTopic + Count-Min Sketch
@@ -68,13 +68,13 @@ Member 5 (Full-stack)      →  Biến tất cả thành thứ người thườn
    └── BERTopic/LDA → phân cụm chủ đề
           │  result
           ▼
-     PostgreSQL (structured results)
+     ClickHouse (structured results)
           │  query
           ▼
    Streamlit Dashboard  ← user xem ở đây
 ```
 
-> **Quản lý hạ tầng:** Ansible tự động cấu hình toàn bộ cluster
+> **Quản lý hạ tầng:** Docker Compose tự động cấp phát, cấu hình các container
 > **Lên lịch pipeline:** Apache Airflow chạy tự động
 
 ---
@@ -120,12 +120,18 @@ cd Distributed-NLP-Trend-Analysis
 # 2. Đọc tài liệu theo thứ tự này:
 #    README.md (file này)  →  TEAM_ASSIGNMENTS.md  →  TECH_STACK.md
 
-# 3. Setup môi trường local để dev
-docker-compose up -d          # Khởi động MongoDB + PostgreSQL local
+# 3. Khởi chạy toàn bộ hạ tầng (Server/Docker)
+docker-compose up -d
 
+# Có thể cài thêm môi trường Python local nếu muốn test/dev kịch bản ngoài Docker:
 conda create -n nlp-trend python=3.10
 conda activate nlp-trend
 pip install -r requirements.txt
 
-# 4. Liên hệ Member 2 để được cấp quyền truy cập HPC cluster
+# 4. Cấp quyền & Chạy từ A-Z (Crawling -> Spark -> DB)
+chmod +x run_pipeline.sh scripts/*.sh
+./run_pipeline.sh
+
+# 5. Chạy giao diện Web (Streamlit UI)
+streamlit run dashboard/app.py
 ```

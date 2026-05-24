@@ -48,12 +48,16 @@ Phụ thuộc:
     - Cài đặt: pip install mmh3
 """
 
+import hashlib
 import math
 import pickle
 import sys
 from typing import Generator, Iterator, List, Optional, Tuple
 
-import mmh3  # MurmurHash3 — hash phi mã hóa, nhanh, phân phối đều  # noqa: F401
+try:
+    import mmh3  # type: ignore  # noqa: F401
+except ImportError:
+    mmh3 = None
 
 
 class CountMinSketch:
@@ -141,7 +145,14 @@ class CountMinSketch:
         Returns:
             int: Chỉ số cột trong [0, w).
         """
-        return mmh3.hash(item, seed=seed) % self.w
+        if mmh3 is not None:
+            return mmh3.hash(item, seed=seed) % self.w
+
+        # Fallback ổn định khi container chưa cài mmh3.
+        # blake2b deterministic theo item+seed, đủ tốt cho CMS trong pipeline.
+        payload = f"{seed}:{item}".encode("utf-8", errors="ignore")
+        digest = hashlib.blake2b(payload, digest_size=8).digest()
+        return int.from_bytes(digest, byteorder="big", signed=False) % self.w
 
     # ── Thao tác chính ──────────────────────────────────────────
 

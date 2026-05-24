@@ -15,7 +15,7 @@ SELECT
     -- Volume metrics
     count(*)                                        AS mention_count,
     sum(s.engagement)                               AS engagement_sum,
-    uniqExact(s.author_id)                          AS unique_authors,
+    uniqExact(s.author)                             AS unique_authors,
 
     -- Atomic metric sums
     sum(s.reaction_count)                           AS reaction_sum,
@@ -34,7 +34,7 @@ SELECT
 FROM (
     SELECT
         topic_id, source, source_type, created_at,
-        engagement, author_id, reaction_count, comment_count,
+        engagement, author, reaction_count, comment_count,
         view_count, sentiment_label
     FROM {{ ref('stg_posts') }}
 ) AS s
