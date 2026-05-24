@@ -6,7 +6,7 @@ tech_trend_dbt:
       driver: http
       host: clickhouse
       port: 8123
-      user: admin
-      password: clickhouse_secret
+      user: root
+      password: root
       schema: tech_radar
       threads: 4

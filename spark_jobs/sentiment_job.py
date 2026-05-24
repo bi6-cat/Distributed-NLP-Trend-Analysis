@@ -31,6 +31,7 @@ Biến môi trường:
 """
 
 import os
+import shutil
 import time
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import lit
@@ -49,8 +50,8 @@ MODEL_VERSION = os.environ.get("NLP_MODEL_VERSION", "phobert_v1")
 CLICKHOUSE_HOST = os.environ.get("CLICKHOUSE_HOST", "192.168.56.14")
 CLICKHOUSE_PORT = os.environ.get("CLICKHOUSE_PORT", "8123")
 CLICKHOUSE_DB   = os.environ.get("CLICKHOUSE_DB",   "tech_radar")
-CLICKHOUSE_USER = os.environ.get("CLICKHOUSE_USER", "default")
-CLICKHOUSE_PASS = os.environ.get("CLICKHOUSE_PASS", "")
+CLICKHOUSE_USER = os.environ.get("CLICKHOUSE_USER", "root")
+CLICKHOUSE_PASS = os.environ.get("CLICKHOUSE_PASS", "root")
 
 HDFS_COPY_TIMEOUT = int(os.environ.get("HDFS_COPY_TIMEOUT", "300"))   # FIX ⑤
 LIMIT_SAMPLES     = os.environ.get("LIMIT_SAMPLES", None)
@@ -73,6 +74,131 @@ OUTPUT_SCHEMA = StructType([
 # ---------------------------------------------------------------------------
 _MODEL_CACHE: dict = {}
 _RESOLVED_MODEL_PATH: dict = {}   # cache kaggle/hdfs → local path, per executor process
+
+
+def _is_valid_model_dir(path: str) -> bool:
+    """Kiểm tra thư mục model có đủ file tối thiểu để load."""
+    if not path or not os.path.isdir(path):
+        return False
+
+    required_any = [
+        "model.safetensors",
+        "pytorch_model.bin",
+        "model.safetensors.index.json",
+    ]
+    required_all = [
+        "config.json",
+        "tokenizer_config.json",
+    ]
+
+    for fname in required_all:
+        if not os.path.exists(os.path.join(path, fname)):
+            return False
+
+    if not any(os.path.exists(os.path.join(path, fname)) for fname in required_any):
+        return False
+
+    return True
+
+
+def _prepare_kaggle_model(handle: str) -> str:
+    """
+    Tải model từ Kaggle vào thư mục local ổn định với file lock.
+
+    Lý do:
+    - cache của kagglehub có thể bị nhiều python worker đụng cùng lúc
+    - worker khác có thể đọc trúng file safetensors chưa tải/copy xong
+    """
+    import fcntl
+    import tempfile
+    from pathlib import Path
+
+    safe_name = handle.replace("/", "__").replace(":", "__")
+    base_dir = os.path.join(tempfile.gettempdir(), "kaggle_models")
+    final_dir = os.path.join(base_dir, safe_name)
+    tmp_dir = final_dir + ".tmp"
+    lock_path = final_dir + ".lock"
+
+    os.makedirs(base_dir, exist_ok=True)
+
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            if _is_valid_model_dir(final_dir):
+                print(f"[MODEL] Reusing prepared Kaggle model: {final_dir}", flush=True)
+                return final_dir
+
+            shutil.rmtree(final_dir, ignore_errors=True)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+            os.environ["HOME"] = tempfile.gettempdir()
+            os.environ["KAGGLE_CONFIG_DIR"] = tempfile.gettempdir()
+            os.environ["KAGGLEHUB_CACHE"] = os.path.join(tempfile.gettempdir(), "kaggle_cache")
+
+            import kagglehub
+            print(f"[MODEL] Downloading from Kaggle: {handle}", flush=True)
+            downloaded_base = kagglehub.model_download(handle)
+
+            source_dir = None
+            for root_dir, _, files in os.walk(downloaded_base):
+                if "config.json" in files and (
+                    "model.safetensors" in files
+                    or "pytorch_model.bin" in files
+                    or "model.safetensors.index.json" in files
+                ):
+                    source_dir = root_dir
+                    break
+
+            if source_dir is None:
+                raise RuntimeError(f"Cannot locate usable model files under {downloaded_base}")
+
+            shutil.copytree(source_dir, tmp_dir)
+            if not _is_valid_model_dir(tmp_dir):
+                raise RuntimeError(f"Downloaded model is incomplete at {tmp_dir}")
+
+            Path(tmp_dir).replace(final_dir)
+            print(f"[MODEL] Prepared Kaggle model at: {final_dir}", flush=True)
+            return final_dir
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+
+def _stage_local_model(source_path: str, local_name: str) -> str:
+    """
+    Copy model local từ bind mount sang tmp nội bộ container để tránh I/O chậm
+    trên filesystem Windows/WSL khi load safetensors lớn.
+    """
+    import fcntl
+    import tempfile
+
+    if not _is_valid_model_dir(source_path):
+        raise RuntimeError(f"Local model path không hợp lệ: {source_path}")
+
+    normalized_source = os.path.abspath(source_path)
+    temp_root = tempfile.gettempdir()
+    if normalized_source.startswith(temp_root):
+        return normalized_source
+
+    local = os.path.join(temp_root, local_name)
+    lock_path = local + ".lock"
+
+    with open(lock_path, "w") as lock_file:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            if _is_valid_model_dir(local):
+                print(f"[MODEL] Reusing staged local model: {local}", flush=True)
+                return local
+
+            shutil.rmtree(local, ignore_errors=True)
+            print(f"[MODEL] Staging local model {source_path} -> {local}", flush=True)
+            shutil.copytree(source_path, local)
+
+            if not _is_valid_model_dir(local):
+                raise RuntimeError(f"Staged local model is incomplete at {local}")
+
+            return local
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
 
 
 def _hdfs_to_local(hdfs_path: str, local_name: str) -> str:
@@ -160,18 +286,23 @@ def _get_model(model_path: str, device):
     print(f"[MODEL] Loading từ {model_path} ...", flush=True)
     t0 = time.time()
 
-    config    = AutoConfig.from_pretrained(model_path, local_files_only=True)
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_path,
-        config=config,
-        local_files_only=True,
-        use_fast=False,
-    )
-    model = AutoModelForSequenceClassification.from_pretrained(
-        model_path,
-        config=config,
-        local_files_only=True,
-    )
+    try:
+        config    = AutoConfig.from_pretrained(model_path, local_files_only=True)
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_path,
+            config=config,
+            local_files_only=True,
+            use_fast=False,
+        )
+        model = AutoModelForSequenceClassification.from_pretrained(
+            model_path,
+            config=config,
+            local_files_only=True,
+        )
+    except Exception:
+        # Nếu cache local đang hỏng thì lần sau caller có thể tái tạo lại thư mục model.
+        _MODEL_CACHE.pop(model_path, None)
+        raise
     model.to(device)
     model.eval()
 
@@ -232,28 +363,17 @@ def process_partition(iterator):
     model_path    = os.environ.get("NLP_MODEL_PATH",    "models/phobert_finetuned/final")
     model_version = os.environ.get("NLP_MODEL_VERSION", "phobert_v1")
 
-    if kaggle_handle:
+    if _is_valid_model_dir(model_path):
+        model_path = _stage_local_model(model_path, "phobert_finetuned_local")
+        print(f"[MODEL] Using local model path: {model_path}", flush=True)
+    elif kaggle_handle:
         if kaggle_handle in _RESOLVED_MODEL_PATH:
             model_path = _RESOLVED_MODEL_PATH[kaggle_handle]
             print(f"[MODEL] Reusing cached Kaggle path: {model_path}", flush=True)
         else:
-            import tempfile
-            os.environ["HOME"] = tempfile.gettempdir()
-            os.environ["KAGGLE_CONFIG_DIR"] = tempfile.gettempdir()
-            os.environ["KAGGLEHUB_CACHE"] = os.path.join(tempfile.gettempdir(), "kaggle_cache")
-
-            import kagglehub
-            print(f"[MODEL] Đang tải từ Kaggle: {kaggle_handle}", flush=True)
-            base_path = kagglehub.model_download(kaggle_handle)
-
-            model_path = base_path
-            for root_dir, dirs, files in os.walk(base_path):
-                if "config.json" in files:
-                    model_path = root_dir
-                    break
+            model_path = _prepare_kaggle_model(kaggle_handle)
             _RESOLVED_MODEL_PATH[kaggle_handle] = model_path
-            print(f"[MODEL] Đường dẫn thực tế chứa model: {model_path}", flush=True)
-
+            print(f"[MODEL] Local Kaggle model path: {model_path}", flush=True)
     else:
         # Copy HDFS model về local (với lock, với retry timeout đúng)
         model_path = _hdfs_to_local(model_path, "phobert_finetuned")

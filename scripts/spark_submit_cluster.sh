@@ -123,7 +123,7 @@ submit_job() {
         --conf "spark.executorEnv.CLICKHOUSE_HOST=$CLICKHOUSE_HOST" \
         --conf "spark.executorEnv.CLICKHOUSE_PORT=8123" \
         --conf "spark.executorEnv.CLICKHOUSE_DB=tech_radar" \
-        --conf "spark.executorEnv.CLICKHOUSE_USER=default" \
+        --conf "spark.executorEnv.CLICKHOUSE_USER=root" \
         \
         "/opt/spark/work-dir/spark_jobs/cleaning_job.py"
 }

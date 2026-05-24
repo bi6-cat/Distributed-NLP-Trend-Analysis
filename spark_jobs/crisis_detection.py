@@ -5,6 +5,7 @@ import json
 import os
 import pickle
 from datetime import date
+import tempfile
 
 import numpy as np
 import pandas as pd
@@ -29,11 +30,9 @@ from pyspark.sql.types import (
     StructType,
 )
 
-from spark_jobs.clickhouse_hdfs import query_df, tmp_hdfs_dir, write_parquet_and_ingest
-
 HDFS_STG_POSTS_CORE = os.environ.get(
     "HDFS_STG_POSTS_CORE",
-    "hdfs://namenode:9000/user/zett/staged/stg_posts_core",
+    "hdfs://namenode:9000/user/root/staged/stg_posts_core",
 )
 IF_MODEL_PATH   = os.environ.get("IF_MODEL_PATH",  "/tmp/airflow_models/isolation_forest_hourly.pkl")
 CLF_MODEL_PATH  = os.environ.get("CLF_MODEL_PATH", "/tmp/airflow_models/crisis_classifier.pkl")
@@ -42,6 +41,11 @@ FEAT1_JSON_PATH = os.environ.get("FEAT1_JSON_PATH", os.path.join(_models_dir, "f
 FEAT2_JSON_PATH = os.environ.get("FEAT2_JSON_PATH", os.path.join(_models_dir, "features_tier2.json"))
 Z_SCORE_THRESHOLD = float(os.environ.get("Z_SCORE_THRESHOLD", "2.0"))
 TARGET_DATE       = os.environ.get("TARGET_DATE", str(date.today()))
+CLICKHOUSE_HOST   = os.environ.get("CLICKHOUSE_HOST", "clickhouse")
+CLICKHOUSE_PORT   = int(os.environ.get("CLICKHOUSE_PORT", "8123"))
+CLICKHOUSE_DB     = os.environ.get("CLICKHOUSE_DB", "tech_radar")
+CLICKHOUSE_USER   = os.environ.get("CLICKHOUSE_USER", "root")
+CLICKHOUSE_PASS   = os.environ.get("CLICKHOUSE_PASS", "root")
 
 FEATURES_TIER1_DEFAULT = [
     "comment_count", "velocity_ratio", "acceleration",
@@ -61,6 +65,44 @@ BASELINE_SCHEMA = StructType([
     StructField("baseline_median", FloatType(),   True),
     StructField("baseline_std",    FloatType(),   True),
 ])
+
+
+def _get_clickhouse_client():
+    import clickhouse_connect
+
+    return clickhouse_connect.get_client(
+        host=CLICKHOUSE_HOST,
+        port=CLICKHOUSE_PORT,
+        database=CLICKHOUSE_DB,
+        username=CLICKHOUSE_USER,
+        password=CLICKHOUSE_PASS,
+    )
+
+
+def query_df(query: str) -> pd.DataFrame:
+    client = _get_clickhouse_client()
+    result = client.query_df(query)
+    client.close()
+    return result
+
+
+def tmp_hdfs_dir(name: str) -> str:
+    base = os.environ.get("HDFS_TMP_DIR", tempfile.gettempdir())
+    return os.path.join(base, name.replace("/", "_"))
+
+
+def write_parquet_and_ingest(df, table_name: str, tmp_dir: str, truncate: bool = False) -> None:
+    client = _get_clickhouse_client()
+    os.makedirs(tmp_dir, exist_ok=True)
+    pdf = df.toPandas()
+
+    if truncate:
+        client.command(f"TRUNCATE TABLE IF EXISTS {CLICKHOUSE_DB}.{table_name}")
+
+    if not pdf.empty:
+        client.insert_df(table_name, pdf)
+
+    client.close()
 
 
 def _load_pkl(path: str):

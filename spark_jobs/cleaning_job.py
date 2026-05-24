@@ -41,6 +41,8 @@ import logging
 import os
 import re
 import sys
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone, date
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -65,6 +67,11 @@ HDFS_OUT   = os.environ.get("HDFS_OUTPUT",  f"{HDFS_BASE}{HDFS_HOME}/staged/stg_
 
 SLANG_PATH = os.environ.get("NLP_SLANG_DICT", f"{HDFS_BASE}{HDFS_HOME}/ref/slang_dict.json")
 STOP_PATH  = os.environ.get("NLP_STOPWORDS",  f"{HDFS_BASE}{HDFS_HOME}/ref/stopwords_vi.txt")
+CLICKHOUSE_HOST = os.environ.get("CLICKHOUSE_HOST", "clickhouse")
+CLICKHOUSE_PORT = os.environ.get("CLICKHOUSE_PORT", "8123")
+CLICKHOUSE_DB = os.environ.get("CLICKHOUSE_DB", "tech_radar")
+CLICKHOUSE_USER = os.environ.get("CLICKHOUSE_USER", "root")
+CLICKHOUSE_PASS = os.environ.get("CLICKHOUSE_PASS", "root")
 
 # ── Output Schema (khớp với ClickHouse stg_posts_core) ───────────────────────
 OUTPUT_SCHEMA = StructType([
@@ -82,6 +89,25 @@ OUTPUT_SCHEMA = StructType([
     StructField("created_at",     TimestampType(), True), 
     StructField("crawled_at",     TimestampType(), False),
 ])
+
+
+def _execute_clickhouse_sql(query: str) -> None:
+    """Execute SQL against ClickHouse over HTTP without extra module dependencies."""
+    url = (
+        f"http://{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/"
+        f"?database={urllib.parse.quote(CLICKHOUSE_DB)}"
+        f"&user={urllib.parse.quote(CLICKHOUSE_USER)}"
+        f"&password={urllib.parse.quote(CLICKHOUSE_PASS)}"
+    )
+    payload = query.encode("utf-8")
+    request = urllib.request.Request(url, data=payload, method="POST")
+
+    with urllib.request.urlopen(request, timeout=60) as response:
+        if response.status >= 400:
+            body = response.read().decode("utf-8", errors="replace")
+            raise RuntimeError(
+                f"ClickHouse HTTP {response.status} while executing SQL: {body[:300]}"
+            )
 
 
 # ── Worker function (chạy trên mỗi Spark executor) ───────────────────────────
@@ -606,12 +632,12 @@ def main():
     # tên thư mục (source=voz/, source=vnexpress/, ...).
     # Dùng virtual column _path của ClickHouse để extract source từ path.
     try:
-        from spark_jobs.clickhouse_hdfs import execute_sql
-
         hdfs_glob = f"{HDFS_OUT.rstrip('/')}/*/*.parquet"
-        execute_sql("TRUNCATE TABLE IF EXISTS stg_posts_core")
-        execute_sql(
-            f"INSERT INTO stg_posts_core"
+        _execute_clickhouse_sql(
+            f"TRUNCATE TABLE IF EXISTS {CLICKHOUSE_DB}.stg_posts_core"
+        )
+        _execute_clickhouse_sql(
+            f"INSERT INTO {CLICKHOUSE_DB}.stg_posts_core"
             f" (post_id, source, author, title, body, segmented_text, parent_id,"
             f"  reaction_count, comment_count, view_count, created_at, crawled_at)"
             f" SELECT"

@@ -6,9 +6,11 @@ Dự án: Vietnamese Social Media Trend & Controversy Analysis System
 
 File này chứa 2 DAGs:
 
-1. daily_processing_pipeline (2:00 AM hàng ngày):
-    crawl → spark_cleaning → [lda | sentiment | cms_keyword_counting] song song
-    → save_lda_to_clickhouse + dbt_transform → pipeline_end
+1. full_processing_pipeline:
+    crawl → spark_cleaning → lda_topic_modeling → sentiment_analysis
+    ├→ save_lda_to_clickhouse
+    ├→ cms_keyword_counting
+    └→ dbt_transform → pipeline_end
     Nguồn dữ liệu chung: stg_posts_core (cleaning output)
 
 2. bertopic_weekly_inference (Chủ nhật 3:00 AM):
@@ -56,11 +58,20 @@ from airflow.utils.dates import days_ago
 
 logger = logging.getLogger("processing_dag")
 
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
 HDFS_NAMENODE: str = os.getenv("HDFS_NAMENODE", "namenode:9000")
 WEBHDFS_HOST: str = os.getenv("WEBHDFS_HOST", "namenode:9870")
+WEBHDFS_HOSTNAME: str = WEBHDFS_HOST.split(":")[0]
 HDFS_USER: str = os.getenv("HDFS_USER", os.getenv("HADOOP_USER_NAME", "root"))
 HDFS_USER_DIR: str = f"/user/{HDFS_USER}"
 HDFS_URI_PREFIX: str = f"hdfs://{HDFS_NAMENODE}"
+SPARK_MASTER: str = os.getenv("SPARK_MASTER_URL", "spark://spark-master:7077")
 
 # ── Đường dẫn HDFS ──
 # stg_posts_core là nguồn duy nhất dùng chung cho LDA và BERTopic
@@ -72,9 +83,12 @@ HDFS_CMS_TOPK_PATH:  str = "/data/results/cms/top_keywords.json"
 
 # ── Đường dẫn local (Docker volume /opt/airflow) ──
 # cleaning ghi ra đây → LDA và BERTopic đọc từ đây (cùng nguồn)
-STAGED_LOCAL_PATH:   str = "/opt/airflow/data/preprocessed/stg_posts_core"
-RAW_LOCAL_PATH:      str = "/opt/airflow/crawlers/data"
-LDA_LOCAL_OUTPUT:    str = "/opt/airflow/output/lda"
+STAGED_LOCAL_PATH:   str = os.getenv("STAGED_LOCAL_PATH", "/opt/airflow/data/preprocessed/stg_posts_core")
+RAW_LOCAL_PATH:      str = os.getenv("RAW_LOCAL_PATH", "/opt/airflow/crawlers/data")
+LDA_LOCAL_OUTPUT:    str = os.getenv("LDA_LOCAL_OUTPUT", "/opt/airflow/output/lda")
+LOCAL_SENTIMENT_MODEL_PATH: str = os.getenv("LOCAL_SENTIMENT_MODEL_PATH", "/opt/airflow/models/phobert_finetuned/final")
+LOCAL_STOPWORDS_PATH: str = os.getenv("LOCAL_STOPWORDS_PATH", "/opt/airflow/data/stopwords_vi.txt")
+LOCAL_SLANG_DICT_PATH: str = os.getenv("LOCAL_SLANG_DICT_PATH", "/opt/airflow/data/slang_dict.json")
 LOCAL_CMS_STATE_PATH: str = "output/cms/cms_state.pkl"
 LOCAL_CMS_TOPK_PATH:  str = "output/cms/top_keywords.json"
 
@@ -90,14 +104,16 @@ CMS_TOP_K: int = 50      # Xuất top-50 keywords
 # ── Chế độ chạy ──
 # True: dùng local file system (dev/test)
 # False: dùng HDFS (production trên cluster)
-USE_LOCAL: bool = True    # True = dùng local volume mount (Docker). False = dùng HDFS (production cluster thật).
+USE_LOCAL: bool = _env_bool("USE_LOCAL", False)
 
 # ── ClickHouse config ──
 # TODO [Member 2/5]: Cấu hình ClickHouse connection
-CLICKHOUSE_HOST: str = "clickhouse"
-CLICKHOUSE_PORT: int = 8123
-CLICKHOUSE_DB: str = "tech_radar"
-CLICKHOUSE_TABLE: str = "stg_keyword_freq"
+CLICKHOUSE_HOST: str = os.getenv("CLICKHOUSE_HOST", "clickhouse")
+CLICKHOUSE_PORT: int = int(os.getenv("CLICKHOUSE_PORT", "8123"))
+CLICKHOUSE_DB: str = os.getenv("CLICKHOUSE_DB", "tech_radar")
+CLICKHOUSE_TABLE: str = os.getenv("CLICKHOUSE_TABLE", "stg_keyword_freq")
+CLICKHOUSE_USER: str = os.getenv("CLICKHOUSE_USER", "root")
+CLICKHOUSE_PASSWORD: str = os.getenv("CLICKHOUSE_PASSWORD", "root")
 
 
 # ============================================================================
@@ -248,6 +264,7 @@ def _load_stg_posts_core_window(window_minutes: int = 15):
         DataFrame với columns: clean_text (hoặc segmented_text), source, crawled_at
     """
     import io
+    import re
     import pandas as pd
     import requests as _req
 
@@ -268,6 +285,27 @@ def _load_stg_posts_core_window(window_minutes: int = 15):
         df["source"] = src.fillna("unknown").replace("nan", "unknown")
         return df[["text", "source"]].dropna(subset=["text"])
 
+    def _list_hdfs_parquet_files_recursive(webhdfs_base: str, hdfs_dir: str) -> List[str]:
+        resp = _req.get(
+            f"{webhdfs_base}{hdfs_dir}?op=LISTSTATUS&user.name={HDFS_USER}",
+            timeout=30,
+        )
+        resp.raise_for_status()
+
+        parquet_files: List[str] = []
+        for status in resp.json()["FileStatuses"]["FileStatus"]:
+            path_suffix = status["pathSuffix"]
+            child_path = f"{hdfs_dir.rstrip('/')}/{path_suffix}"
+            if status["type"] == "FILE" and path_suffix.endswith(".parquet"):
+                parquet_files.append(child_path)
+            elif status["type"] == "DIRECTORY":
+                parquet_files.extend(_list_hdfs_parquet_files_recursive(webhdfs_base, child_path))
+        return parquet_files
+
+    def _extract_source_from_hdfs_path(path: str) -> Optional[str]:
+        match = re.search(r"/source=([^/]+)/", path)
+        return match.group(1) if match else None
+
     if USE_LOCAL:
         if not os.path.isdir(STAGED_LOCAL_PATH):
             logger.warning(f"[LOCAL] {STAGED_LOCAL_PATH} chưa tồn tại — chạy cleaning trước")
@@ -278,21 +316,21 @@ def _load_stg_posts_core_window(window_minutes: int = 15):
     else:
         webhdfs = f"http://{WEBHDFS_HOST}/webhdfs/v1"
         hdfs_path = f"{HDFS_USER_DIR}/staged/stg_posts_core"
-        r = _req.get(
-            f"{webhdfs}{hdfs_path}?op=LISTSTATUS&user.name={HDFS_USER}",
-            timeout=30,
-        )
-        r.raise_for_status()
-        files = [
-            s["pathSuffix"] for s in r.json()["FileStatuses"]["FileStatus"]
-            if s["pathSuffix"].endswith(".parquet") and s["type"] == "FILE"
-        ]
+        files = _list_hdfs_parquet_files_recursive(webhdfs, hdfs_path)
         dfs = []
         for fname in files:
-            resp = _req.get(f"{webhdfs}{hdfs_path}/{fname}?op=OPEN&user.name={HDFS_USER}",
-                            allow_redirects=True, timeout=120)
+            resp = _req.get(
+                f"{webhdfs}{fname}?op=OPEN&user.name={HDFS_USER}",
+                allow_redirects=True,
+                timeout=120,
+            )
             resp.raise_for_status()
-            dfs.append(pd.read_parquet(io.BytesIO(resp.content)))
+            part_df = pd.read_parquet(io.BytesIO(resp.content))
+            if "source" not in part_df.columns:
+                source_name = _extract_source_from_hdfs_path(fname)
+                if source_name:
+                    part_df["source"] = source_name
+            dfs.append(part_df)
         if not dfs:
             logger.warning("[CLUSTER] stg_posts_core: không có parquet file")
             return pd.DataFrame(columns=["text", "source"])
@@ -467,8 +505,8 @@ def task_export_top_keywords(**context) -> Optional[List[Dict]]:
         import clickhouse_connect
         client = clickhouse_connect.get_client(
             host=ch_host, port=CLICKHOUSE_PORT,
-            username=os.environ.get("CLICKHOUSE_USER", "admin"),
-            password=os.environ.get("CLICKHOUSE_PASSWORD", "clickhouse_secret"),
+            username=os.environ.get("CLICKHOUSE_USER", "root"),
+            password=os.environ.get("CLICKHOUSE_PASSWORD", "root"),
             database=CLICKHOUSE_DB,
         )
         df_out = pd.DataFrame(results)
@@ -495,17 +533,17 @@ def task_export_top_keywords(**context) -> Optional[List[Dict]]:
     return results
 
 
-# cms_keyword_streaming DAG đã được gộp vào daily_processing_pipeline
+# cms_keyword_streaming DAG đã được gộp vào full_processing_pipeline
 # (task cms_keyword_counting chạy sau spark_cleaning, song song với LDA + sentiment)
 
 
 # ============================================================================
-# TASK — CMS daily batch (dùng trong daily_processing_pipeline)
+# TASK — CMS daily batch (dùng trong full_processing_pipeline)
 # ============================================================================
 
 def task_run_cms_daily() -> None:
     """
-    CMS keyword counting — chạy sau spark_cleaning trong daily_processing_pipeline.
+    CMS keyword counting — chạy sau sentiment_analysis trong full_processing_pipeline.
 
     Input:  stg_posts_core (STAGED_LOCAL_PATH hoặc STAGED_HDFS_PATH)
             — cùng nguồn với LDA và BERTopic, window 24h (crawled_at hôm nay)
@@ -556,7 +594,7 @@ def task_run_cms_daily() -> None:
         tokens = _tokenize_text(str(row["text"]), stopwords, slang_dict)
         src = str(row.get("source", "unknown"))
         if src not in source_cms:
-            source_cms[src] = _CMS(depth=5, width=4096)
+            source_cms[src] = _CMS(d=5, w=4096)
         for token in tokens:
             source_cms[src].add(token)
             source_keywords.setdefault(src, set()).add(token)
@@ -590,8 +628,8 @@ def task_run_cms_daily() -> None:
         import clickhouse_connect
         client = clickhouse_connect.get_client(
             host=ch_host, port=CLICKHOUSE_PORT,
-            username=os.environ.get("CLICKHOUSE_USER", "admin"),
-            password=os.environ.get("CLICKHOUSE_PASSWORD", "clickhouse_secret"),
+            username=os.environ.get("CLICKHOUSE_USER", "root"),
+            password=os.environ.get("CLICKHOUSE_PASSWORD", "root"),
             database=CLICKHOUSE_DB,
         )
         df_out = _pd.DataFrame(results)
@@ -613,7 +651,7 @@ def task_run_cms_daily() -> None:
 
 
 # ============================================================================
-# HELPER FUNCTION — LDA → ClickHouse (dùng trong daily_processing_pipeline)
+# HELPER FUNCTION — LDA → ClickHouse (dùng trong full_processing_pipeline)
 # ============================================================================
 
 def task_save_lda_to_clickhouse() -> None:
@@ -623,29 +661,84 @@ def task_save_lda_to_clickhouse() -> None:
     Local/Docker: đọc parquet từ LDA_LOCAL_OUTPUT (volume mount).
     Cluster:      đọc parquet từ LDA_HDFS_OUTPUT qua WebHDFS.
     """
+    import io
     import sys as _sys
+    import pandas as _pd
+    import requests as _req
+
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     _sys.path.insert(0, root)
-    from scripts.save_topics_to_ch import main as save_to_ch
+    from scripts.save_topics_to_ch import (
+        create_tables,
+        export_handoff_summary,
+        get_ch_client,
+        insert_stg_post_topics,
+        insert_stg_topics,
+        verify_load,
+    )
 
-    ch_host = os.environ.get("CLICKHOUSE_HOST", "clickhouse")
+    def _read_hdfs_parquet_dataset(hdfs_dir: str) -> _pd.DataFrame:
+        webhdfs = f"http://{WEBHDFS_HOST}/webhdfs/v1"
+        list_url = f"{webhdfs}{hdfs_dir}?op=LISTSTATUS&user.name={HDFS_USER}"
+        resp = _req.get(list_url, timeout=30)
+        resp.raise_for_status()
+
+        parts = [
+            status["pathSuffix"]
+            for status in resp.json()["FileStatuses"]["FileStatus"]
+            if status["type"] == "FILE" and status["pathSuffix"].endswith(".parquet")
+        ]
+        if not parts:
+            raise FileNotFoundError(f"Không tìm thấy parquet part files trong HDFS dir: {hdfs_dir}")
+
+        dfs = []
+        for part in parts:
+            open_url = f"{webhdfs}{hdfs_dir}/{part}?op=OPEN&user.name={HDFS_USER}"
+            part_resp = _req.get(open_url, allow_redirects=True, timeout=120)
+            part_resp.raise_for_status()
+            dfs.append(_pd.read_parquet(io.BytesIO(part_resp.content)))
+        return _pd.concat(dfs, ignore_index=True)
+
+    ch_host = os.environ.get("CLICKHOUSE_HOST", CLICKHOUSE_HOST)
+    ch_user = os.environ.get("CLICKHOUSE_USER", CLICKHOUSE_USER)
+    ch_pass = os.environ.get("CLICKHOUSE_PASSWORD", os.environ.get("CLICKHOUSE_PASS", CLICKHOUSE_PASSWORD))
+
     if USE_LOCAL:
-        save_to_ch(input_dir=LDA_LOCAL_OUTPUT, host=ch_host, port=CLICKHOUSE_PORT)
+        topics_df = _pd.read_parquet(os.path.join(LDA_LOCAL_OUTPUT, "topics.parquet"))
+        post_topics_df = _pd.read_parquet(os.path.join(LDA_LOCAL_OUTPUT, "post_topic_assignment.parquet"))
     else:
-        save_to_ch(hdfs_base=f"{HDFS_USER_DIR}/results/lda", host=ch_host, port=CLICKHOUSE_PORT)
+        topics_df = _read_hdfs_parquet_dataset(f"{HDFS_USER_DIR}/results/lda/topics")
+        post_topics_df = _read_hdfs_parquet_dataset(f"{HDFS_USER_DIR}/results/lda/post_topic_assignment")
+
+    client = get_ch_client(
+        host=ch_host,
+        port=CLICKHOUSE_PORT,
+        database=CLICKHOUSE_DB,
+        username=ch_user,
+        password=ch_pass,
+    )
+    create_tables(client, CLICKHOUSE_DB)
+    insert_stg_topics(client, topics_df, CLICKHOUSE_DB)
+    if not post_topics_df.empty:
+        insert_stg_post_topics(client, post_topics_df, CLICKHOUSE_DB)
+    verify_load(client, CLICKHOUSE_DB)
+    export_handoff_summary(
+        topics_df,
+        os.path.join(root, "output", "handoff", "topic_summary_for_m5.csv"),
+    )
     logger.info("[LDA] Topics pushed to ClickHouse.")
 
 
 # ============================================================================
-# DAG 2: DAILY PROCESSING PIPELINE (Member 2 chính — Member 3 tích hợp LDA)
+# DAG 2: FULL PROCESSING PIPELINE (historical/full reprocessing)
 # ============================================================================
 
 with DAG(
-    dag_id="daily_processing_pipeline",
+    dag_id="full_processing_pipeline",
     default_args=default_args,
     description=(
-        "Pipeline xử lý hàng ngày: crawl → clean → LDA → sentiment → score → ClickHouse. "
-        "Member 2 (chính) + Member 3 (LDA task) + Member 4 (sentiment task)"
+        "Full processing pipeline: crawl → clean → LDA → sentiment "
+        "→ ClickHouse landing tables → dbt transform."
     ),
     schedule_interval="0 2 * * *",       # 2:00 AM hàng ngày
     catchup=False,
@@ -661,7 +754,7 @@ with DAG(
     crawl_sources = BashOperator(
         task_id="crawl_sources",
         bash_command=(
-            f"export HDFS_HOST='namenode' HDFS_USER='{HDFS_USER}' PYTHONUNBUFFERED=1 && "
+            f"export HDFS_HOST='{WEBHDFS_HOSTNAME}' HDFS_USER='{HDFS_USER}' PYTHONUNBUFFERED=1 && "
             # Tạm thời tắt crawl mạng để chạy data có sẵn:
             # "python3 -u /opt/airflow/crawlers/vnexpress.py || true && "
             # "python3 -u /opt/airflow/crawlers/voz.py || true && "
@@ -672,7 +765,7 @@ with DAG(
     )
 
     spark_common_conf = (
-        "--master spark://spark-master:7077 "
+        f"--master {SPARK_MASTER} "
         "--conf spark.pyspark.python=/opt/bitnami/python/bin/python3 "
         "--conf spark.pyspark.driver.python=/usr/local/bin/python3 "
         "--conf spark.executorEnv.PYSPARK_PYTHON=/opt/bitnami/python/bin/python3 "
@@ -692,7 +785,7 @@ with DAG(
             f"HDFS_INPUT='{RAW_LOCAL_PATH if USE_LOCAL else RAW_HDFS_PATH}' "
             f"HDFS_OUTPUT='{STAGED_LOCAL_PATH if USE_LOCAL else STAGED_HDFS_PATH}' "
             f"HDFS_USER='{HDFS_USER}' "
-            "CLICKHOUSE_HOST='clickhouse' "
+            f"CLICKHOUSE_HOST='{CLICKHOUSE_HOST}' "
             "&& spark-submit "
             f"{spark_common_conf}"
             "/opt/airflow/spark_jobs/cleaning_job.py"
@@ -714,6 +807,8 @@ with DAG(
             f"--input-path '{STAGED_LOCAL_PATH if USE_LOCAL else STAGED_HDFS_PATH}' "
             f"--output-path '{LDA_LOCAL_OUTPUT if USE_LOCAL else LDA_HDFS_OUTPUT}' "
             "--k 20 "
+            f"--stopwords-path '{LOCAL_STOPWORDS_PATH if USE_LOCAL else f'{HDFS_URI_PREFIX}{HDFS_USER_DIR}/ref/stopwords_vi.txt'}' "
+            f"--slang-dict-path '{LOCAL_SLANG_DICT_PATH if USE_LOCAL else f'{HDFS_URI_PREFIX}{HDFS_USER_DIR}/ref/slang_dict.json'}' "
             f"{lda_local_flag}"
         ),
         execution_timeout=timedelta(hours=2),
@@ -725,13 +820,21 @@ with DAG(
         bash_command=(
             "export PYTHONPATH='/opt/airflow' "
             f"HADOOP_USER_NAME='{HDFS_USER}' "
-            f"HDFS_INPUT='{HDFS_URI_PREFIX}{HDFS_USER_DIR}/staged/' "
+            f"HDFS_INPUT='{STAGED_LOCAL_PATH if USE_LOCAL else STAGED_HDFS_PATH}' "
             f"HDFS_USER='{HDFS_USER}' "
-            "CLICKHOUSE_HOST='clickhouse' "
-            "KAGGLE_MODEL_HANDLE='nquanggnguyn/phobert-/transformers/default' "
+            f"CLICKHOUSE_HOST='{CLICKHOUSE_HOST}' "
+            f"CLICKHOUSE_DB='{CLICKHOUSE_DB}' "
+            f"CLICKHOUSE_USER='{CLICKHOUSE_USER}' "
+            f"CLICKHOUSE_PASS='{CLICKHOUSE_PASSWORD}' "
+            f"NLP_MODEL_PATH='{LOCAL_SENTIMENT_MODEL_PATH}' "
+            "NLP_MODEL_VERSION='phobert_v1' "
             "&& spark-submit "
             f"{spark_common_conf}"
-            "--conf spark.executorEnv.KAGGLE_MODEL_HANDLE=nquanggnguyn/phobert-/transformers/default "
+            f"--conf spark.executorEnv.CLICKHOUSE_DB={CLICKHOUSE_DB} "
+            f"--conf spark.executorEnv.CLICKHOUSE_USER={CLICKHOUSE_USER} "
+            f"--conf spark.executorEnv.CLICKHOUSE_PASS={CLICKHOUSE_PASSWORD} "
+            f"--conf spark.executorEnv.NLP_MODEL_PATH={LOCAL_SENTIMENT_MODEL_PATH} "
+            "--conf spark.executorEnv.NLP_MODEL_VERSION=phobert_v1 "
             "/opt/airflow/spark_jobs/sentiment_job.py"
         ),
         execution_timeout=timedelta(hours=2),
@@ -741,7 +844,6 @@ with DAG(
     dbt_transform = BashOperator(
         task_id="dbt_transform",
         bash_command="cd /opt/airflow/warehouse/dbt_project && dbt run --profiles-dir .",
-        trigger_rule="all_done",
     )
 
     # ── Task từ Member 3: Push LDA results → ClickHouse ──
@@ -756,18 +858,18 @@ with DAG(
         python_callable=task_run_cms_daily,
     )
 
-    pipeline_end = DummyOperator(task_id="pipeline_end", trigger_rule="all_done")
+    pipeline_end = DummyOperator(task_id="pipeline_end")
 
     # ── DAG Flow ──
-    # crawl → clean → [LDA | sentiment | CMS] song song
-    #   LDA  → save_lda_to_ch ──┐
-    #   CMS  ───────────────────┼──► dbt_transform → end
-    #   sentiment ──────────────┘
+    # crawl → clean → LDA → sentiment
+    #                    ├→ save_lda_to_ch ─┐
+    # clean ────────────┘                   ├──► dbt_transform → end
+    # clean ─────────────────────────→ CMS ─┘
     pipeline_start >> crawl_sources >> spark_cleaning
-    spark_cleaning >> [lda_topic_modeling, sentiment_analysis, run_cms]
-    lda_topic_modeling >> save_lda_to_ch >> dbt_transform
-    sentiment_analysis >> dbt_transform
-    run_cms >> dbt_transform
+    spark_cleaning >> lda_topic_modeling
+    lda_topic_modeling >> sentiment_analysis
+    sentiment_analysis >> save_lda_to_ch >> dbt_transform
+    sentiment_analysis >> run_cms >> dbt_transform
     dbt_transform >> pipeline_end
 
 

@@ -41,6 +41,7 @@ QUAN TRỌNG — execution_delta và Airflow execution_date convention:
         # execution_date_fn=lambda dt: dt.replace(hour=2, minute=0, second=0)
 """
 
+import os
 from datetime import datetime, timedelta
 
 from airflow import DAG
@@ -51,12 +52,16 @@ from airflow.utils.dates import days_ago
 
 # ── Cấu hình ──────────────────────────────────────────────────────────────────
 
-SPARK_MASTER      = "spark://spark-master:7077"
-CLICKHOUSE_HOST   = "clickhouse"
-CLICKHOUSE_DB     = "tech_radar"
-HDFS_STG_POSTS_CORE = "hdfs://namenode:9000/user/zett/staged/stg_posts_core"
-IF_MODEL_PATH     = "/opt/airflow/models/isolation_forest_hourly.pkl"
-CLF_MODEL_PATH    = "/opt/airflow/models/crisis_classifier.pkl"
+SPARK_MASTER      = os.getenv("SPARK_MASTER_URL", "spark://spark-master:7077")
+CLICKHOUSE_HOST   = os.getenv("CLICKHOUSE_HOST", "clickhouse")
+CLICKHOUSE_DB     = os.getenv("CLICKHOUSE_DB", "tech_radar")
+HDFS_USER         = os.getenv("HDFS_USER", os.getenv("HADOOP_USER_NAME", "root"))
+HDFS_STG_POSTS_CORE = os.getenv(
+    "HDFS_STG_POSTS_CORE",
+    f"hdfs://namenode:9000/user/{HDFS_USER}/staged/stg_posts_core",
+)
+IF_MODEL_PATH     = os.getenv("IF_MODEL_PATH", "/opt/airflow/models/isolation_forest_hourly.pkl")
+CLF_MODEL_PATH    = os.getenv("CLF_MODEL_PATH", "/opt/airflow/models/crisis_classifier.pkl")
 SPARK_SUBMIT_CONN = "spark_default"   # Airflow Connection ID cho Spark
 
 default_args = {
@@ -137,8 +142,8 @@ with DAG(
             "PYTHONPATH":         "/opt/airflow",
             "CLICKHOUSE_HOST":    CLICKHOUSE_HOST,
             "CLICKHOUSE_DB":      CLICKHOUSE_DB,
-            "CLICKHOUSE_USER":    "app",
-            "CLICKHOUSE_PASS":    "",
+            "CLICKHOUSE_USER":    os.getenv("CLICKHOUSE_USER", "root"),
+            "CLICKHOUSE_PASS":    os.getenv("CLICKHOUSE_PASSWORD", "root"),
             "HDFS_STG_POSTS_CORE": HDFS_STG_POSTS_CORE,
             "IF_MODEL_PATH":      IF_MODEL_PATH,
             "CLF_MODEL_PATH":     CLF_MODEL_PATH,

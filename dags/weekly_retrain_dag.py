@@ -1,5 +1,6 @@
 """Airflow DAG for weekly model retraining."""
 
+import os
 from datetime import timedelta
 from urllib.parse import urlparse
 
@@ -11,17 +12,24 @@ from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOpe
 from airflow.utils.dates import days_ago
 
 
-SPARK_MASTER = "spark://spark-master:7077"
-CLICKHOUSE_HOST = "clickhouse"
-CLICKHOUSE_DB = "tech_radar"
-CLICKHOUSE_USER = "app"
-CLICKHOUSE_PASS = ""
-MODEL_LOCAL_DIR = "/tmp/airflow_models"
-HDFS_MODEL_DIR = "hdfs://namenode:9000/user/zett/models/crisis_detection"
-HDFS_STG_POSTS_CORE = "hdfs://namenode:9000/user/zett/staged/stg_posts_core"
-WEBHDFS_HOST = "namenode"
-WEBHDFS_PORT = 9870
-HDFS_USER = "zett"
+SPARK_MASTER = os.getenv("SPARK_MASTER_URL", "spark://spark-master:7077")
+CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "clickhouse")
+CLICKHOUSE_DB = os.getenv("CLICKHOUSE_DB", "tech_radar")
+CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "root")
+CLICKHOUSE_PASS = os.getenv("CLICKHOUSE_PASSWORD", "root")
+MODEL_LOCAL_DIR = os.getenv("MODEL_LOCAL_DIR", "/tmp/airflow_models")
+HDFS_USER = os.getenv("HDFS_USER", os.getenv("HADOOP_USER_NAME", "root"))
+WEBHDFS_ENDPOINT = os.getenv("WEBHDFS_HOST", "namenode:9870")
+HDFS_MODEL_DIR = os.getenv(
+    "HDFS_MODEL_DIR",
+    f"hdfs://namenode:9000/user/{HDFS_USER}/models/crisis_detection",
+)
+HDFS_STG_POSTS_CORE = os.getenv(
+    "HDFS_STG_POSTS_CORE",
+    f"hdfs://namenode:9000/user/{HDFS_USER}/staged/stg_posts_core",
+)
+WEBHDFS_HOST = WEBHDFS_ENDPOINT.split(":")[0]
+WEBHDFS_PORT = int(WEBHDFS_ENDPOINT.split(":")[1]) if ":" in WEBHDFS_ENDPOINT else 9870
 SPARK_SUBMIT_CONN = "spark_default"
 
 EXPECTED_MODELS = [

@@ -514,11 +514,11 @@ def parse_args() -> argparse.Namespace:
         help="ClickHouse database name.",
     )
     parser.add_argument(
-        "--username", type=str, default="default",
+        "--username", type=str, default="root",
         help="ClickHouse username.",
     )
     parser.add_argument(
-        "--password", type=str, default="",
+        "--password", type=str, default="root",
         help="ClickHouse password.",
     )
 

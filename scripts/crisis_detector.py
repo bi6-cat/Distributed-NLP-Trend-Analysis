@@ -283,8 +283,8 @@ if __name__ == "__main__":
     # Clickhouse args
     parser.add_argument("--clickhouse-host", default=None, help="Host của ClickHouse để đọc/ghi trực tiếp (thay vì CSV)")
     parser.add_argument("--clickhouse-db",   default="tech_radar")
-    parser.add_argument("--clickhouse-user", default="default")
-    parser.add_argument("--clickhouse-pass", default="")
+    parser.add_argument("--clickhouse-user", default="root")
+    parser.add_argument("--clickhouse-pass", default="root")
     parser.add_argument("--clickhouse-limit", type=int, default=None, help="Giới hạn số lượng records khi truy vấn ClickHouse")
     args = parser.parse_args()
 
