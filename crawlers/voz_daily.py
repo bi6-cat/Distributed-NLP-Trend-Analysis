@@ -34,6 +34,7 @@ LOCAL_DATA_DIR = os.getenv(
 CHECKPOINT_FILE = "checkpoint.json"
 POST_FILE = "posts.csv"
 COMMENT_FILE = "comments.csv"
+CRAWL_DATE = os.getenv("CRAWLER_OUTPUT_DATE", time.strftime("%Y-%m-%d"))
 
 STORAGE = None
 STORAGE_BACKEND = os.getenv("CRAWLER_STORAGE", "remote").strip().lower()
@@ -99,6 +100,19 @@ logger = logging.getLogger(__name__)
 
 class RuntimeLimitReached(Exception):
     pass
+
+
+def dated_filename(filename: str, date_text: str = CRAWL_DATE) -> str:
+    name, ext = os.path.splitext(filename)
+    return f"{name}_{date_text}{ext}"
+
+
+def daily_post_file() -> str:
+    return dated_filename(POST_FILE)
+
+
+def daily_comment_file() -> str:
+    return dated_filename(COMMENT_FILE)
 
 
 def ensure_runtime_available(started_at: float, max_runtime_seconds: int) -> None:
@@ -317,12 +331,12 @@ def save_daily_checkpoint(cp: Dict[str, Any]) -> None:
 
 def random_sleep() -> None:
     sleep_time = random.uniform(DELAY_MIN, DELAY_MAX)
-    logger.info(f"😴 Sleep {sleep_time:.2f}s")
+    logger.info(f"Sleep {sleep_time:.2f}s")
     time.sleep(sleep_time)
 
 
 def load_page_once(driver: webdriver.Chrome, url: str) -> BeautifulSoup:
-    logger.info(f"🌐 LOAD: {url}")
+    logger.info(f"LOAD: {url}")
     driver.get(url)
     random_sleep()
     return BeautifulSoup(driver.page_source, "html.parser")
@@ -339,10 +353,10 @@ def load_page(driver: webdriver.Chrome, url: str) -> BeautifulSoup:
             wait_time = BACKOFF_BASE * attempt + random.uniform(5, 15)
 
             logger.warning(
-                f"⚠️ LOAD FAILED attempt={attempt}/{MAX_RETRY} "
+                f"LOAD FAILED attempt={attempt}/{MAX_RETRY} "
                 f"url={url} error={e}"
             )
-            logger.info(f"⏳ Backoff {wait_time:.2f}s")
+            logger.info(f"Backoff {wait_time:.2f}s")
             time.sleep(wait_time)
 
     raise RuntimeError(f"Cannot load page after {MAX_RETRY} retries: {url}") from last_error
@@ -507,14 +521,24 @@ def read_csv_column_as_str_set(path: str, column: str) -> Set[str]:
     return ids
 
 
-def load_existing_post_ids() -> Set[str]:
+def load_existing_post_ids(checkpoint: Optional[Dict[str, Any]] = None) -> Set[str]:
     """
     Đọc id_post từ posts.csv.
     Đây là nguồn chính để daily biết bài nào đã có.
     """
-    path = STORAGE.path(VOZ_DIR, POST_FILE)
-    known_ids = STORAGE.read_csv_column_as_str_set(path, "id_post")
-    logger.info(f"Loaded old ids from {path}: {len(known_ids)}")
+    known_ids = set()
+
+    for filename in [POST_FILE, daily_post_file()]:
+        path = STORAGE.path(VOZ_DIR, filename)
+        file_ids = STORAGE.read_csv_column_as_str_set(path, "id_post")
+        known_ids.update(file_ids)
+        logger.info(f"Loaded old ids from {path}: {len(file_ids)}")
+
+    if checkpoint:
+        for state in checkpoint.get("daily_threads", {}).values():
+            id_post = state.get("id_post") if isinstance(state, dict) else None
+            if id_post is not None:
+                known_ids.add(str(id_post))
 
     logger.info(f"Total existing id_post: {len(known_ids)}")
     return known_ids
@@ -694,13 +718,13 @@ def parse_posts(
 def save_daily_data(posts: List[Dict[str, Any]], comments: List[Dict[str, Any]]) -> None:
     if posts:
         STORAGE.append_csv(
-            STORAGE.path(VOZ_DIR, POST_FILE),
+            STORAGE.path(VOZ_DIR, daily_post_file()),
             posts
         )
 
     if comments:
         STORAGE.append_csv(
-            STORAGE.path(VOZ_DIR, COMMENT_FILE),
+            STORAGE.path(VOZ_DIR, daily_comment_file()),
             comments
         )
 
@@ -972,8 +996,8 @@ def run_daily(
     logger.info("=" * 80)
     logger.info("START DAILY CRAWL")
     logger.info(f"CHECKPOINT: {CHECKPOINT_FILE}")
-    logger.info(f"POST FILE: {POST_FILE}")
-    logger.info(f"COMMENT FILE: {COMMENT_FILE}")
+    logger.info(f"POST FILE: {daily_post_file()}")
+    logger.info(f"COMMENT FILE: {daily_comment_file()}")
     logger.info(f"DELAY: {DELAY_MIN}-{DELAY_MAX}s")
     logger.info(f"HEADLESS: {HEADLESS}")
     logger.info(f"MAX FORUM PAGES DAILY: {max_forum_pages}")
@@ -985,7 +1009,7 @@ def run_daily(
     logger.info("=" * 80)
 
     checkpoint = load_daily_checkpoint()
-    existing_post_ids = load_existing_post_ids()
+    existing_post_ids = load_existing_post_ids(checkpoint)
 
     logger.info(f"FORUM COUNT: {len(forums)}")
     for forum_url in forums:

@@ -14,7 +14,7 @@ REMOTE_DATA_DIR = os.getenv(
     "REMOTE_DATA_DIR",
     "/tmp/distributed-nlp-trend-analysis/crawlers/data",
 )
-HDFS_BASE_DIR = os.getenv("HDFS_BASE_DIR", "/user/zett/raw_data")
+HDFS_BASE_DIR = os.getenv("HDFS_BASE_DIR", "/user/root/raw_data")
 HDFS_CMD = os.getenv("HDFS_CMD")
 HDFS_CONTAINER = os.getenv("HDFS_CONTAINER")
 HDFS_CLIENT_OPTIONS = os.getenv(

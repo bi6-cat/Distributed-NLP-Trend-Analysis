@@ -40,6 +40,7 @@ LOCAL_DATA_DIR = os.getenv(
 # File dùng chung với crawl full
 CRAWLED_FILE = "crawled_links.json"
 CSV_FILE = "articles.csv"
+CRAWL_DATE = os.getenv("CRAWLER_OUTPUT_DATE", datetime.now().strftime("%Y-%m-%d"))
 
 # File riêng cho daily crawl
 DAILY_RUNS_FILE = "daily_runs.json"
@@ -61,6 +62,19 @@ def is_runtime_expired(started_at, max_runtime_seconds):
         max_runtime_seconds > 0
         and time.monotonic() - started_at >= max_runtime_seconds
     )
+
+
+def dated_filename(filename, date_text=CRAWL_DATE):
+    name, ext = os.path.splitext(filename)
+    return f"{name}_{date_text}{ext}"
+
+
+def daily_csv_file():
+    return dated_filename(CSV_FILE)
+
+
+def daily_runs_file():
+    return dated_filename(DAILY_RUNS_FILE)
 
 
 # ==============================
@@ -302,24 +316,29 @@ def save_json(filename, data):
 
 def init_csv():
     STORAGE.init_csv(
-        storage_path(CSV_FILE),
+        storage_path(daily_csv_file()),
         ["post_id", "article", "author", "time", "content"],
     )
 
 
 def load_existing_ids():
-    return STORAGE.read_csv_column_as_str_set(
-        storage_path(CSV_FILE),
-        "post_id",
-    )
+    existing_ids = set()
+    for filename in [CSV_FILE, daily_csv_file()]:
+        existing_ids.update(
+            STORAGE.read_csv_column_as_str_set(
+                storage_path(filename),
+                "post_id",
+            )
+        )
+    return existing_ids
 
 
 def append_articles(batch):
     if not batch:
         return
 
-    STORAGE.append_csv(storage_path(CSV_FILE), batch)
-    print(f"[SAVE CSV] {len(batch)} articles")
+    STORAGE.append_csv(storage_path(daily_csv_file()), batch)
+    print(f"[SAVE CSV] {daily_csv_file()} | {len(batch)} articles")
 
 
 # ==============================
@@ -633,14 +652,14 @@ def crawl_daily_category(
 # DAILY RUN LOG
 # ==============================
 def save_daily_run_log(run_result):
-    daily_runs = load_json(DAILY_RUNS_FILE, [])
+    daily_runs = load_json(daily_runs_file(), [])
 
     if not isinstance(daily_runs, list):
         daily_runs = []
 
     daily_runs.append(run_result)
 
-    save_json(DAILY_RUNS_FILE, daily_runs)
+    save_json(daily_runs_file(), daily_runs)
 
 
 # ==============================

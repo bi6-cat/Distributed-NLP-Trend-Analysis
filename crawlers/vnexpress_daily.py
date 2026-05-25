@@ -36,6 +36,7 @@ BASE_URLS = [
 CHECKPOINT_PATH = "vnexpress_checkpoint.json"
 POST_CSV_PATH = "post_vnexpress.csv"
 COMMENT_CSV_PATH = "comment_vnexpress.csv"
+CRAWL_DATE = os.getenv("CRAWLER_OUTPUT_DATE", datetime.now().strftime("%Y-%m-%d"))
 
 REQUEST_TIMEOUT = 30
 SLEEP_AFTER_OPEN_POST = float(os.getenv("VNEXPRESS_SLEEP_AFTER_OPEN_POST", "3"))
@@ -57,6 +58,19 @@ def is_runtime_expired(started_at, max_runtime_seconds):
         max_runtime_seconds > 0
         and time.monotonic() - started_at >= max_runtime_seconds
     )
+
+
+def dated_filename(filename, date_text=CRAWL_DATE):
+    name, ext = os.path.splitext(filename)
+    return f"{name}_{date_text}{ext}"
+
+
+def daily_post_csv_path():
+    return dated_filename(POST_CSV_PATH)
+
+
+def daily_comment_csv_path():
+    return dated_filename(COMMENT_CSV_PATH)
 
 
 # ========== LOCAL STORAGE ==========
@@ -526,7 +540,7 @@ def append_records_to_csv(path, records: list):
         return
 
     STORAGE.append_csv(
-        STORAGE.path(VNEXPRESS_DIR, path),
+        STORAGE.path(VNEXPRESS_DIR, dated_filename(path)),
         records,
         encoding="utf-8-sig",
     )
@@ -810,8 +824,8 @@ def run_daily(storage_backend=STORAGE_BACKEND, max_runtime_seconds=MAX_RUNTIME_S
 
     print("\nDONE DAILY CRAWL")
     print(f"Checkpoint: {CHECKPOINT_PATH}")
-    print(f"Post CSV: {POST_CSV_PATH}")
-    print(f"Comment CSV: {COMMENT_CSV_PATH}")
+    print(f"Post CSV: {daily_post_csv_path()}")
+    print(f"Comment CSV: {daily_comment_csv_path()}")
 
 
 if __name__ == "__main__":

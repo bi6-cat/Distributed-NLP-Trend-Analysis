@@ -24,7 +24,7 @@ SSH_USER = os.getenv("SSH_USER", "root")
 SSH_PASSWORD = os.getenv("SSH_PASSWORD", "8[qXdBXt8mY)Lk3b")
 SSH_KEY_PATH = os.getenv("SSH_KEY_PATH")
 
-HDFS_BASE_DIR = os.getenv("HDFS_BASE_DIR", "/user/zett/raw_data")
+HDFS_BASE_DIR = os.getenv("HDFS_BASE_DIR", "/user/root/raw_data")
 REMOTE_TMP = os.getenv("REMOTE_TMP", "/tmp")
 
 
