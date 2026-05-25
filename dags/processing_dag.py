@@ -77,9 +77,10 @@ SPARK_MASTER: str = os.getenv("SPARK_MASTER_URL", "spark://spark-master:7077")
 # stg_posts_core là nguồn duy nhất dùng chung cho LDA và BERTopic
 STAGED_HDFS_PATH:    str = f"{HDFS_URI_PREFIX}{HDFS_USER_DIR}/staged/stg_posts_core"
 RAW_HDFS_PATH:       str = f"{HDFS_URI_PREFIX}{HDFS_USER_DIR}/raw_data"
-LDA_HDFS_OUTPUT:     str = f"{HDFS_URI_PREFIX}{HDFS_USER_DIR}/results/lda"
-HDFS_CMS_STATE_PATH: str = "/data/results/cms/cms_state.pkl"
-HDFS_CMS_TOPK_PATH:  str = "/data/results/cms/top_keywords.json"
+LDA_HDFS_OUTPUT:          str = f"{HDFS_URI_PREFIX}{HDFS_USER_DIR}/results/lda"
+HDFS_CMS_STATE_PATH:      str = "/data/results/cms/cms_state.pkl"
+HDFS_CMS_TOPK_PATH:       str = "/data/results/cms/top_keywords.json"
+HDFS_SILVER_POST_TOPICS:  str = "/data/silver/post_topics"
 
 # ── Đường dẫn local (Docker volume /opt/airflow) ──
 # cleaning ghi ra đây → LDA và BERTopic đọc từ đây (cùng nguồn)
@@ -651,6 +652,109 @@ def task_run_cms_daily() -> None:
 
 
 # ============================================================================
+# HELPER FUNCTION — post_topics → HDFS silver layer
+# ============================================================================
+
+def task_save_post_topics_to_hdfs(
+    model_type: str = "lda",
+    local_src: Optional[str] = None,
+    hdfs_src: Optional[str] = None,
+    **context,
+) -> None:
+    """
+    Ghi post_topic_assignment lên HDFS silver layer.
+
+    Output path: /data/silver/post_topics/date={YYYY-MM-DD}/part-{model_type}-0.parquet
+    LDA và BERTopic cùng thư mục date=, khác tên file → Spark đọc chung, không overwrite.
+    Phân biệt model qua cột model_type đã có sẵn trong data.
+
+    Args:
+        model_type: "lda" hoặc "bertopic" — dùng làm suffix tên file.
+        local_src:  path local tới post_topic_assignment.parquet.
+                    Mặc định: LDA_LOCAL_OUTPUT/post_topic_assignment.parquet
+        hdfs_src:   HDFS directory chứa part files parquet.
+                    Mặc định: {HDFS_USER_DIR}/results/lda/post_topic_assignment
+    """
+    import io
+    import requests as _req
+    import pandas as _pd
+
+    date_str: str = context["ds"]
+    silver_dir = f"{HDFS_SILVER_POST_TOPICS}/date={date_str}"
+    part_path  = f"{silver_dir}/part-{model_type}-0.parquet"
+
+    _local_src = local_src or os.path.join(LDA_LOCAL_OUTPUT, "post_topic_assignment.parquet")
+    _hdfs_src  = hdfs_src  or f"{HDFS_USER_DIR}/results/lda/post_topic_assignment"
+
+    # ── Đọc post_topics ──────────────────────────────────────────────────────
+    if USE_LOCAL:
+        post_topics_df = _pd.read_parquet(_local_src)
+    else:
+        webhdfs = f"http://{WEBHDFS_HOST}/webhdfs/v1"
+        resp = _req.get(
+            f"{webhdfs}{_hdfs_src}?op=LISTSTATUS&user.name={HDFS_USER}",
+            timeout=30,
+        )
+        resp.raise_for_status()
+        parts = [
+            s["pathSuffix"]
+            for s in resp.json()["FileStatuses"]["FileStatus"]
+            if s["type"] == "FILE" and s["pathSuffix"].endswith(".parquet")
+        ]
+        if not parts:
+            raise FileNotFoundError(f"Không tìm thấy parquet files trong: {_hdfs_src}")
+        post_topics_df = _pd.concat(
+            [
+                _pd.read_parquet(io.BytesIO(
+                    _req.get(
+                        f"{webhdfs}{_hdfs_src}/{p}?op=OPEN&user.name={HDFS_USER}",
+                        allow_redirects=True, timeout=120,
+                    ).content
+                ))
+                for p in parts
+            ],
+            ignore_index=True,
+        )
+
+    # ── Ghi lên HDFS silver ──────────────────────────────────────────────────
+    buf = io.BytesIO()
+    post_topics_df.to_parquet(buf, index=False, engine="pyarrow")
+    buf.seek(0)
+
+    if USE_LOCAL:
+        local_dir = f"/opt/airflow/data/silver/post_topics/date={date_str}"
+        os.makedirs(local_dir, exist_ok=True)
+        with open(os.path.join(local_dir, f"part-{model_type}-0.parquet"), "wb") as f:
+            f.write(buf.getvalue())
+        logger.info(f"[silver/{model_type}] post_topics → local {local_dir} ({len(post_topics_df)} rows)")
+        return
+
+    webhdfs = f"http://{WEBHDFS_HOST}/webhdfs/v1"
+    _req.put(
+        f"{webhdfs}{silver_dir}?op=MKDIRS&user.name={HDFS_USER}",
+        timeout=30,
+    ).raise_for_status()
+
+    redir = _req.put(
+        f"{webhdfs}{part_path}?op=CREATE&user.name={HDFS_USER}&overwrite=true",
+        allow_redirects=False,
+        timeout=30,
+    )
+    upload_url = redir.headers.get("Location") if redir.status_code == 307 else None
+    if upload_url:
+        _req.put(
+            upload_url,
+            data=buf.getvalue(),
+            headers={"Content-Type": "application/octet-stream"},
+            timeout=120,
+        ).raise_for_status()
+    else:
+        redir.raise_for_status()
+
+    logger.info(f"[silver/{model_type}] post_topics → hdfs:{part_path} ({len(post_topics_df)} rows)")
+
+
+# ============================================================================
 # HELPER FUNCTION — LDA → ClickHouse (dùng trong full_processing_pipeline)
 # ============================================================================
 
@@ -852,6 +956,14 @@ with DAG(
         python_callable=task_save_lda_to_clickhouse,
     )
 
+    # ── Task từ Member 3: Ghi post_topics → HDFS silver layer ──
+    save_post_topics_hdfs = PythonOperator(
+        task_id="save_post_topics_to_hdfs",
+        python_callable=task_save_post_topics_to_hdfs,
+        op_kwargs={"model_type": "lda"},
+        provide_context=True,
+    )
+
     # ── Task từ Member 3: CMS keyword frequency (daily batch) ──
     run_cms = PythonOperator(
         task_id="cms_keyword_counting",
@@ -862,13 +974,13 @@ with DAG(
 
     # ── DAG Flow ──
     # crawl → clean → LDA → sentiment
-    #                    ├→ save_lda_to_ch ─┐
-    # clean ────────────┘                   ├──► dbt_transform → end
-    # clean ─────────────────────────→ CMS ─┘
+    #                    ├→ save_lda_to_ch ──┬──► dbt_transform → end
+    #                    └→ save_post_topics─┘
+    # clean ─────────────────────────────────────→ CMS ──► dbt_transform
     pipeline_start >> crawl_sources >> spark_cleaning
     spark_cleaning >> lda_topic_modeling
     lda_topic_modeling >> sentiment_analysis
-    sentiment_analysis >> save_lda_to_ch >> dbt_transform
+    sentiment_analysis >> [save_lda_to_ch, save_post_topics_hdfs] >> dbt_transform
     sentiment_analysis >> run_cms >> dbt_transform
     dbt_transform >> pipeline_end
 
@@ -981,12 +1093,24 @@ with DAG(
         execution_timeout=timedelta(hours=3),   # tối đa 3h cho 200K docs
     )
 
-    # Task 3: Push parquet kết quả → ClickHouse tech_radar
+    # Task 3a: Push parquet kết quả → ClickHouse tech_radar
     bt_save_ch = PythonOperator(
         task_id="save_topics_to_clickhouse",
         python_callable=task_save_bertopic_to_clickhouse,
     )
 
+    # Task 3b: Ghi post_topics → HDFS silver layer (cùng path với LDA, khác partition)
+    bt_save_hdfs = PythonOperator(
+        task_id="save_post_topics_to_hdfs",
+        python_callable=task_save_post_topics_to_hdfs,
+        op_kwargs={
+            "model_type": "bertopic",
+            "local_src": "output/bertopic_inference/post_topic_assignment.parquet",
+            "hdfs_src": f"{HDFS_USER_DIR}/results/bertopic/post_topics",
+        },
+        provide_context=True,
+    )
+
     bt_end = DummyOperator(task_id="bertopic_end")
 
-    bt_start >> bt_check_model >> bt_run >> bt_save_ch >> bt_end
+    bt_start >> bt_check_model >> bt_run >> [bt_save_ch, bt_save_hdfs] >> bt_end
