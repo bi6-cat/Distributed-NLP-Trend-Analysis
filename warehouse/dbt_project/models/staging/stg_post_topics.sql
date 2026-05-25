@@ -9,3 +9,4 @@ SELECT
     topic_id,
     topic_probability
 FROM {{ source('tech_radar', 'stg_post_topics') }}
+FINAL

@@ -14,24 +14,20 @@ SELECT
     c.segmented_text    AS segmented_text,
     c.parent_id         AS parent_id,
 
-    -- METRICS
     c.reaction_count    AS reaction_count,
     c.comment_count     AS comment_count,
     c.view_count        AS view_count,
 
-    -- ENGAGEMENT
+    -- Weights are dbt vars so scoring can change without rerunning Spark.
     (coalesce(c.reaction_count, 0) * {{ var('weight_reaction') }} + coalesce(c.comment_count, 0) * {{ var('weight_comment') }}
      + coalesce(c.view_count, 0) * {{ var('weight_view') }}) AS engagement,
 
-    -- NLP LABELS
     coalesce(n.sentiment_label, 'neutral') AS sentiment_label,
     coalesce(n.sentiment_score, 0.0) AS sentiment_score,
 
-    -- TOPIC
     coalesce(t.topic_id, 0) AS topic_id,
     coalesce(t.topic_probability, 0.0) AS topic_probability,
 
-    -- SOURCE TYPE
     multiIf(
         c.source = 'voz',       'forum',
         c.source = 'tinhte',    'forum',
@@ -41,7 +37,6 @@ SELECT
         'unknown'
     ) AS source_type,
 
-    -- COMPUTED TIME COLUMNS
     c.created_at        AS created_at,
     toStartOfHour(c.created_at) AS created_hour,
     toDate(c.created_at)        AS created_date,

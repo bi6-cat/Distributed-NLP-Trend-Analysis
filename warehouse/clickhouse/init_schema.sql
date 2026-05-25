@@ -1,6 +1,5 @@
 CREATE DATABASE IF NOT EXISTS tech_radar;
 
--- 1. stg_posts_core
 CREATE TABLE IF NOT EXISTS tech_radar.stg_posts_core (
     post_id         String,
     source          LowCardinality(String),
@@ -21,7 +20,6 @@ PARTITION BY toYYYYMM(created_at)
 ORDER BY (source, created_at, post_id)
 TTL created_at + INTERVAL 1 YEAR;
 
--- 2. stg_posts_nlp
 CREATE TABLE IF NOT EXISTS tech_radar.stg_posts_nlp (
     post_id         String,
     sentiment_label LowCardinality(String),
@@ -33,7 +31,6 @@ CREATE TABLE IF NOT EXISTS tech_radar.stg_posts_nlp (
 PARTITION BY toYYYYMM(predicted_at)
 ORDER BY (post_id);
 
--- 3. stg_post_topics
 CREATE TABLE IF NOT EXISTS tech_radar.stg_post_topics (
     post_id           String,
     topic_id          Int32,
@@ -44,7 +41,6 @@ CREATE TABLE IF NOT EXISTS tech_radar.stg_post_topics (
 ) ENGINE = ReplacingMergeTree(loaded_at)
 ORDER BY (post_id);
 
--- 4. stg_topics
 CREATE TABLE IF NOT EXISTS tech_radar.stg_topics (
     topic_id        Int32,
     label           String,
@@ -55,7 +51,6 @@ CREATE TABLE IF NOT EXISTS tech_radar.stg_topics (
 ) ENGINE = ReplacingMergeTree(created_at)
 ORDER BY (topic_id, model_version);
 
--- 5. stg_keyword_freq
 CREATE TABLE IF NOT EXISTS tech_radar.stg_keyword_freq (
     keyword         String,
     window_start    DateTime,
@@ -66,7 +61,6 @@ CREATE TABLE IF NOT EXISTS tech_radar.stg_keyword_freq (
 PARTITION BY toYYYYMM(window_start)
 ORDER BY (keyword, window_start);
 
--- 6. stg_crisis_events
 CREATE TABLE IF NOT EXISTS tech_radar.stg_crisis_events (
     event_id           String,
     detected_at        DateTime,

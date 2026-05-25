@@ -19,7 +19,7 @@ with_labels AS (
         ex.tid,
         coalesce(t.label, concat('topic_', toString(ex.tid))) AS tid_label
     FROM exploded_topics AS ex
-    LEFT JOIN {{ source('tech_radar', 'stg_topics') }} AS t 
+    LEFT JOIN {{ source('tech_radar', 'stg_topics') }} FINAL AS t 
         ON ex.tid = t.topic_id
 ),
 
@@ -45,7 +45,7 @@ SELECT
 
     c.affected_topic_labels,
 
-    -- Rank severity
+    -- Numeric rank keeps severity sortable in dashboards.
     multiIf(
         e.severity = 'HIGH',   3,
         e.severity = 'MEDIUM', 2,

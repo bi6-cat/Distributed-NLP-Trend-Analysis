@@ -12,22 +12,19 @@ SELECT
     toStartOfHour(s.created_at)                     AS hour_bucket,
     toDate(s.created_at)                            AS bucket_date,
 
-    -- Volume metrics
     count(*)                                        AS mention_count,
     sum(s.engagement)                               AS engagement_sum,
     uniqExact(s.author_id)                          AS unique_authors,
 
-    -- Atomic metric sums
     sum(coalesce(s.reaction_count, 0))              AS reaction_sum,
     sum(coalesce(s.comment_count, 0))               AS comment_sum,
     sum(coalesce(s.view_count, 0))                  AS view_sum,
 
-    -- Sentiment distribution
     countIf(s.sentiment_label = 'positive')         AS pos_count,
     countIf(s.sentiment_label = 'negative')         AS neg_count,
     countIf(s.sentiment_label = 'neutral')          AS neu_count,
 
-    -- Derived sentiment ratios
+    -- Guard sparse buckets from divide-by-zero.
     countIf(s.sentiment_label = 'negative')
         / greatest(count(*), 1)                     AS neg_ratio
 
@@ -38,7 +35,7 @@ FROM (
         view_count, sentiment_label
     FROM {{ ref('int_posts_enriched') }}
 ) AS s
-LEFT JOIN {{ source('tech_radar', 'stg_topics') }}  AS t
+LEFT JOIN {{ source('tech_radar', 'stg_topics') }} FINAL AS t
     ON s.topic_id = t.topic_id
 WHERE s.topic_id IS NOT NULL
   AND s.topic_id != 0
