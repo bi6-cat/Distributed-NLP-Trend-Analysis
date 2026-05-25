@@ -22,11 +22,14 @@ from pyspark.sql.functions import (
     when,
 )
 from pyspark.sql.types import (
+    ArrayType,
+    DoubleType,
     FloatType,
     IntegerType,
     StringType,
     StructField,
     StructType,
+    TimestampType,
 )
 
 from spark_jobs.clickhouse_hdfs import query_df, tmp_hdfs_dir, write_parquet_and_ingest
@@ -103,7 +106,6 @@ def _clf_predict(pdf: pd.DataFrame, pipeline, features: list) -> np.ndarray:
 def build_all_events(
     pdf: pd.DataFrame,
     target_date: str,
-    trending_by_hour: dict[int, list[str]] | None = None,
     post_ids_by_hour: dict[int, list[str]] | None = None,
 ) -> pd.DataFrame:
 
@@ -120,41 +122,11 @@ def build_all_events(
 
     rows = []
 
-    # ── TRENDING events (global_spike=1) ─────────────────────────────────
-    trending_hours = pdf[pdf["global_spike"] == 1].copy()
-    if not trending_hours.empty:
-        for _, grp in _group(trending_hours).groupby("event_group"):
-            z_max = grp["z_score"].max()
-            posts = []
-            if trending_by_hour:
-                for h in grp["hour"].tolist():
-                    posts.extend(trending_by_hour.get(int(h), []))
-            rows.append({
-                "event_id":           hashlib.md5(
-                    f"TRENDING-{target_date}-{grp['hour'].min():02d}".encode()
-                ).hexdigest()[:16],
-                "detected_at":        f"{target_date} {grp['hour'].min():02d}:00:00",
-                "duration_hours":     int(len(grp)),
-                "event_type":         "TRENDING",
-                "severity":           _severity(z_max),
-                "anomaly_score":      float(grp["if_score"].min()),
-                "neg_ratio":          float(grp["neg_ratio"].mean()),
-                "mention_velocity":   float(grp["velocity_ratio"].max()),
-                "trigger_conditions": "global_spike=1",
-                "affected_topics":    [],
-                "trending_post_ids":  posts,
-                "crisis_post_ids":    [],
-            })
-
-    # ── CRISIS events (is_crisis=1) ───────────────────────────────────────
     crisis_hours = pdf[pdf["is_crisis"] == 1].copy()
     if not crisis_hours.empty:
         for _, grp in _group(crisis_hours).groupby("event_group"):
             z_max = grp["z_score"].max()
-            trending_in_hour, evidence = [], []
-            if trending_by_hour:
-                for h in grp["hour"].tolist():
-                    trending_in_hour.extend(trending_by_hour.get(int(h), []))
+            evidence = []
             if post_ids_by_hour:
                 for h in grp["hour"].tolist():
                     evidence.extend(post_ids_by_hour.get(int(h), []))
@@ -163,38 +135,17 @@ def build_all_events(
                     f"CRISIS-{target_date}-{grp['hour'].min():02d}".encode()
                 ).hexdigest()[:16],
                 "detected_at":        f"{target_date} {grp['hour'].min():02d}:00:00",
-                "duration_hours":     int(len(grp)),
-                "event_type":         "CRISIS",
                 "severity":           _severity(z_max),
                 "anomaly_score":      float(grp["if_score"].min()),
+                "trigger_conditions": ["global_spike=1", "if_spike=1", "is_crisis=1"],
+                "affected_topics":    [],
                 "neg_ratio":          float(grp["neg_ratio"].mean()),
                 "mention_velocity":   float(grp["velocity_ratio"].max()),
-                "trigger_conditions": "global_spike=1,if_spike=1,is_crisis=1",
-                "affected_topics":    [],
-                "trending_post_ids":  trending_in_hour,
-                "crisis_post_ids":    evidence,
+                "evidence_post_ids":  evidence,
             })
 
     return pd.DataFrame(rows)
 
-
-def get_trending_posts(core_with_time, spike_hour_set: set, min_cmts: int = 3):
-    """
-    Lấy top posts đang được thảo luận nhiều nhất trong global_spike hours.
-    Không filter neg_ratio — chỉ cần nhiều người thảo luận.
-    """
-    if not spike_hour_set:
-        return []
-    return (
-        core_with_time
-        .filter(col("hour").isin(list(spike_hour_set)))
-        .filter(col("parent_id").isNotNull())
-        .groupBy("hour", "parent_id")
-        .agg(count("*").alias("cmt_count"))
-        .filter(col("cmt_count") >= min_cmts)
-        .orderBy("hour", col("cmt_count").desc())
-        .collect()
-    )
 
 
 def get_evidence_posts(core_with_time, nlp, crisis_hour_set,
@@ -438,47 +389,40 @@ def main() -> None:
 
     print("[crisis] Step 9/9: build and ingest stg_crisis_events")
 
-    # Lấy spike hours và crisis hours
-    spike_hour_set  = set(int(h) for h in pdf.loc[pdf["global_spike"] == 1, "hour"].tolist())
-    crisis_hour_set = set(int(h) for h in pdf.loc[pdf["is_crisis"]    == 1, "hour"].tolist())
+    crisis_hour_set = set(int(h) for h in pdf.loc[pdf["is_crisis"] == 1, "hour"].tolist())
 
-    # Trending posts — top posts sôi nổi trong global_spike hours
-    trending_by_hour: dict[int, list[str]] = {}
-    for row in get_trending_posts(core_with_time, spike_hour_set):
-        hour = int(row["hour"])
-        if hour not in trending_by_hour:
-            trending_by_hour[hour] = []
-        if len(trending_by_hour[hour]) < 5:
-            trending_by_hour[hour].append(str(row["parent_id"]))
-    print(f"[crisis] Trending hours: {len(spike_hour_set)} | posts: {sum(len(v) for v in trending_by_hour.values())}")
-
-    # Crisis posts — posts tiêu cực trong crisis hours
     post_ids_by_hour: dict[int, list[str]] = {}
     if crisis_hour_set:
         for row in get_evidence_posts(core_with_time, nlp, crisis_hour_set):
             post_ids_by_hour.setdefault(int(row["hour"]), []).append(str(row["parent_id"]))
         print(f"[crisis] Crisis hours: {len(crisis_hour_set)} | evidence posts: {len(post_ids_by_hour)}")
 
-    # Build cả TRENDING và CRISIS events
-    events_pdf = build_all_events(
-        pdf, TARGET_DATE,
-        trending_by_hour=trending_by_hour,
-        post_ids_by_hour=post_ids_by_hour,
-    )
+    events_pdf = build_all_events(pdf, TARGET_DATE, post_ids_by_hour=post_ids_by_hour)
 
     if not events_pdf.empty:
-        n_trending = (events_pdf["event_type"] == "TRENDING").sum()
-        n_crisis   = (events_pdf["event_type"] == "CRISIS").sum()
-        print(f"[crisis] Events: {n_trending} TRENDING | {n_crisis} CRISIS")
-        print(events_pdf[["detected_at","event_type","severity","neg_ratio","duration_hours"]].to_string())
+        print(f"[crisis] Events: {len(events_pdf)} CRISIS")
+        print(events_pdf[["detected_at", "severity", "neg_ratio", "trigger_conditions"]].to_string())
 
-        events_spark = spark.createDataFrame(events_pdf[[
-            "event_id", "detected_at", "event_type", "severity",
-            "anomaly_score", "neg_ratio", "mention_velocity",
-            "trigger_conditions", "duration_hours",
-            "trending_post_ids",
-            "crisis_post_ids",
-        ]])
+        events_schema = StructType([
+            StructField("event_id",           StringType(),                False),
+            StructField("detected_at",        TimestampType(),             False),
+            StructField("severity",           StringType(),                True),
+            StructField("anomaly_score",      DoubleType(),                True),
+            StructField("neg_ratio",          FloatType(),                 True),
+            StructField("mention_velocity",   FloatType(),                 True),
+            StructField("trigger_conditions", ArrayType(StringType()),     True),
+            StructField("affected_topics",    ArrayType(IntegerType()),    True),
+            StructField("evidence_post_ids",  ArrayType(StringType()),     True),
+        ])
+        events_pdf["detected_at"] = pd.to_datetime(events_pdf["detected_at"])
+        events_spark = spark.createDataFrame(
+            events_pdf[[
+                "event_id", "detected_at", "severity",
+                "anomaly_score", "neg_ratio", "mention_velocity",
+                "trigger_conditions", "affected_topics", "evidence_post_ids",
+            ]],
+            schema=events_schema,
+        )
         write_parquet_and_ingest(
             events_spark,
             "stg_crisis_events",
