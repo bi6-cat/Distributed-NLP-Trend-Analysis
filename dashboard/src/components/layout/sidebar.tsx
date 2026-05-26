@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useNavigationLoading } from "@/components/layout/navigation-loading-provider";
 import {
   Radar,
   LayoutDashboard,
@@ -24,6 +25,7 @@ const secondaryNav = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const { startLoading } = useNavigationLoading();
 
   return (
     <aside className="w-64 bg-white border-r border-slate-200 flex flex-col h-screen fixed left-0 top-0 z-30">
@@ -55,6 +57,9 @@ export function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
+              onClick={() => {
+                if (!isActive) startLoading();
+              }}
               className={`group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
                 isActive
                   ? "bg-gradient-to-r from-indigo-50 to-violet-50/60 text-indigo-700"
@@ -84,6 +89,9 @@ export function Sidebar() {
             <Link
               key={item.label}
               href={item.href}
+              onClick={() => {
+                if (item.href !== "#") startLoading();
+              }}
               className="group flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors"
             >
               <Icon className="h-4 w-4 text-slate-500 group-hover:text-slate-700" strokeWidth={2} />
