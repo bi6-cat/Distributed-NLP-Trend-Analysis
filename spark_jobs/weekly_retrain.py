@@ -20,12 +20,14 @@ from pyspark.sql.functions import (
     coalesce,
     col,
     count,
+    countDistinct,
     current_date,
     date_sub,
     hour as spark_hour,
     lit,
     percentile_approx,
     stddev,
+    sum as spark_sum,
     to_date,
     when,
 )
@@ -33,7 +35,7 @@ from pyspark.sql.types import FloatType, StringType, StructField, StructType
 
 import sys, os as _os
 sys.path.insert(0, _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
-from spark_jobs.clickhouse_hdfs import query_df, tmp_hdfs_dir, write_parquet_and_ingest
+from spark_jobs.clickhouse_hdfs import query_df
 
 
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "60"))
@@ -45,6 +47,10 @@ HDFS_MODEL_DIR = os.environ.get(
 HDFS_STG_POSTS_CORE = os.environ.get(
     "HDFS_STG_POSTS_CORE",
     "hdfs://namenode:9000/user/zett/staged/stg_posts_core",
+)
+HDFS_STG_BASE = os.environ.get(
+    "HDFS_STG_BASE",
+    "hdfs://namenode:9000/user/zett/staged",
 )
 WEBHDFS_HOST = os.environ.get("WEBHDFS_HOST", "namenode")
 WEBHDFS_PORT = int(os.environ.get("WEBHDFS_PORT", "9870"))
@@ -90,7 +96,7 @@ def _webhdfs_put(local_path: str, hdfs_path: str) -> None:
 def load_core(spark: SparkSession):
     return (
         spark.read.parquet(HDFS_STG_POSTS_CORE)
-        .select("post_id", "created_at", "parent_id")
+        .select("post_id", "created_at", "parent_id", "source", "author")
         .where(col("parent_id").isNotNull())
         .where(to_date(col("created_at")) >= date_sub(current_date(), LOOKBACK_DAYS))
     )
@@ -138,13 +144,14 @@ def step_compute_baseline(spark: SparkSession, core) -> None:
     )
 
     n_hours = baseline.count()
-    write_parquet_and_ingest(
-        baseline,
-        "hourly_baseline",
-        tmp_hdfs_dir("hourly_baseline"),
-        truncate=True,
-    )
-    print(f"[baseline] Ingested {n_hours} rows into hourly_baseline")
+    baseline.write.mode("overwrite").parquet(f"{HDFS_STG_BASE}/hourly_baseline")
+    print(f"[baseline] Wrote {n_hours} rows to HDFS hourly_baseline")
+
+
+FEATURES_IF = [
+    "comment_count", "velocity_ratio", "acceleration",
+    "user_diversity", "cross_source", "z_score", "unique_posts_ratio",
+]
 
 
 def step_retrain_isolation_forest(spark: SparkSession, core, nlp) -> str:
@@ -152,30 +159,23 @@ def step_retrain_isolation_forest(spark: SparkSession, core, nlp) -> str:
     from sklearn.ensemble import IsolationForest
     from sklearn.preprocessing import StandardScaler
 
-    core_h = core.withColumn("date", to_date(col("created_at"))).withColumn(
-        "hour", spark_hour(col("created_at"))
+    core_h = (
+        core
+        .withColumn("date", to_date(col("created_at")))
+        .withColumn("hour", spark_hour(col("created_at")))
     )
-    hourly_counts = core_h.groupBy("date", "hour").agg(count("*").alias("comment_count"))
-
-    core_ids = core_h.select("post_id", "date", "hour")
-    nlp_h = (
-        nlp.join(core_ids, on="post_id", how="inner")
-        .withColumn("is_neg", when(col("sentiment_label") == "negative", 1).otherwise(0))
-        .groupBy("date", "hour")
+    hourly_struct = (
+        core_h.groupBy("date", "hour")
         .agg(
-            avg("is_neg").alias("neg_ratio"),
-            avg(when(col("sentiment_label") == "negative", col("sentiment_score"))).alias(
-                "neg_score_avg"
-            ),
+            count("*").alias("comment_count"),
+            countDistinct("parent_id").alias("unique_posts"),
+            countDistinct("author").alias("unique_users"),
+            spark_sum(when(col("source") == "voz",       1).otherwise(0)).alias("voz_count"),
+            spark_sum(when(col("source") == "vnexpress", 1).otherwise(0)).alias("vne_count"),
         )
     )
 
-    hourly = (
-        hourly_counts.join(nlp_h, on=["date", "hour"], how="left")
-        .withColumn("neg_ratio", coalesce(col("neg_ratio"), lit(0.0)))
-        .withColumn("neg_score_avg", coalesce(col("neg_score_avg"), lit(0.0)))
-    )
-
+    hourly = hourly_struct.orderBy("date", "hour")
     pdf = hourly.toPandas()
     n_rows = len(pdf)
     print(f"[IF] Training rows: {n_rows}")
@@ -183,7 +183,20 @@ def step_retrain_isolation_forest(spark: SparkSession, core, nlp) -> str:
         print(f"[IF] WARN: too little data ({n_rows} rows), skip IF retrain.")
         return ""
 
-    x = pdf[["comment_count", "neg_ratio", "neg_score_avg"]].fillna(0).values
+    pdf["user_diversity"]     = (pdf["unique_users"] / (pdf["comment_count"] + 1)).round(4)
+    pdf["cross_source"]       = (
+        pdf[["vne_count", "voz_count"]].min(axis=1) /
+        (pdf[["vne_count", "voz_count"]].max(axis=1) + 1)
+    ).round(4)
+    pdf["unique_posts_ratio"] = (pdf["unique_posts"] / (pdf["comment_count"] + 1)).round(4)
+
+    roll3 = pdf["comment_count"].astype(float).rolling(window=3, min_periods=1).mean().shift(1)
+    vel   = (pdf["comment_count"] / (roll3 + 1)).round(4)
+    pdf["velocity_ratio"] = vel
+    pdf["acceleration"]   = vel.diff().fillna(0).round(4)
+    pdf["z_score"]        = 0.0
+
+    x = pdf[FEATURES_IF].fillna(0).values
     scaler = StandardScaler()
     x_scaled = scaler.fit_transform(x)
 
@@ -195,7 +208,7 @@ def step_retrain_isolation_forest(spark: SparkSession, core, nlp) -> str:
     )
     model.fit(x_scaled)
 
-    artifact = {"scaler": scaler, "model": model, "trained_at": str(date.today())}
+    artifact = {"scaler": scaler, "model": model, "features": FEATURES_IF, "trained_at": str(date.today())}
     pkl_path = os.path.join(MODEL_LOCAL_DIR, "isolation_forest_hourly.pkl")
     with open(pkl_path, "wb") as fh:
         pickle.dump(artifact, fh)
@@ -209,13 +222,14 @@ def step_retrain_crisis_classifier(spark: SparkSession) -> str:
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
 
-    pdf = query_df(
-        f"""
-        SELECT date, hour, comment_count, z_score,
-               global_spike, if_spike, neg_ratio, neg_score_avg, is_crisis
-        FROM stg_crisis_hourly
-        WHERE date >= today() - {LOOKBACK_DAYS}
-        """
+    pdf = (
+        spark.read.parquet(f"{HDFS_STG_BASE}/stg_crisis_hourly")
+        .filter(col("date") >= date_sub(current_date(), LOOKBACK_DAYS))
+        .select(
+            "date", "hour", "comment_count", "z_score",
+            "global_spike", "if_spike", "neg_ratio", "neg_score_avg", "is_crisis",
+        )
+        .toPandas()
     )
     n_total = len(pdf)
     if n_total == 0:
