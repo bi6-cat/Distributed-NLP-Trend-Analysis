@@ -69,7 +69,6 @@ ORDER BY (keyword, window_start);
 
 -- 6. stg_crisis_events
 
--- 6. stg_crisis_events
 CREATE TABLE IF NOT EXISTS tech_radar.stg_crisis_events (
     event_id           String,
     detected_at        DateTime,
@@ -82,27 +81,3 @@ CREATE TABLE IF NOT EXISTS tech_radar.stg_crisis_events (
     evidence_post_ids  Array(String)            -- References stg_posts_core.post_id
 ) ENGINE = MergeTree()
 ORDER BY (detected_at, event_id);
-
--- 7. stg_crisis_hourly
-CREATE TABLE IF NOT EXISTS tech_radar.stg_crisis_hourly (
-    date          Date,
-    hour          UInt8,
-    comment_count UInt32,
-    z_score       Nullable(Float32),
-    global_spike  UInt8,
-    if_spike      UInt8,
-    is_spike      UInt8,
-    is_crisis     UInt8,
-    neg_ratio     Nullable(Float32),
-    neg_score_avg Nullable(Float32),
-    loaded_at     DateTime DEFAULT now()
-) ENGINE = ReplacingMergeTree(loaded_at)
-ORDER BY (date, hour);
-
--- 8. hourly_baseline
-CREATE TABLE IF NOT EXISTS tech_radar.hourly_baseline (
-    hour            UInt8,
-    baseline_median Float32,
-    baseline_std    Float32
-) ENGINE = ReplacingMergeTree()
-ORDER BY hour;
