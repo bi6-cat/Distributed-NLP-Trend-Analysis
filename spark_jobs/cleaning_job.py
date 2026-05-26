@@ -63,7 +63,10 @@ HDFS_BASE  = os.environ.get("HDFS_BASE",    "hdfs://namenode:9000")
 HDFS_USER  = os.environ.get("HDFS_USER", os.environ.get("HADOOP_USER_NAME", "root"))
 HDFS_HOME  = os.environ.get("HDFS_HOME", f"/user/{HDFS_USER}")
 HDFS_RAW   = os.environ.get("HDFS_INPUT",   f"{HDFS_BASE}{HDFS_HOME}/raw_data")
-HDFS_OUT   = os.environ.get("HDFS_OUTPUT",  f"{HDFS_BASE}{HDFS_HOME}/staged/stg_posts_core")
+HDFS_OUT   = os.environ.get(
+    "HDFS_OUTPUT",
+    os.environ.get("HDFS_STG_POSTS_CORE", f"{HDFS_BASE}{HDFS_HOME}/staged/stg_posts_core"),
+)
 
 SLANG_PATH = os.environ.get("NLP_SLANG_DICT", f"{HDFS_BASE}{HDFS_HOME}/ref/slang_dict.json")
 STOP_PATH  = os.environ.get("NLP_STOPWORDS",  f"{HDFS_BASE}{HDFS_HOME}/ref/stopwords_vi.txt")
@@ -627,39 +630,10 @@ def main():
 
     logger.info(f"[DONE] Đã ghi Parquet → {HDFS_OUT}")
 
-    # ── Ingest stg_posts_core → ClickHouse ───────────────────────────────────
-    # partitionBy("source") xoá cột source khỏi Parquet data, chỉ còn trong
-    # tên thư mục (source=voz/, source=vnexpress/, ...).
-    # Dùng virtual column _path của ClickHouse để extract source từ path.
-    try:
-        hdfs_glob = f"{HDFS_OUT.rstrip('/')}/*/*.parquet"
-        _execute_clickhouse_sql(
-            f"TRUNCATE TABLE IF EXISTS {CLICKHOUSE_DB}.stg_posts_core"
-        )
-        _execute_clickhouse_sql(
-            f"INSERT INTO {CLICKHOUSE_DB}.stg_posts_core"
-            f" (post_id, source, author, title, body, segmented_text, parent_id,"
-            f"  reaction_count, comment_count, view_count, created_at, crawled_at)"
-            f" SELECT"
-            f"  post_id,"
-            f"  extract(_path, 'source=([^/]+)/') AS source,"
-            f"  ifNull(author, ''),"
-            f"  title,"
-            f"  ifNull(body, ''),"
-            f"  ifNull(segmented_text, ''),"
-            f"  parent_id,"
-            f"  ifNull(toInt32(reaction_count), 0),"
-            f"  ifNull(toInt32(comment_count), 0),"
-            f"  toNullable(toInt32(view_count)),"
-            f"  created_at,"
-            f"  crawled_at"
-            f" FROM hdfs('{hdfs_glob}', 'Parquet')"
-            f" WHERE isNotNull(created_at)"
-        )
-        logger.info("[INGEST] Đã ingest stg_posts_core → ClickHouse ✓")
-    except Exception as exc:
-        logger.error(f"[INGEST] Lỗi khi ingest stg_posts_core → ClickHouse: {exc}")
-        logger.warning("[INGEST] HDFS Parquet đã ghi thành công, ClickHouse ingest bị skip")
+    logger.info(
+        "[INGEST] Skip direct ClickHouse ingest. "
+        "Airflow must call scripts/hdfs_to_clickhouse.py stg_posts_core."
+    )
 
     spark.stop()
 

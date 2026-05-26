@@ -34,6 +34,10 @@ HDFS_STG_POSTS_CORE = os.environ.get(
     "HDFS_STG_POSTS_CORE",
     "hdfs://namenode:9000/user/root/staged/stg_posts_core",
 )
+HDFS_STG_CRISIS_EVENTS = os.environ.get(
+    "HDFS_STG_CRISIS_EVENTS",
+    "hdfs://namenode:9000/user/root/staged/stg_crisis_events",
+)
 IF_MODEL_PATH   = os.environ.get("IF_MODEL_PATH",  "/tmp/airflow_models/isolation_forest_hourly.pkl")
 CLF_MODEL_PATH  = os.environ.get("CLF_MODEL_PATH", "/tmp/airflow_models/crisis_classifier.pkl")
 _models_dir     = os.path.dirname(IF_MODEL_PATH)
@@ -196,20 +200,28 @@ def load_nlp(spark: SparkSession):
 
 
 def load_baseline(spark: SparkSession):
-    pdf = query_df("SELECT hour, baseline_median, baseline_std FROM hourly_baseline")
+    try:
+        pdf = query_df("SELECT hour, baseline_median, baseline_std FROM hourly_baseline")
+    except Exception as exc:
+        print(f"[crisis] WARN: hourly_baseline unavailable, use empty baseline: {exc}")
+        return spark.createDataFrame([], BASELINE_SCHEMA)
     if pdf.empty:
         return spark.createDataFrame([], BASELINE_SCHEMA)
     return spark.createDataFrame(pdf, schema=BASELINE_SCHEMA)
 
 
 def load_recent_hourly() -> pd.DataFrame:
-    return query_df(f"""
-        SELECT hour, comment_count
-        FROM stg_crisis_hourly
-        WHERE date < '{TARGET_DATE}'
-        ORDER BY date ASC, hour ASC
-        LIMIT 72
-    """)
+    try:
+        return query_df(f"""
+            SELECT hour, comment_count
+            FROM stg_crisis_hourly
+            WHERE date < '{TARGET_DATE}'
+            ORDER BY date ASC, hour ASC
+            LIMIT 72
+        """)
+    except Exception as exc:
+        print(f"[crisis] WARN: stg_crisis_hourly unavailable, skip history: {exc}")
+        return pd.DataFrame()
 
 
 def _compute_velocity(hourly_pdf: pd.DataFrame, history_pdf: pd.DataFrame) -> pd.DataFrame:
@@ -363,7 +375,7 @@ def main() -> None:
     for c in ("z_score", "neg_ratio", "neg_score_avg"):
         pdf[c] = pdf[c].astype(float)
 
-    print("[crisis] Step 8/9: write Parquet and ingest stg_crisis_hourly")
+    print("[crisis] Step 8/9: compute hourly crisis signals")
     final_raw = spark.createDataFrame(
         pdf[["date", "hour", "comment_count", "z_score",
              "global_spike", "if_spike", "is_spike", "is_crisis",
@@ -385,13 +397,7 @@ def main() -> None:
     n_spike  = final.filter(col("is_spike") == 1).count()
     n_crisis = final.filter(col("is_crisis") == 1).count()
     print(f"[crisis] Result: {n_rows} hours | {n_spike} spike | {n_crisis} crisis")
-    write_parquet_and_ingest(
-        final,
-        "stg_crisis_hourly",
-        tmp_hdfs_dir(f"stg_crisis_hourly/date={TARGET_DATE}"),
-        truncate=False,
-    )
-    print(f"[crisis] Ingested {n_rows} rows into stg_crisis_hourly")
+    print("[crisis] stg_crisis_hourly is not part of the v1 ClickHouse-HDFS load contract; skip ingest.")
     final.orderBy("hour").show(24, truncate=False)
 
     print("[crisis] Step 9/9: build and ingest stg_crisis_events")
@@ -404,12 +410,20 @@ def main() -> None:
             "anomaly_score", "neg_ratio", "mention_velocity",
             "trigger_conditions", "affected_topics", "evidence_post_ids",
         ]])
-        write_parquet_and_ingest(
-            events_spark,
-            "stg_crisis_events",
-            tmp_hdfs_dir(f"stg_crisis_events/date={TARGET_DATE}"),
-            truncate=False,
+        events_out = events_spark.select(
+            col("event_id"),
+            col("detected_at").cast("timestamp").alias("detected_at"),
+            col("severity"),
+            col("anomaly_score").cast("double").alias("anomaly_score"),
+            col("trigger_conditions"),
+            col("affected_topics"),
+            col("neg_ratio").cast("float").alias("neg_ratio"),
+            col("mention_velocity").cast("float").alias("mention_velocity"),
+            col("evidence_post_ids"),
+            to_date(col("detected_at")).alias("detected_date"),
         )
+        events_out.write.mode("append").partitionBy("detected_date").parquet(HDFS_STG_CRISIS_EVENTS)
+        print(f"[crisis] Wrote stg_crisis_events staged Parquet -> {HDFS_STG_CRISIS_EVENTS}")
     else:
         print("[crisis] No crisis events today.")
     spark.stop()

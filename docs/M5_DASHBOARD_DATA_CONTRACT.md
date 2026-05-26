@@ -28,6 +28,36 @@ Y nghia:
 - Day la nguon dau vao chung cho sentiment, topic modeling, CMS keyword, crisis detection.
 - Co the co them `clean_text` trong parquet/HDFS de phuc vu ML, nhung `clean_text` khong phai contract ClickHouse cho dashboard.
 
+### 2.2 Staged output contract cho ClickHouse
+
+ClickHouse chi load Parquet tu HDFS cho 6 bang staging trong `warehouse/clickhouse/init_schema.sql`.
+
+Root HDFS:
+
+- `HDFS_STAGED_ROOT=hdfs://namenode:9000/user/<HDFS_USER>/staged`
+
+Local convention:
+
+- `stg_posts_core`: `/opt/airflow/data/preprocessed/stg_posts_core`
+- Cac dataset da xu ly khac: `/opt/airflow/data/processed/<dataset_name>`
+
+Dataset path chuan:
+
+| Dataset / ClickHouse table | HDFS path | Local path |
+|---|---|---|
+| `stg_posts_core` | `${HDFS_STAGED_ROOT}/stg_posts_core` | `/opt/airflow/data/preprocessed/stg_posts_core` |
+| `stg_posts_nlp` | `${HDFS_STAGED_ROOT}/stg_posts_nlp` | `/opt/airflow/data/processed/stg_posts_nlp` |
+| `stg_post_topics` | `${HDFS_STAGED_ROOT}/stg_post_topics` | `/opt/airflow/data/processed/stg_post_topics` |
+| `stg_topics` | `${HDFS_STAGED_ROOT}/stg_topics` | `/opt/airflow/data/processed/stg_topics` |
+| `stg_keyword_freq` | `${HDFS_STAGED_ROOT}/stg_keyword_freq` | `/opt/airflow/data/processed/stg_keyword_freq` |
+| `stg_crisis_events` | `${HDFS_STAGED_ROOT}/stg_crisis_events` | `/opt/airflow/data/processed/stg_crisis_events` |
+
+ClickHouse load rule:
+
+- Dung `hdfs('<hdfs_path>/**/*.parquet', 'Parquet')`.
+- Khong dung `SELECT *`; phai insert bang explicit column list.
+- `hourly_baseline` va `stg_crisis_hourly` khong nam trong ClickHouse-HDFS load contract v1.
+
 Cac cot staging quan trong o HDFS:
 
 - `post_id`

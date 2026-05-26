@@ -20,6 +20,20 @@ crawlers/data/
 *.pid
 airflow-webserver.pid
 
+# ── Dashboard / Next.js ─────────────────────────────────────────────
+dashboard/node_modules/
+dashboard/.next/
+dashboard/out/
+dashboard/build/
+dashboard/coverage/
+dashboard/.vercel/
+dashboard/.env
+dashboard/.env*.local
+dashboard/*.tsbuildinfo
+dashboard/next-env.d.ts
+dashboard/next-dev*.log
+dashboard/next-dev*.err
+
 # ── Vagrant & Tutorial work ──────────
 .vagrant/
 tutorial_work/
@@ -257,3 +271,4 @@ nlp-worker-2/
 *.vbox-prev
 .venv/
 __pycache__/
+node_modules/

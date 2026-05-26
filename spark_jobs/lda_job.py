@@ -90,6 +90,13 @@ DEFAULT_VOCAB_SIZE: int = 4_000  # Giảm nhiễu từ hiếm trên tập proces
 DEFAULT_MIN_DF: int = 3          # Giữ đủ từ khóa quan trọng khi corpus còn nhỏ
 MAX_TERMS_PER_TOPIC: int = 15    # Số từ hiển thị cho mỗi topic
 DEFAULT_EVAL_MAX_DOCS: int = 5000
+HDFS_USER: str = os.environ.get("HDFS_USER", os.environ.get("HADOOP_USER_NAME", "root"))
+HDFS_NAMENODE: str = os.environ.get("HDFS_NAMENODE", "namenode:9000")
+HDFS_STAGED_ROOT: str = os.environ.get(
+    "HDFS_STAGED_ROOT",
+    f"hdfs://{HDFS_NAMENODE}/user/{HDFS_USER}/staged",
+).rstrip("/")
+PROCESSED_LOCAL_ROOT: str = os.environ.get("PROCESSED_LOCAL_ROOT", "/opt/airflow/data/processed").rstrip("/")
 
 # Đường dẫn tài nguyên NLP (Member 3 — Phase 1 deliverables)
 STOPWORDS_PATH: str = "data/stopwords_vi.txt"
@@ -953,11 +960,19 @@ def save_results(
             }
             for t in topics
         ]
-        topics_parquet = os.path.join(output_path, "topics.parquet")
+        topics_parquet = os.environ.get(
+            "LOCAL_STG_TOPICS",
+            os.path.join(PROCESSED_LOCAL_ROOT, "stg_topics", "topics.parquet"),
+        )
+        os.makedirs(os.path.dirname(topics_parquet), exist_ok=True)
         _pd.DataFrame(topics_export).to_parquet(topics_parquet, index=False)
         logger.info(f"Saving topics → {topics_parquet}")
 
-        assignment_parquet = os.path.join(output_path, "post_topic_assignment.parquet")
+        assignment_parquet = os.environ.get(
+            "LOCAL_STG_POST_TOPICS",
+            os.path.join(PROCESSED_LOCAL_ROOT, "stg_post_topics", "post_topic_assignment.parquet"),
+        )
+        os.makedirs(os.path.dirname(assignment_parquet), exist_ok=True)
         assignments_df.toPandas().to_parquet(assignment_parquet, index=False)
         logger.info(f"Saving post-topic assignments → {assignment_parquet}")
     else:
@@ -989,12 +1004,12 @@ def save_results(
             for t in topics
         ]
         topics_df = spark.createDataFrame(topics_rows, schema=topics_schema)
-        topics_parquet_path = os.path.join(output_path, "topics")
+        topics_parquet_path = os.environ.get("HDFS_STG_TOPICS", f"{HDFS_STAGED_ROOT}/stg_topics")
         topics_df.write.mode("overwrite").parquet(topics_parquet_path)
         logger.info(f"Saving topics Parquet → {topics_parquet_path}")
 
         # post_topics schema: post_id, topic_id, topic_probability, model_type, predicted_at
-        assignment_parquet_path = os.path.join(output_path, "post_topic_assignment")
+        assignment_parquet_path = os.environ.get("HDFS_STG_POST_TOPICS", f"{HDFS_STAGED_ROOT}/stg_post_topics")
         assignments_df.write.mode("overwrite").parquet(assignment_parquet_path)
         logger.info(f"Saving post-topic assignments Parquet → {assignment_parquet_path}")
 

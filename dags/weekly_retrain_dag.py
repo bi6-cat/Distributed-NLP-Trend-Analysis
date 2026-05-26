@@ -78,7 +78,7 @@ with DAG(
     dag_id="weekly_retrain",
     default_args=default_args,
     description="Weekly retrain using HDFS Parquet and ClickHouse HTTP ingest.",
-    schedule_interval="0 3 * * 0",
+    schedule_interval="0 5 * * 0",
     catchup=False,
     max_active_runs=1,
     tags=["member4", "retrain", "weekly", "phase3"],

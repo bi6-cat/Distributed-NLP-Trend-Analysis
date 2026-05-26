@@ -20,7 +20,7 @@ sources:
             tests:
               - not_null
               - accepted_values:
-                  values: ['voz', 'tinhte', 'vnexpress', 'youtube']
+                  values: ['voz', 'tinhte', 'vnexpress', 'youtube', 'vatvo']
 
       - name: stg_posts_nlp
         description: >
@@ -63,34 +63,31 @@ sources:
               - unique
 
 models:
-  - name: stg_posts
-    description: >
-      Unified staging VIEW — the core ELT responsibility. JOINs the 3 decoupled
-      landing tables (stg_posts_core, stg_posts_nlp, stg_post_topics) and computes
-      engagement from atomic metrics. LEFT JOINs ensure posts without NLP/topic
-      labels still appear (graceful partial pipeline handling).
+  - name: stg_posts_core
+    description: Staging layer for core post data. Loads raw table from source.
     columns:
       - name: post_id
-        description: Canonical post identifier
-        tests:
-          - not_null
       - name: source
-        description: "Data source: voz, tinhte, vnexpress, youtube"
-        tests:
-          - not_null
-          - accepted_values:
-              values: ['voz', 'tinhte', 'vnexpress', 'youtube']
-      - name: engagement
-        description: >
-          Weighted engagement score computed by dbt from atomic metrics:
-          reaction_count + comment_count × 2 + coalesce(view_count, 0) / 100
-      - name: sentiment_label
-        description: "PhoBERT sentiment: positive, negative, neutral (nullable — LEFT JOIN)"
-      - name: source_type
-        description: "Derived platform type: forum, news, video"
-        tests:
-          - accepted_values:
-              values: ['forum', 'news', 'video', 'unknown']
+      - name: author_id
+      - name: author_name
+      - name: title
+      - name: body
+      - name: segmented_text
+      - name: parent_id
+      - name: reaction_count
+      - name: comment_count
+      - name: view_count
       - name: created_at
-        tests:
-          - not_null
+      - name: crawled_at
+  - name: stg_posts_nlp
+    description: Staging layer for NLP sentiment data. Loads raw table from source.
+    columns:
+      - name: post_id
+      - name: sentiment_label
+      - name: sentiment_score
+  - name: stg_post_topics
+    description: Staging layer for topics. Loads raw table from source.
+    columns:
+      - name: post_id
+      - name: topic_id
+      - name: topic_probability
