@@ -34,20 +34,27 @@ sources:
       - name: stg_post_topics
         description: >
           LDA/BERTopic topic assignments. Loaded by M3.
-          ReplacingMergeTree ensures latest assignment wins on weekly reruns.
+          ReplacingMergeTree ensures latest assignment wins per post/model_type on reruns.
         columns:
           - name: post_id
+            tests:
+              - not_null
+          - name: model_type
             tests:
               - not_null
 
       - name: stg_topics
         description: >
           Topic lookup table — human-readable labels and keywords. Loaded by M3.
+          topic_id is scoped by model_version; the same numeric topic_id may exist
+          for both LDA and BERTopic.
         columns:
           - name: topic_id
             tests:
               - not_null
-              - unique
+          - name: model_version
+            tests:
+              - not_null
 
       - name: stg_keyword_freq
         description: >

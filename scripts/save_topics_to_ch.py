@@ -111,7 +111,7 @@ CREATE TABLE IF NOT EXISTS {database}.stg_post_topics (
     predicted_at      DateTime,
     loaded_at         DateTime DEFAULT now()
 ) ENGINE = ReplacingMergeTree(loaded_at)
-ORDER BY (post_id)
+ORDER BY (post_id, model_type)
 COMMENT 'Post-to-topic assignments — loaded by M3 (save_topics_to_ch.py)';
 """
 

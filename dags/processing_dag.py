@@ -635,6 +635,14 @@ def task_run_cms_daily() -> None:
         )
         df_out = _pd.DataFrame(results)
         df_out["estimated_count"] = df_out["estimated_count"].astype("int64")
+        sources = sorted(df_out["source"].astype(str).unique().tolist())
+        source_list = ", ".join("'" + src.replace("'", "\\'") + "'" for src in sources)
+        client.command(
+            f"ALTER TABLE {CLICKHOUSE_DB}.{CLICKHOUSE_TABLE} DELETE "
+            f"WHERE window_start = toDateTime('{window_start:%Y-%m-%d %H:%M:%S}') "
+            f"AND source IN ({source_list}) "
+            "SETTINGS mutations_sync = 1"
+        )
         client.insert_df(CLICKHOUSE_TABLE, df_out)
         logger.info(f"[CMS] Inserted {len(df_out)} rows → {CLICKHOUSE_DB}.{CLICKHOUSE_TABLE}")
     except Exception as exc:
@@ -1040,21 +1048,107 @@ def task_save_bertopic_to_clickhouse() -> None:
     """
     Task 3: Push BERTopic parquet results → ClickHouse tech_radar.
 
-    Reads output/bertopic_inference/{post_topic_assignment,topics}.parquet
-    and inserts into stg_post_topics + stg_topics.
+    Reads BERTopic parquet outputs from local/HDFS and inserts into
+    stg_post_topics + stg_topics.
     Runs after task_bertopic_run_pipeline so parquet files are already written.
     """
+    import io
     import sys as _sys
+    import pandas as _pd
+    import requests as _req
+
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     _sys.path.insert(0, root)
-    from scripts.save_topics_to_ch import main as save_to_ch
+    from scripts.save_topics_to_ch import (
+        create_tables,
+        export_handoff_summary,
+        get_ch_client,
+        insert_stg_post_topics,
+        insert_stg_topics,
+        verify_load,
+    )
+
+    def _read_hdfs_parquet_file(hdfs_path: str) -> _pd.DataFrame:
+        webhdfs = f"http://{WEBHDFS_HOST}/webhdfs/v1"
+        open_url = f"{webhdfs}{hdfs_path}?op=OPEN&user.name={HDFS_USER}"
+        resp = _req.get(open_url, allow_redirects=True, timeout=120)
+        resp.raise_for_status()
+        return _pd.read_parquet(io.BytesIO(resp.content))
+
+    def _normalise_bertopic_frames(
+        topics_df: _pd.DataFrame,
+        post_topics_df: _pd.DataFrame,
+    ) -> tuple[_pd.DataFrame, _pd.DataFrame]:
+        topics_df = topics_df.copy()
+        post_topics_df = post_topics_df.copy()
+
+        def _keywords_to_list(value) -> List[str]:
+            if value is None:
+                return []
+            if isinstance(value, str):
+                return [item.strip() for item in value.split("|") if item.strip()]
+            if hasattr(value, "tolist"):
+                value = value.tolist()
+            if isinstance(value, (list, tuple)):
+                return [str(item) for item in value if item is not None]
+            if _pd.isna(value):
+                return []
+            return [str(value)]
+
+        if "top_keywords" in topics_df.columns:
+            topics_df["top_keywords"] = topics_df["top_keywords"].apply(_keywords_to_list)
+        if "coherence_score" not in topics_df.columns:
+            topics_df["coherence_score"] = None
+        if "created_at" not in topics_df.columns:
+            topics_df["created_at"] = _pd.Timestamp.now(tz="UTC")
+        if "model_version" not in topics_df.columns:
+            topics_df["model_version"] = "bertopic_v1"
+
+        if "predicted_at" in post_topics_df.columns:
+            post_topics_df["predicted_at"] = _pd.to_datetime(
+                post_topics_df["predicted_at"],
+                errors="coerce",
+                utc=True,
+            ).fillna(_pd.Timestamp.now(tz="UTC")).dt.tz_localize(None)
+        if "model_type" not in post_topics_df.columns:
+            post_topics_df["model_type"] = "bertopic"
+
+        return topics_df, post_topics_df
 
     # Inside Docker the service hostname is always "clickhouse", regardless of USE_LOCAL
     ch_host = os.environ.get("CLICKHOUSE_HOST", "clickhouse")
-    save_to_ch(
-        input_dir="output/bertopic_inference",
+    ch_user = os.environ.get("CLICKHOUSE_USER", CLICKHOUSE_USER)
+    ch_pass = os.environ.get("CLICKHOUSE_PASSWORD", os.environ.get("CLICKHOUSE_PASS", CLICKHOUSE_PASSWORD))
+
+    if USE_LOCAL:
+        output_dir = os.path.join(root, "output", "bertopic_inference")
+        topics_df = _pd.read_parquet(os.path.join(output_dir, "topics.parquet"))
+        post_topics_df = _pd.read_parquet(os.path.join(output_dir, "post_topic_assignment.parquet"))
+    else:
+        topics_df = _read_hdfs_parquet_file(
+            f"{HDFS_USER_DIR}/results/bertopic/topics/topics.parquet"
+        )
+        post_topics_df = _read_hdfs_parquet_file(
+            f"{HDFS_USER_DIR}/results/bertopic/post_topics/post_topic_assignment.parquet"
+        )
+
+    topics_df, post_topics_df = _normalise_bertopic_frames(topics_df, post_topics_df)
+
+    client = get_ch_client(
         host=ch_host,
         port=CLICKHOUSE_PORT,
+        database=CLICKHOUSE_DB,
+        username=ch_user,
+        password=ch_pass,
+    )
+    create_tables(client, CLICKHOUSE_DB)
+    insert_stg_topics(client, topics_df, CLICKHOUSE_DB)
+    if not post_topics_df.empty:
+        insert_stg_post_topics(client, post_topics_df, CLICKHOUSE_DB)
+    verify_load(client, CLICKHOUSE_DB)
+    export_handoff_summary(
+        topics_df,
+        os.path.join(root, "output", "handoff", "bertopic_summary_for_m5.csv"),
     )
     logger.info("[BERTopic] Topics pushed to ClickHouse.")
 

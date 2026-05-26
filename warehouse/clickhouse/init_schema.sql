@@ -36,14 +36,14 @@ ORDER BY (post_id);
 
 -- 3. stg_post_topics
 CREATE TABLE IF NOT EXISTS tech_radar.stg_post_topics (
-    post_id           String,                -- FK → stg_posts_core.post_id; one best assignment per post
+    post_id           String,                -- FK → stg_posts_core.post_id
     topic_id          Int32,                 -- LDA/BERTopic assignment
     topic_probability Float32,               -- Assignment confidence 0.0–1.0
     model_type        LowCardinality(String), -- 'lda' | 'bertopic'
     predicted_at      DateTime,
     loaded_at         DateTime DEFAULT now()
 ) ENGINE = ReplacingMergeTree(loaded_at)
-ORDER BY (post_id);
+ORDER BY (post_id, model_type);
 
 -- 4. stg_topics
 CREATE TABLE IF NOT EXISTS tech_radar.stg_topics (
