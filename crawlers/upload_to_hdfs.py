@@ -10,11 +10,16 @@ SSH_PASSWORD = os.getenv("SSH_PASSWORD", "8[qXdBXt8mY)Lk3b")
 SSH_KEY_PATH = os.getenv("SSH_KEY_PATH")
 
 DATA_DIR = os.getenv("DATA_DIR", "crawlers/data")
+REF_DATA_DIR = os.getenv("REF_DATA_DIR", "data")
 REMOTE_DATA_DIR = os.getenv(
     "REMOTE_DATA_DIR",
     "/tmp/distributed-nlp-trend-analysis/crawlers/data",
 )
 HDFS_BASE_DIR = os.getenv("HDFS_BASE_DIR", "/user/root/raw_data")
+HDFS_REF_DIR = os.getenv(
+    "HDFS_REF_DIR",
+    posixpath.join(posixpath.dirname(HDFS_BASE_DIR.rstrip("/")), "ref"),
+)
 HDFS_CMD = os.getenv("HDFS_CMD")
 HDFS_CONTAINER = os.getenv("HDFS_CONTAINER")
 HDFS_CLIENT_OPTIONS = os.getenv(
@@ -31,6 +36,31 @@ HDFS_CANDIDATES = (
     "/opt/hadoop-3.2.1/bin/hdfs",
     "/home/hadoop/hadoop/bin/hdfs",
 )
+
+REQUIRED_FULL_FILES = (
+    "voz/posts.csv",
+    "voz/comments.csv",
+    "vatvo/articles.csv",
+    "vnexpress/post_vnexpress.csv",
+    "vnexpress/comment_vnexpress.csv",
+)
+
+OPTIONAL_FULL_FILES = (
+    "voz/checkpoint.json",
+    "vatvo/crawled_links.json",
+    "vatvo/progress.json",
+    "vnexpress/vnexpress_checkpoint.json",
+)
+
+REQUIRED_REF_FILES = (
+    "stopwords_vi.txt",
+    "slang_dict.json",
+)
+
+
+def print_progress(current, total, message):
+    percent = int(current * 100 / max(total, 1))
+    print(f"[PROGRESS] {percent:>3}% | {message}", flush=True)
 
 
 def q(value):
@@ -177,20 +207,62 @@ def resolve_hdfs_target(ssh):
     )
 
 
-def list_remote_data_files(ssh):
-    command = (
-        f"if [ -d {q(REMOTE_DATA_DIR)} ]; then "
-        f"find {q(REMOTE_DATA_DIR)} -type f \\( -name '*.csv' -o -name '*.json' \\); "
-        "fi"
-    )
-    exit_code, stdout_text, _ = run_with_output(ssh, command)
-    if exit_code != 0 or not stdout_text:
-        return []
-    return [line.strip() for line in stdout_text.splitlines() if line.strip()]
+def list_full_data_files():
+    missing = []
+    files = []
+
+    for rel_path in REQUIRED_FULL_FILES:
+        local_path = os.path.join(DATA_DIR, rel_path)
+        if not os.path.isfile(local_path):
+            missing.append(rel_path)
+        else:
+            files.append((local_path, rel_path))
+
+    if missing:
+        missing_text = "\n".join(f"  - {path}" for path in missing)
+        raise FileNotFoundError(
+            f"Missing required full demo data files under {DATA_DIR}:\n{missing_text}"
+        )
+
+    for rel_path in OPTIONAL_FULL_FILES:
+        local_path = os.path.join(DATA_DIR, rel_path)
+        if os.path.isfile(local_path):
+            files.append((local_path, rel_path))
+
+    return files
 
 
-def upload_one(ssh, sftp, hdfs_cmd, hdfs_container, source_path, rel_path, source_is_remote):
-    hdfs_path = posixpath.join(HDFS_BASE_DIR, rel_path.replace("\\", "/"))
+def list_ref_files():
+    missing = []
+    files = []
+
+    for rel_path in REQUIRED_REF_FILES:
+        local_path = os.path.join(REF_DATA_DIR, rel_path)
+        if not os.path.isfile(local_path):
+            missing.append(rel_path)
+        else:
+            files.append((local_path, rel_path))
+
+    if missing:
+        missing_text = "\n".join(f"  - {path}" for path in missing)
+        raise FileNotFoundError(
+            f"Missing required NLP reference files under {REF_DATA_DIR}:\n{missing_text}"
+        )
+
+    return files
+
+
+def upload_one(
+    ssh,
+    sftp,
+    hdfs_cmd,
+    hdfs_container,
+    source_path,
+    rel_path,
+    source_is_remote,
+    hdfs_base_dir,
+):
+    hdfs_path = posixpath.join(hdfs_base_dir, rel_path.replace("\\", "/"))
     hdfs_dir = posixpath.dirname(hdfs_path)
 
     if source_is_remote:
@@ -237,7 +309,6 @@ def upload_one(ssh, sftp, hdfs_cmd, hdfs_container, source_path, rel_path, sourc
 
 
 def main():
-
     ssh = paramiko.SSHClient()
 
     ssh.set_missing_host_key_policy(
@@ -265,42 +336,44 @@ def main():
     else:
         print(f"Using HDFS CLI: {hdfs_cmd}")
 
-    remote_files = list_remote_data_files(ssh)
-    if remote_files:
-        print(f"Uploading from remote data dir: {REMOTE_DATA_DIR}")
-        for remote_path in remote_files:
-            rel_path = posixpath.relpath(remote_path, REMOTE_DATA_DIR)
-            upload_one(
-                ssh,
-                sftp,
-                hdfs_cmd,
-                hdfs_container,
-                remote_path,
-                rel_path,
-                source_is_remote=True,
-            )
-    else:
-        print(f"Remote data dir is empty or missing, uploading from local: {DATA_DIR}")
-        for root, dirs, files in os.walk(DATA_DIR):
-            for file in files:
-                if not file.endswith((".csv", ".json")):
-                    continue
+    local_files = list_full_data_files()
+    print(f"Uploading full demo data from local: {DATA_DIR}")
+    total_files = len(local_files)
+    print_progress(0, total_files, f"Preparing to upload {total_files} files")
+    for index, (local_path, rel_path) in enumerate(local_files, start=1):
+        print_progress(index - 1, total_files, f"Uploading {rel_path}")
+        upload_one(
+            ssh,
+            sftp,
+            hdfs_cmd,
+            hdfs_container,
+            local_path,
+            rel_path,
+            source_is_remote=False,
+            hdfs_base_dir=HDFS_BASE_DIR,
+        )
+        print_progress(index, total_files, f"Uploaded {rel_path}")
 
-                local_path = os.path.join(root, file)
-                rel_path = os.path.relpath(local_path, DATA_DIR).replace("\\", "/")
-                upload_one(
-                    ssh,
-                    sftp,
-                    hdfs_cmd,
-                    hdfs_container,
-                    local_path,
-                    rel_path,
-                    source_is_remote=False,
-                )
+    ref_files = list_ref_files()
+    print(f"Uploading NLP reference files from local: {REF_DATA_DIR}")
+    for index, (local_path, rel_path) in enumerate(ref_files, start=1):
+        print_progress(index - 1, len(ref_files), f"Uploading ref/{rel_path}")
+        upload_one(
+            ssh,
+            sftp,
+            hdfs_cmd,
+            hdfs_container,
+            local_path,
+            rel_path,
+            source_is_remote=False,
+            hdfs_base_dir=HDFS_REF_DIR,
+        )
+        print_progress(index, len(ref_files), f"Uploaded ref/{rel_path}")
 
     sftp.close()
     ssh.close()
 
+    print_progress(total_files, total_files, "Upload completed")
     print("\n🎉 Upload completed")
 
 

@@ -34,6 +34,10 @@ from typing import Optional, Set
 logger = logging.getLogger(__name__)
 
 
+def log_progress(percent: int, message: str) -> None:
+    logger.info(f"[PROGRESS] {percent:>3}% | {message}")
+
+
 class MinHashDeduplicator:
     """
     MinHash + LSH deduplicator tích hợp với PySpark DataFrame.
@@ -138,6 +142,7 @@ class MinHashDeduplicator:
               .collect()
         )
         logger.info(f"[Dedup] Collected {len(rows):,} records về driver")
+        log_progress(80, f"LSH collected {len(rows):,} records on driver")
 
         # ── Bước 2: Build MinHash signatures ─────────────────────────────────
         lsh = MinHashLSH(threshold=self.threshold, num_perm=self.num_perm)
@@ -161,6 +166,7 @@ class MinHashDeduplicator:
 
         logger.info(f"[Dedup] Đã tính signature cho {len(minhash_map):,} records "
                     f"(bỏ qua {skipped:,} records không có text)")
+        log_progress(82, f"LSH signatures ready: {len(minhash_map):,} records")
 
         # ── Bước 3: Insert vào LSH và phát hiện duplicate pairs ──────────────
         # Dùng Union-Find để gom clusters
@@ -184,7 +190,9 @@ class MinHashDeduplicator:
 
         # Insert và query LSH — O(n) amortized
         inserted_ids = []
-        for post_id, mh in minhash_map.items():
+        total_signatures = len(minhash_map)
+        next_progress = 10
+        for idx, (post_id, mh) in enumerate(minhash_map.items(), start=1):
             # Query trước khi insert để tìm gần đúng (approximate neighbors)
             try:
                 neighbors = lsh.query(mh)
@@ -203,7 +211,15 @@ class MinHashDeduplicator:
                 # Trùng key — có thể xảy ra với dữ liệu test nhỏ
                 pass
 
+            if total_signatures and idx * 100 // total_signatures >= next_progress:
+                log_progress(
+                    82 + int(next_progress * 0.05),
+                    f"LSH index progress: {idx:,}/{total_signatures:,} signatures",
+                )
+                next_progress += 10
+
         logger.info(f"[Dedup] Đã insert {len(inserted_ids):,} signatures vào LSH index")
+        log_progress(87, f"LSH index built: {len(inserted_ids):,} signatures")
 
         # ── Bước 4: Xác định post_ids cần giữ (1 per cluster = oldest) ───────
         # Với mỗi post_id, root của Union-Find là representative được giữ lại
@@ -225,6 +241,7 @@ class MinHashDeduplicator:
         deduped_df = df.filter(col("post_id").isin(list(bc_keep.value)))
 
         bc_keep.unpersist()
+        log_progress(88, "LSH keep-set broadcast complete")
 
         return deduped_df
 

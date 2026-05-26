@@ -85,7 +85,7 @@ with DAG(
         "Daily 04:00 AM — Spark crisis detection sau khi M2 cleaning "
         "và M4 sentiment đã xong. Ghi kết quả vào stg_crisis_events."
     ),
-    schedule_interval="0 4 * * *",
+    schedule_interval=None,
     catchup=False,
     max_active_runs=1,
     tags=["member4", "crisis", "daily", "phase3"],
@@ -102,8 +102,8 @@ with DAG(
     #   execution_date_fn=lambda dt: dt.replace(hour=2, minute=0, second=0, microsecond=0)
     wait_for_stg_core = ExternalTaskSensor(
         task_id="wait_for_stg_core",
-        external_dag_id="daily_processing_pipeline",
-        external_task_id="spark_cleaning",
+        external_dag_id="full_processing_pipeline",
+        external_task_id="spark_cleaning_full",
         execution_delta=timedelta(hours=2),
         timeout=3600,          # tối đa 60 phút chờ
         poke_interval=60,      # kiểm tra mỗi 60 giây
@@ -116,8 +116,8 @@ with DAG(
     # cùng DAG daily_processing_pipeline (schedule 02:00)
     wait_for_sentiment = ExternalTaskSensor(
         task_id="wait_for_sentiment",
-        external_dag_id="daily_processing_pipeline",
-        external_task_id="sentiment_analysis",
+        external_dag_id="full_processing_pipeline",
+        external_task_id="sentiment_analysis_full",
         execution_delta=timedelta(hours=2),
         timeout=3600,
         poke_interval=60,
@@ -148,7 +148,7 @@ with DAG(
             "IF_MODEL_PATH":      IF_MODEL_PATH,
             "CLF_MODEL_PATH":     CLF_MODEL_PATH,
             "Z_SCORE_THRESHOLD":  "2.0",
-            "TARGET_DATE":        "{{ dag_run.conf.get('target_date', '2026-04-29') }}",
+            "TARGET_DATE":        "{{ dag_run.conf.get('target_date', ds) }}",
         },
         verbose=False,
     )

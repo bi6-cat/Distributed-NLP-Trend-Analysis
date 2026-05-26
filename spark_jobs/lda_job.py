@@ -75,6 +75,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("lda_job")
 
+
+def log_progress(percent: int, message: str) -> None:
+    logger.info(f"[PROGRESS] {percent:>3}% | {message}")
+
+
 # Cache tokenizer tại process hiện tại để tránh import lặp lại.
 _VI_TOKENIZER = None
 # Cache reusable preprocessor từ module preprocessing (nếu import được).
@@ -100,7 +105,20 @@ SLANG_DICT_PATH: str = "data/slang_dict.json"
 # LOAD TÀI NGUYÊN NLP
 # ============================================================================
 
-def load_stopwords(filepath: str) -> Set[str]:
+def _read_reference_text(filepath: str, spark: Optional[SparkSession] = None) -> str:
+    if filepath.startswith("hdfs://"):
+        if spark is None:
+            raise FileNotFoundError(filepath)
+        rows = spark.sparkContext.wholeTextFiles(filepath, minPartitions=1).take(1)
+        if not rows:
+            raise FileNotFoundError(filepath)
+        return rows[0][1]
+
+    with open(filepath, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def load_stopwords(filepath: str, spark: Optional[SparkSession] = None) -> Set[str]:
     """
     Đọc danh sách Vietnamese stopwords từ file text.
 
@@ -117,18 +135,18 @@ def load_stopwords(filepath: str) -> Set[str]:
     """
     stopwords: Set[str] = set()
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            for line in f:
-                word = line.strip().lower()
-                if word:
-                    stopwords.add(word)
+        content = _read_reference_text(filepath, spark)
+        for line in content.splitlines():
+            word = line.strip().lower()
+            if word:
+                stopwords.add(word)
         logger.info(f"Loaded {len(stopwords):,} stopwords from {filepath}")
     except FileNotFoundError:
         logger.warning(f"Stopwords file not found: {filepath} — using empty set.")
     return stopwords
 
 
-def load_slang_dict(filepath: str) -> Dict[str, str]:
+def load_slang_dict(filepath: str, spark: Optional[SparkSession] = None) -> Dict[str, str]:
     """
     Đọc bảng chuẩn hóa teencode/slang từ file JSON.
 
@@ -147,8 +165,8 @@ def load_slang_dict(filepath: str) -> Dict[str, str]:
     """
     slang_dict: Dict[str, str] = {}
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            slang_dict = json.load(f)
+        content = _read_reference_text(filepath, spark)
+        slang_dict = json.loads(content)
         logger.info(f"Loaded {len(slang_dict):,} slang entries from {filepath}")
     except FileNotFoundError:
         logger.warning(f"Slang dict not found: {filepath} — skipping normalization.")
@@ -284,10 +302,8 @@ def create_spark_session(
     """
     Khởi tạo SparkSession cho LDA job.
 
-    Cấu hình theo TECH_STACK.md (Section 4.2):
-        - executor.memory = 8g (mỗi worker node 8GB RAM)
-        - driver.memory = 4g
-        - shuffle.partitions = 200 (tối ưu cho cluster 3 workers)
+    Cluster mode nhận executor/driver memory từ spark-submit trong Airflow DAG.
+    Job chỉ giữ các cấu hình runtime không phụ thuộc tài nguyên cụ thể.
 
     Args:
         app_name: Tên ứng dụng Spark (hiển thị trên Spark UI).
@@ -324,8 +340,6 @@ def create_spark_session(
 
     spark = (
         builder
-        .config("spark.executor.memory", "8g")
-        .config("spark.driver.memory", "4g")
         .config("spark.sql.shuffle.partitions", "200")
         .config("spark.sql.ansi.enabled", "false")
         .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
@@ -546,7 +560,8 @@ def load_data(
         df = spark.read.parquet(input_path)
 
         text_cols = [
-            c for c in ["title", "content", "tieu_de", "noi_dung"]
+            c
+            for c in ["title", "segmented_text", "clean_text", "body", "content", "tieu_de", "noi_dung"]
             if c in df.columns
         ]
         if text_cols:
@@ -1140,19 +1155,23 @@ def main() -> None:
     logger.info("=" * 70)
 
     # 1. Khởi tạo Spark
+    log_progress(5, "Starting Spark session")
     spark = create_spark_session(local=args.local)
 
     try:
         # 2. Load & broadcast tài nguyên NLP
-        stopwords = load_stopwords(args.stopwords_path)
-        slang_dict = load_slang_dict(args.slang_dict_path)
+        log_progress(10, "Loading NLP reference files")
+        stopwords = load_stopwords(args.stopwords_path, spark)
+        slang_dict = load_slang_dict(args.slang_dict_path, spark)
         stopwords_bc = spark.sparkContext.broadcast(stopwords)
         slang_dict_bc = spark.sparkContext.broadcast(slang_dict)
 
         # 3. Đọc dữ liệu
+        log_progress(15, "Reading staged documents")
         df = load_data(spark, args.input_path, local=args.local)
 
         # 4. Tiền xử lý tiếng Việt
+        log_progress(25, "Preprocessing Vietnamese text")
         logger.info("Preprocessing Vietnamese text...")
         if args.local:
             # Local fallback: dùng hoàn toàn Spark SQL built-in để tránh
@@ -1215,28 +1234,35 @@ def main() -> None:
         doc_count = df.count()
         logger.info(f"  Documents after preprocessing: {doc_count:,}")
         df.cache()
+        log_progress(40, f"Preprocessing complete: {doc_count:,} documents")
 
         # 5. TF-IDF
+        log_progress(45, "Building TF-IDF features")
         tfidf_df, cv_model, vocabulary = build_tfidf_features(
             df,
             tokens_col="tokens",
             vocab_size=args.vocab_size,
             min_df=args.min_df,
         )
+        log_progress(60, f"TF-IDF ready: {len(vocabulary):,} vocabulary terms")
 
         # 6. Huấn luyện LDA (train trên TF counts)
+        log_progress(65, f"Training LDA model with k={args.k}")
         lda_model, ll, lp = train_lda(
             tfidf_df,
             k=args.k,
             max_iter=args.max_iter,
             optimizer=args.optimizer,
         )
+        log_progress(78, "LDA training complete")
 
         # 7. Trích xuất topics
+        log_progress(82, "Extracting topic descriptions")
         logger.info("Extracting topic descriptions:")
         topics = extract_topics(lda_model, vocabulary)
 
         # 8. Gán topic cho từng bài viết/comment
+        log_progress(86, "Inferring best topic per document")
         logger.info("Inferring best topic per document...")
         assignments_df = infer_post_topic_assignment(lda_model, tfidf_df)
 
@@ -1267,6 +1293,7 @@ def main() -> None:
             )
 
         # 9. Lưu kết quả
+        log_progress(92, "Saving LDA outputs")
         save_results(
             spark,
             lda_model,
@@ -1277,6 +1304,7 @@ def main() -> None:
             k=args.k,
         )
         save_vocabulary(cv_model, args.output_path, local=args.local)
+        log_progress(98, "Saved LDA outputs")
 
         logger.info("=" * 70)
         logger.info("LDA PIPELINE COMPLETE!")
@@ -1286,6 +1314,7 @@ def main() -> None:
         logger.info(f"  Log-Perplexity: {lp:.4f}")
         logger.info(f"  Output: {args.output_path}")
         logger.info("=" * 70)
+        log_progress(100, "LDA job complete")
 
     finally:
         spark.stop()

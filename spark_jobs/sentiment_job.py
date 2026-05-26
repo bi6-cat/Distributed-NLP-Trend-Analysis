@@ -32,6 +32,7 @@ Biến môi trường:
 
 import os
 import shutil
+import threading
 import time
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import lit
@@ -55,6 +56,105 @@ CLICKHOUSE_PASS = os.environ.get("CLICKHOUSE_PASS", "root")
 
 HDFS_COPY_TIMEOUT = int(os.environ.get("HDFS_COPY_TIMEOUT", "300"))   # FIX ⑤
 LIMIT_SAMPLES     = os.environ.get("LIMIT_SAMPLES", None)
+SENTIMENT_BATCH_SIZE = int(os.environ.get("SENTIMENT_BATCH_SIZE", "64"))
+SENTIMENT_MAX_LENGTH = int(os.environ.get("SENTIMENT_MAX_LENGTH", "256"))
+SENTIMENT_TORCH_THREADS = int(os.environ.get("SENTIMENT_TORCH_THREADS", "1"))
+
+
+def log_progress(percent: int, message: str) -> None:
+    print(f"[PROGRESS] {percent:>3}% | {message}", flush=True)
+
+
+def _format_eta(seconds: float) -> str:
+    """Format thời gian còn lại thành chuỗi ngắn gọn cho log."""
+    seconds = max(0, int(seconds))
+    minutes, secs = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours}h {minutes}m {secs}s"
+    if minutes > 0:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
+
+
+def _count_with_progress_monitor(spark, df, progress_start=35, progress_end=75):
+    """
+    Chạy count() trên background thread và poll Spark StatusTracker để in tiến độ.
+
+    Lý do:
+    - Log bên executor thường không stream đều về Airflow.
+    - Driver vẫn nhìn thấy stage/task progress qua StatusTracker.
+    """
+    sc = spark.sparkContext
+    tracker = sc.statusTracker()
+    job_group = f"sentiment-inference-{int(time.time())}"
+    poll_interval = 5
+    result = {"count": None, "error": None}
+
+    def _run_count():
+        try:
+            sc.setJobGroup(job_group, "PhoBERT inference count")
+            result["count"] = df.count()
+        except Exception as exc:  # pragma: no cover - surfaced to caller
+            result["error"] = exc
+
+    worker = threading.Thread(target=_run_count, daemon=True)
+    worker.start()
+
+    started_at = time.time()
+    last_progress = -1
+
+    while worker.is_alive():
+        active_stage_ids = list(tracker.getActiveStageIds())
+        total_tasks = 0
+        completed_tasks = 0
+        active_tasks = 0
+
+        for stage_id in active_stage_ids:
+            info = tracker.getStageInfo(stage_id)
+            if not info:
+                continue
+            total_tasks += int(getattr(info, "numTasks", 0) or 0)
+            completed_tasks += int(getattr(info, "numCompletedTasks", 0) or 0)
+            active_tasks += int(getattr(info, "numActiveTasks", 0) or 0)
+
+        if total_tasks > 0:
+            stage_ratio = min(max(completed_tasks / total_tasks, 0.0), 1.0)
+            progress = progress_start + (progress_end - progress_start) * stage_ratio
+            progress_int = int(progress)
+
+            if progress_int != last_progress:
+                if completed_tasks == 0:
+                    print(
+                        f"[PROGRESS] {progress:>5.1f}% | PhoBERT inference tasks "
+                        f"{completed_tasks}/{total_tasks} | active {active_tasks} | "
+                        "warming up workers, ETA chưa xác định",
+                        flush=True,
+                    )
+                else:
+                    elapsed = max(time.time() - started_at, 1e-6)
+                    eta_seconds = elapsed / stage_ratio - elapsed
+                    print(
+                        f"[PROGRESS] {progress:>5.1f}% | PhoBERT inference tasks "
+                        f"{completed_tasks}/{total_tasks} | active {active_tasks} | "
+                        f"ETA {_format_eta(eta_seconds)}",
+                        flush=True,
+                    )
+                last_progress = progress_int
+        else:
+            elapsed = time.time() - started_at
+            if int(elapsed) // poll_interval != int(max(elapsed - poll_interval, 0)) // poll_interval:
+                print(
+                    "[PROGRESS]  35% | PhoBERT inference submitted, waiting for Spark stage metrics...",
+                    flush=True,
+                )
+
+        worker.join(timeout=poll_interval)
+
+    if result["error"] is not None:
+        raise result["error"]
+    return result["count"]
+
 
 # Schema đầu ra — khớp với ClickHouse table stg_posts_nlp
 OUTPUT_SCHEMA = StructType([
@@ -331,7 +431,7 @@ def _chunked(iterator, size: int):
 # Inference worker — chạy trên executor
 # ---------------------------------------------------------------------------
 
-def process_partition(iterator):
+def process_partition(iterator, partition_id=None):
     """
     Chạy trên mỗi Spark executor (lazy init).
 
@@ -383,9 +483,12 @@ def process_partition(iterator):
     except ImportError as e:
         raise RuntimeError(f"Worker không import được torch: {e}")
 
-    LABEL_MAP  = {0: "negative", 1: "neutral", 2: "positive"}
-    BATCH_SIZE = 32
-    device     = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    LABEL_MAP = {0: "negative", 1: "neutral", 2: "positive"}
+    batch_size = max(1, int(os.environ.get("SENTIMENT_BATCH_SIZE", SENTIMENT_BATCH_SIZE)))
+    max_length = max(16, int(os.environ.get("SENTIMENT_MAX_LENGTH", SENTIMENT_MAX_LENGTH)))
+    torch_threads = max(1, int(os.environ.get("SENTIMENT_TORCH_THREADS", SENTIMENT_TORCH_THREADS)))
+    torch.set_num_threads(torch_threads)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     try:
         tokenizer, model = _get_model(model_path, device)
@@ -393,8 +496,29 @@ def process_partition(iterator):
         traceback.print_exc()
         raise RuntimeError(f"Không load được model: {e}")
 
-    # FIX ③: Stream iterator theo chunk, không list() toàn bộ
-    for batch in _chunked(iterator, BATCH_SIZE):
+    rows = list(iterator)
+    total_rows = len(rows)
+    if total_rows == 0:
+        return
+
+    partition_label = partition_id if partition_id is not None else "?"
+    print(
+        f"[PROGRESS]  35% | PhoBERT partition {partition_label} inference start: "
+        f"{total_rows:,} records",
+        flush=True,
+    )
+
+    processed_rows = 0
+    next_partition_progress = 25
+    partition_started_at = time.time()
+
+    print(
+        f"[BENCHMARK] PhoBERT partition {partition_label}: "
+        f"batch_size={batch_size}, max_length={max_length}, torch_threads={torch_threads}",
+        flush=True,
+    )
+
+    for batch in _chunked(rows, batch_size):
 
         texts = []
         for row in batch:
@@ -403,7 +527,7 @@ def process_partition(iterator):
 
         encoding = tokenizer(
             texts,
-            max_length=256,
+            max_length=max_length,
             padding=True,
             truncation=True,
             return_tensors="pt",
@@ -427,6 +551,22 @@ def process_partition(iterator):
                 model_version,
                 predicted_at,
             )
+
+        processed_rows += len(batch)
+        partition_progress = int(processed_rows * 100 / total_rows)
+        if partition_progress >= next_partition_progress or processed_rows == total_rows:
+            elapsed = max(time.time() - partition_started_at, 1e-6)
+            throughput = processed_rows / elapsed
+            remaining_rows = max(total_rows - processed_rows, 0)
+            eta_seconds = remaining_rows / throughput if throughput > 0 else 0.0
+            print(
+                f"[PROGRESS]  35%-75% | PhoBERT partition {partition_label}: "
+                f"{partition_progress:>3}% ({processed_rows:,}/{total_rows:,}) | "
+                f"{throughput:.1f} rec/s | ETA { _format_eta(eta_seconds) }",
+                flush=True,
+            )
+            while next_partition_progress <= partition_progress:
+                next_partition_progress += 25
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +680,7 @@ def write_to_clickhouse(df, host, port, db, user, password, table="stg_posts_nlp
 # ---------------------------------------------------------------------------
 
 def main():
+    log_progress(5, "Starting Spark session")
     spark = (
         SparkSession.builder
         .appName("NLP_SentimentJob")
@@ -547,6 +688,7 @@ def main():
     )
     spark.sparkContext.setLogLevel("WARN")
 
+    log_progress(10, "Reading staged posts")
     print(f"[INFO] Đọc stg_posts_core từ: {HDFS_INPUT}")
     raw_df = spark.read.parquet(HDFS_INPUT)
 
@@ -564,7 +706,13 @@ def main():
 
     # ── Inference ────────────────────────────────────────────────────────────
 
-    processed_rdd = raw_df.rdd.mapPartitions(process_partition)
+    log_progress(25, "Preparing sentiment inference partitions")
+    target_partitions = max(1, spark.sparkContext.defaultParallelism)
+    raw_df = raw_df.repartition(target_partitions)
+    print(f"[INFO] Repartition sentiment input to {target_partitions} partitions")
+    processed_rdd = raw_df.rdd.mapPartitionsWithIndex(
+        lambda partition_id, rows: process_partition(rows, partition_id)
+    )
     processed_df  = spark.createDataFrame(processed_rdd, OUTPUT_SCHEMA)
     processed_df  = processed_df.cache()
 
@@ -578,9 +726,11 @@ def main():
         f"executor.memory={executor_mem}, executor.cores={executor_cores}"
     )
 
+    log_progress(35, "Running PhoBERT inference")
     t_infer_start = time.time()
-    n_records     = processed_df.count()          # trigger inference pipeline
+    n_records     = _count_with_progress_monitor(spark, processed_df)
     t_infer_end   = time.time()
+    log_progress(75, f"Inference complete: {n_records:,} records")
 
     infer_elapsed  = t_infer_end - t_infer_start
     infer_throughput = n_records / infer_elapsed if infer_elapsed > 0 else 0.0
@@ -594,6 +744,7 @@ def main():
 
     # ── Ghi ClickHouse ───────────────────────────────────────────────────────
 
+    log_progress(80, "Writing sentiment rows to ClickHouse")
     t_write_start = time.time()
 
     write_to_clickhouse(
@@ -607,6 +758,7 @@ def main():
 
     t_write_end   = time.time()
     write_elapsed = t_write_end - t_write_start
+    log_progress(95, "ClickHouse write complete")
 
     # FIX ⑥: Tách biệt thời gian inference vs write
     print(f"[BENCHMARK] ===== WRITE REPORT =====")
@@ -617,6 +769,7 @@ def main():
 
     processed_df.unpersist()
     spark.stop()
+    log_progress(100, "Sentiment job complete")
 
 
 if __name__ == "__main__":

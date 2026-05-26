@@ -87,7 +87,7 @@ services:
     networks:
       - nlp_network
 
-  # Gộp thành 1 Worker lớn (6 Cores, 24G RAM)
+  # Gộp thành 1 Worker lớn (7 Cores, 32G RAM)
   spark-worker:
     build:
       context: .
@@ -98,8 +98,8 @@ services:
     environment:
       - SPARK_MODE=worker
       - SPARK_MASTER_URL=${SPARK_MASTER_URL:-spark://spark-master:7077}
-      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-24G}
-      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-6}
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-32G}
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-7}
       - PYSPARK_PYTHON=/opt/bitnami/python/bin/python3
       - PYSPARK_DRIVER_PYTHON=/opt/bitnami/python/bin/python3
       - HADOOP_USER_NAME=${HADOOP_USER_NAME:-root}

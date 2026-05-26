@@ -729,6 +729,94 @@ def task_save_lda_to_clickhouse() -> None:
     logger.info("[LDA] Topics pushed to ClickHouse.")
 
 
+def task_validate_full_demo_data() -> None:
+    """
+    Validate local full-demo raw files before uploading to HDFS.
+
+    Sau bước này ta biết bộ raw demo đủ 5 file bắt buộc để full rebuild chạy
+    nhất quán, không bị thiếu source âm thầm.
+    """
+    required = [
+        "voz/posts.csv",
+        "voz/comments.csv",
+        "vatvo/articles.csv",
+        "vnexpress/post_vnexpress.csv",
+        "vnexpress/comment_vnexpress.csv",
+    ]
+    missing = [
+        rel_path
+        for rel_path in required
+        if not os.path.isfile(os.path.join(RAW_LOCAL_PATH, rel_path))
+    ]
+    if missing:
+        raise FileNotFoundError(
+            "Missing full demo data files: " + ", ".join(missing)
+        )
+    logger.info("[VALIDATE] Full demo raw files are present.")
+
+
+def _execute_clickhouse_sql(query: str) -> str:
+    import urllib.parse
+    import urllib.request
+
+    url = (
+        f"http://{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/"
+        f"?database={urllib.parse.quote(CLICKHOUSE_DB)}"
+        f"&user={urllib.parse.quote(CLICKHOUSE_USER)}"
+        f"&password={urllib.parse.quote(CLICKHOUSE_PASSWORD)}"
+    )
+    request = urllib.request.Request(url, data=query.encode("utf-8"), method="POST")
+    with urllib.request.urlopen(request, timeout=120) as response:
+        body = response.read().decode("utf-8", errors="replace")
+        if response.status >= 400:
+            raise RuntimeError(f"ClickHouse HTTP {response.status}: {body[:300]}")
+        return body
+
+
+def task_reset_clickhouse_staging() -> None:
+    """
+    Reset staging tables for a clean full rebuild.
+
+    Sau bước này ClickHouse không còn dữ liệu NLP/topic cũ lẫn với demo full mới.
+    """
+    tables = [
+        "stg_posts_core",
+        "stg_posts_nlp",
+        "stg_topics",
+        "stg_post_topics",
+        "stg_keyword_freq",
+    ]
+    for table in tables:
+        _execute_clickhouse_sql(f"TRUNCATE TABLE IF EXISTS {CLICKHOUSE_DB}.{table}")
+        logger.info(f"[RESET] Truncated {CLICKHOUSE_DB}.{table}")
+
+
+def task_smoke_check_full_pipeline() -> None:
+    """
+    Check row counts after dbt so failures surface in Airflow immediately.
+
+    Sau bước này ta có một health report ngắn: core rows, sentiment rows,
+    topic labels, topic assignments, và mart chính có dữ liệu hay không.
+    """
+    checks = {
+        "stg_posts_core": "SELECT count() FROM stg_posts_core",
+        "stg_posts_nlp": "SELECT count() FROM stg_posts_nlp",
+        "stg_topics": "SELECT count() FROM stg_topics",
+        "stg_post_topics": "SELECT count() FROM stg_post_topics",
+        "fct_topic_activity": "SELECT count() FROM fct_topic_activity",
+    }
+    counts: Dict[str, int] = {}
+    for name, query in checks.items():
+        value = _execute_clickhouse_sql(query).strip()
+        counts[name] = int(value or "0")
+        logger.info(f"[SMOKE] {name}: {counts[name]:,} rows")
+
+    required_non_empty = ["stg_posts_core", "stg_topics", "stg_post_topics"]
+    empty = [name for name in required_non_empty if counts.get(name, 0) <= 0]
+    if empty:
+        raise RuntimeError(f"Full pipeline smoke check failed; empty tables: {empty}")
+
+
 # ============================================================================
 # DAG 2: FULL PROCESSING PIPELINE (historical/full reprocessing)
 # ============================================================================
@@ -740,28 +828,38 @@ with DAG(
         "Full processing pipeline: crawl → clean → LDA → sentiment "
         "→ ClickHouse landing tables → dbt transform."
     ),
-    schedule_interval="0 2 * * *",       # 2:00 AM hàng ngày
+    schedule_interval=None,
     catchup=False,
     max_active_runs=1,
-    tags=["pipeline", "daily", "phase2"],
-) as daily_dag:
+    tags=["pipeline", "full", "demo", "phase2"],
+) as full_dag:
 
     pipeline_start = DummyOperator(task_id="pipeline_start")
 
-    # ── Task từ Member 1: Crawl ──
-    # Thay bằng crawl thực tế qua BashOperator
-    # Note: Truyền biến môi trường HDFS_HOST để python script tự nhận dạng hostname docker
-    crawl_sources = BashOperator(
-        task_id="crawl_sources",
+    validate_full_data = PythonOperator(
+        task_id="validate_full_demo_data",
+        python_callable=task_validate_full_demo_data,
+    )
+
+    upload_full_raw_to_hdfs = BashOperator(
+        task_id="upload_full_raw_to_hdfs",
         bash_command=(
-            f"export HDFS_HOST='{WEBHDFS_HOSTNAME}' HDFS_USER='{HDFS_USER}' PYTHONUNBUFFERED=1 && "
-            # Tạm thời tắt crawl mạng để chạy data có sẵn:
-            # "python3 -u /opt/airflow/crawlers/vnexpress.py || true && "
-            # "python3 -u /opt/airflow/crawlers/voz.py || true && "
-            # "python3 -u /opt/airflow/crawlers/vatvo.py || true && "
+            f"export HDFS_HOST='{WEBHDFS_HOSTNAME}' "
+            f"HDFS_USER='{HDFS_USER}' "
+            "PYTHONUNBUFFERED=1 "
+            f"DATA_DIR='{RAW_LOCAL_PATH}' "
+            "REF_DATA_DIR='/opt/airflow/data' "
+            f"HDFS_BASE_DIR='{HDFS_USER_DIR}/raw_data' "
+            f"HDFS_REF_DIR='{HDFS_USER_DIR}/ref' "
+            "&& "
             "python3 -u /opt/airflow/crawlers/upload_to_hdfs.py"
         ),
         execution_timeout=timedelta(hours=2),
+    )
+
+    reset_clickhouse_staging = PythonOperator(
+        task_id="reset_clickhouse_staging",
+        python_callable=task_reset_clickhouse_staging,
     )
 
     spark_common_conf = (
@@ -773,12 +871,14 @@ with DAG(
         f"--conf spark.executorEnv.HADOOP_USER_NAME={HDFS_USER} "
         f"--conf spark.executorEnv.HDFS_USER={HDFS_USER} "
         "--conf spark.hadoop.fs.permissions.umask-mode=000 "
-        "--executor-memory 12g "
+        "--driver-memory 8g "
+        "--executor-memory 28g "
+        "--executor-cores 7 "
     )
 
     # ── Task từ Member 2: Spark Cleaning + Dedup LSH ──
     spark_cleaning = BashOperator(
-        task_id="spark_cleaning",
+        task_id="spark_cleaning_full",
         bash_command=(
             "export PYTHONPATH='/opt/airflow' "
             f"HADOOP_USER_NAME='{HDFS_USER}' "
@@ -788,7 +888,7 @@ with DAG(
             f"CLICKHOUSE_HOST='{CLICKHOUSE_HOST}' "
             "&& spark-submit "
             f"{spark_common_conf}"
-            "/opt/airflow/spark_jobs/cleaning_job.py"
+            "/opt/airflow/spark_jobs/cleaning_job.py --with-dedup"
         ),
         execution_timeout=timedelta(hours=2),
     )
@@ -796,7 +896,7 @@ with DAG(
     # ── Task từ Member 3: LDA Topic Modeling ──
     lda_local_flag = "--local" if USE_LOCAL else ""
     lda_topic_modeling = BashOperator(
-        task_id="lda_topic_modeling",
+        task_id="lda_topic_modeling_full",
         bash_command=(
             "export PYTHONPATH='/opt/airflow' "
             f"HADOOP_USER_NAME='{HDFS_USER}' "
@@ -816,7 +916,7 @@ with DAG(
 
     # ── Task từ Member 4: Sentiment Analysis ──
     sentiment_analysis = BashOperator(
-        task_id="sentiment_analysis",
+        task_id="sentiment_analysis_full",
         bash_command=(
             "export PYTHONPATH='/opt/airflow' "
             f"HADOOP_USER_NAME='{HDFS_USER}' "
@@ -828,6 +928,9 @@ with DAG(
             f"CLICKHOUSE_PASS='{CLICKHOUSE_PASSWORD}' "
             f"NLP_MODEL_PATH='{LOCAL_SENTIMENT_MODEL_PATH}' "
             "NLP_MODEL_VERSION='phobert_v1' "
+            "SENTIMENT_BATCH_SIZE='64' "
+            "SENTIMENT_MAX_LENGTH='256' "
+            "SENTIMENT_TORCH_THREADS='1' "
             "&& spark-submit "
             f"{spark_common_conf}"
             f"--conf spark.executorEnv.CLICKHOUSE_DB={CLICKHOUSE_DB} "
@@ -835,6 +938,9 @@ with DAG(
             f"--conf spark.executorEnv.CLICKHOUSE_PASS={CLICKHOUSE_PASSWORD} "
             f"--conf spark.executorEnv.NLP_MODEL_PATH={LOCAL_SENTIMENT_MODEL_PATH} "
             "--conf spark.executorEnv.NLP_MODEL_VERSION=phobert_v1 "
+            "--conf spark.executorEnv.SENTIMENT_BATCH_SIZE=64 "
+            "--conf spark.executorEnv.SENTIMENT_MAX_LENGTH=256 "
+            "--conf spark.executorEnv.SENTIMENT_TORCH_THREADS=1 "
             "/opt/airflow/spark_jobs/sentiment_job.py"
         ),
         execution_timeout=timedelta(hours=2),
@@ -852,25 +958,18 @@ with DAG(
         python_callable=task_save_lda_to_clickhouse,
     )
 
-    # ── Task từ Member 3: CMS keyword frequency (daily batch) ──
-    run_cms = PythonOperator(
-        task_id="cms_keyword_counting",
-        python_callable=task_run_cms_daily,
+    smoke_check = PythonOperator(
+        task_id="smoke_check_full_pipeline",
+        python_callable=task_smoke_check_full_pipeline,
     )
 
     pipeline_end = DummyOperator(task_id="pipeline_end")
 
-    # ── DAG Flow ──
-    # crawl → clean → LDA → sentiment
-    #                    ├→ save_lda_to_ch ─┐
-    # clean ────────────┘                   ├──► dbt_transform → end
-    # clean ─────────────────────────→ CMS ─┘
-    pipeline_start >> crawl_sources >> spark_cleaning
-    spark_cleaning >> lda_topic_modeling
-    lda_topic_modeling >> sentiment_analysis
-    sentiment_analysis >> save_lda_to_ch >> dbt_transform
-    sentiment_analysis >> run_cms >> dbt_transform
-    dbt_transform >> pipeline_end
+    pipeline_start >> validate_full_data >> upload_full_raw_to_hdfs
+    upload_full_raw_to_hdfs >> reset_clickhouse_staging >> spark_cleaning
+    spark_cleaning >> lda_topic_modeling >> save_lda_to_ch
+    save_lda_to_ch >> sentiment_analysis >> dbt_transform
+    dbt_transform >> smoke_check >> pipeline_end
 
 
 # ============================================================================
