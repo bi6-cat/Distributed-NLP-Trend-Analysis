@@ -87,7 +87,7 @@ HDFS_SILVER_POST_TOPICS:  str = "/data/silver/post_topics"
 STAGED_LOCAL_PATH:   str = os.getenv("STAGED_LOCAL_PATH", "/opt/airflow/data/preprocessed/stg_posts_core")
 RAW_LOCAL_PATH:      str = os.getenv("RAW_LOCAL_PATH", "/opt/airflow/crawlers/data")
 LDA_LOCAL_OUTPUT:    str = os.getenv("LDA_LOCAL_OUTPUT", "/opt/airflow/output/lda")
-LOCAL_SENTIMENT_MODEL_PATH: str = os.getenv("LOCAL_SENTIMENT_MODEL_PATH", "/opt/airflow/models/phobert_finetuned/final")
+LOCAL_SENTIMENT_MODEL_PATH: str = os.getenv("LOCAL_SENTIMENT_MODEL_PATH", "/opt/airflow/models/phobert_finetuned_v2/final")
 LOCAL_STOPWORDS_PATH: str = os.getenv("LOCAL_STOPWORDS_PATH", "/opt/airflow/data/stopwords_vi.txt")
 LOCAL_SLANG_DICT_PATH: str = os.getenv("LOCAL_SLANG_DICT_PATH", "/opt/airflow/data/slang_dict.json")
 LOCAL_CMS_STATE_PATH: str = "output/cms/cms_state.pkl"
@@ -911,8 +911,8 @@ with DAG(
             f"--input-path '{STAGED_LOCAL_PATH if USE_LOCAL else STAGED_HDFS_PATH}' "
             f"--output-path '{LDA_LOCAL_OUTPUT if USE_LOCAL else LDA_HDFS_OUTPUT}' "
             "--k 20 "
-            f"--stopwords-path '{LOCAL_STOPWORDS_PATH if USE_LOCAL else f'{HDFS_URI_PREFIX}{HDFS_USER_DIR}/ref/stopwords_vi.txt'}' "
-            f"--slang-dict-path '{LOCAL_SLANG_DICT_PATH if USE_LOCAL else f'{HDFS_URI_PREFIX}{HDFS_USER_DIR}/ref/slang_dict.json'}' "
+            f"--stopwords-path '{LOCAL_STOPWORDS_PATH}' "
+            f"--slang-dict-path '{LOCAL_SLANG_DICT_PATH}' "
             f"{lda_local_flag}"
         ),
         execution_timeout=timedelta(hours=2),

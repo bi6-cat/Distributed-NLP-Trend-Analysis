@@ -13,13 +13,14 @@ clickhouse-connect==0.7.7
 pydantic==2.6.3
 
 # # Topic Modeling (M3)
-# sentence-transformers==2.6.1
-# bertopic==0.16.0
-# mmh3==4.1.0
-# gensim==4.4.0
-# hdbscan==0.8.42
-# umap-learn==0.5.11
-# pyLDAvis==3.4.1
+sentence-transformers==2.6.1
+bertopic==0.16.0
+mmh3==4.1.0
+gensim==4.4.0
+hdbscan==0.8.42
+umap-learn==0.5.11
+pyLDAvis==3.4.1
+huggingface-hub==0.23.5
 
 # NLP & Sentiment (M4)
 transformers==4.39.0
@@ -27,7 +28,7 @@ transformers==4.39.0
 torch==2.2.0+cpu
 vncorenlp==1.0.3
 underthesea==6.8.0
-scikit-learn==1.4.0
+scikit-learn==1.6.1
 numpy==1.26.4
 pandas==2.2.1
 

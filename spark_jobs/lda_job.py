@@ -546,7 +546,16 @@ def load_data(
         df = spark.read.parquet(input_path)
 
         text_cols = [
-            c for c in ["title", "content", "tieu_de", "noi_dung"]
+            c for c in [
+                "title",
+                "segmented_text",
+                "clean_text",
+                "body",
+                "content",
+                "tieu_de",
+                "noi_dung",
+                "text",
+            ]
             if c in df.columns
         ]
         if text_cols:
@@ -570,7 +579,7 @@ def load_data(
             _build_created_at_expr(df).alias("created_at"),
             _pick_col_or_lit(df, ["url", "video_url", "article_url"], "").cast("string").alias("url"),
             F.col("text").cast("string").alias("text"),
-            F.lit(None).cast("string").alias("preprocessed_text"),
+            _pick_col_or_lit(df, ["clean_text", "segmented_text"], "").cast("string").alias("preprocessed_text"),
         )
 
     # Loại bỏ rows rỗng

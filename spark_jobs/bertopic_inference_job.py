@@ -32,6 +32,7 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List, Optional, Tuple
+from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
@@ -68,6 +69,15 @@ TOP_N_TOPICS: int  = 50    # giữ top-N topic theo số doc, remap phần còn 
 # HDFS HELPERS  — dùng WebHDFS REST API, không cần Hadoop CLI
 # ============================================================================
 
+def _to_webhdfs_path(hdfs_path: str) -> str:
+    """Convert hdfs://host:port/path or plain /path into a WebHDFS path."""
+    parsed = urlparse(hdfs_path)
+    path = parsed.path if parsed.scheme == "hdfs" else hdfs_path
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return path.rstrip("/") or "/"
+
+
 def _webhdfs_read_parquet(hdfs_path: str) -> pd.DataFrame:
     """
     Đọc Parquet directory từ HDFS qua WebHDFS HTTP API.
@@ -82,21 +92,31 @@ def _webhdfs_read_parquet(hdfs_path: str) -> pd.DataFrame:
     import requests as _req
 
     base = f"http://{WEBHDFS_HOST}/webhdfs/v1"
+    hdfs_path = _to_webhdfs_path(hdfs_path)
 
-    # List files trong directory
-    r = _req.get(f"{base}{hdfs_path}?op=LISTSTATUS&user.name={HDFS_USER}", timeout=30)
-    r.raise_for_status()
-    statuses = r.json()["FileStatuses"]["FileStatus"]
-    parquet_files = [s["pathSuffix"] for s in statuses
-                     if s["pathSuffix"].endswith(".parquet") and s["type"] == "FILE"]
+    def _list_parquet_files(directory: str) -> List[str]:
+        r = _req.get(f"{base}{directory}?op=LISTSTATUS&user.name={HDFS_USER}", timeout=30)
+        r.raise_for_status()
+        statuses = r.json()["FileStatuses"]["FileStatus"]
+
+        files: List[str] = []
+        for status in statuses:
+            name = status["pathSuffix"]
+            child_path = f"{directory}/{name}"
+            if status["type"] == "FILE" and name.endswith(".parquet"):
+                files.append(child_path)
+            elif status["type"] == "DIRECTORY":
+                files.extend(_list_parquet_files(child_path))
+        return files
+
+    parquet_files = _list_parquet_files(hdfs_path)
 
     if not parquet_files:
         raise FileNotFoundError(f"Không tìm thấy file .parquet tại HDFS: {hdfs_path}")
 
     logger.info(f"WebHDFS: đọc {len(parquet_files)} parquet file(s) từ {hdfs_path}")
     dfs = []
-    for fname in parquet_files:
-        file_path = f"{hdfs_path}/{fname}"
+    for file_path in parquet_files:
         resp = _req.get(f"{base}{file_path}?op=OPEN&user.name={HDFS_USER}", allow_redirects=True, timeout=300)
         resp.raise_for_status()
         dfs.append(pd.read_parquet(io.BytesIO(resp.content)))
@@ -111,6 +131,7 @@ def _webhdfs_upload(local_path: str, hdfs_path: str) -> None:
     import requests as _req
 
     base = f"http://{WEBHDFS_HOST}/webhdfs/v1"
+    hdfs_path = _to_webhdfs_path(hdfs_path)
 
     parent = os.path.dirname(hdfs_path)
     _req.put(f"{base}{parent}?op=MKDIRS&user.name={HDFS_USER}", timeout=30)
@@ -136,6 +157,7 @@ def _webhdfs_download_dir(hdfs_dir: str, local_dir: str) -> None:
     import requests as _req
 
     base = f"http://{WEBHDFS_HOST}/webhdfs/v1"
+    hdfs_dir = _to_webhdfs_path(hdfs_dir)
     os.makedirs(local_dir, exist_ok=True)
 
     r = _req.get(f"{base}{hdfs_dir}?op=LISTSTATUS&user.name={HDFS_USER}", timeout=30)
@@ -193,9 +215,16 @@ def load_staged_posts(
         # Filter theo window
         cutoff = datetime.now(tz=timezone.utc) - timedelta(days=window_days)
         if "created_at" in df.columns:
+            before_filter = len(df)
             df["created_at"] = pd.to_datetime(df["created_at"], utc=True, errors="coerce")
-            df = df[df["created_at"] >= cutoff]
-            logger.info(f"Filtered to last {window_days} days: {len(df):,} rows")
+            filtered_df = df[df["created_at"] >= cutoff].copy()
+            logger.info(f"Filtered to last {window_days} days: {len(filtered_df):,} rows")
+            if filtered_df.empty and before_filter:
+                logger.warning(
+                    "Window filter returned 0 rows; falling back to all staged posts."
+                )
+            else:
+                df = filtered_df
 
     # Build clean_text (giống notebook cell 4)
     def _build_text(row) -> str:
@@ -207,8 +236,8 @@ def load_staged_posts(
             text = f"{title} {text}"
         return text.strip()[:MAX_TEXT_LEN]
 
-    df["clean_text"] = df.apply(_build_text, axis=1)
-    df = df[df["clean_text"].str.len() >= 10].copy()
+    df["clean_text"] = df.apply(_build_text, axis=1).astype("string")
+    df = df[df["clean_text"].str.len().fillna(0) >= 10].copy()
     df["post_id"] = df["post_id"].astype(str)
 
     logger.info(f"Ready for inference: {len(df):,} posts")
