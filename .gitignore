@@ -53,8 +53,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
 parts/
 sdist/
 var/
@@ -259,4 +257,3 @@ nlp-worker-2/
 *.vbox-prev
 .venv/
 __pycache__/
-
