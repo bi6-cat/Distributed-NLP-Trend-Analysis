@@ -44,8 +44,14 @@ HDFS_BASE     = os.environ.get("HDFS_BASE", "hdfs://namenode:9000")
 HDFS_USER     = os.environ.get("HDFS_USER", os.environ.get("HADOOP_USER_NAME", "root"))
 HDFS_HOME     = os.environ.get("HDFS_HOME", f"/user/{HDFS_USER}")
 HDFS_INPUT    = os.environ.get("HDFS_INPUT",        f"{HDFS_BASE}{HDFS_HOME}/staged/stg_posts_core")
+HDFS_STAGED_ROOT = os.environ.get("HDFS_STAGED_ROOT", f"{HDFS_BASE}{HDFS_HOME}/staged").rstrip("/")
+HDFS_OUTPUT   = os.environ.get(
+    "HDFS_OUTPUT",
+    os.environ.get("HDFS_STG_POSTS_NLP", f"{HDFS_STAGED_ROOT}/stg_posts_nlp"),
+)
 MODEL_PATH    = os.environ.get("NLP_MODEL_PATH",    f"{HDFS_BASE}{HDFS_HOME}/models/phobert_finetuned/final")
 MODEL_VERSION = os.environ.get("NLP_MODEL_VERSION", "phobert_v1")
+WRITE_CLICKHOUSE_DIRECT = os.environ.get("WRITE_CLICKHOUSE_DIRECT", "false").lower() in {"1", "true", "yes", "y"}
 
 CLICKHOUSE_HOST = os.environ.get("CLICKHOUSE_HOST", "192.168.56.14")
 CLICKHOUSE_PORT = os.environ.get("CLICKHOUSE_PORT", "8123")
@@ -592,7 +598,19 @@ def main():
     print(f"[BENCHMARK] Parallelism       : {n_executors} slots")
     print(f"[BENCHMARK] ===========================")
 
-    # ── Ghi ClickHouse ───────────────────────────────────────────────────────
+    # ── Write staged Parquet ─────────────────────────────────────────────────
+    t_parquet_start = time.time()
+    processed_df.write.mode("overwrite").parquet(HDFS_OUTPUT)
+    t_parquet_end = time.time()
+    print(f"[OUTPUT] Wrote stg_posts_nlp Parquet -> {HDFS_OUTPUT}")
+    print(f"[BENCHMARK] Parquet write time : {t_parquet_end - t_parquet_start:.2f} s")
+
+    # ── Optional direct ClickHouse write (legacy path) ───────────────────────
+    if not WRITE_CLICKHOUSE_DIRECT:
+        print("[CH] Skip direct ClickHouse write. Airflow should ingest staged Parquet.")
+        processed_df.unpersist()
+        spark.stop()
+        return
 
     t_write_start = time.time()
 

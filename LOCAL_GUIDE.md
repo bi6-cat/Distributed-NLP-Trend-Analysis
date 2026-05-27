@@ -1,68 +1,91 @@
-# 🚀 Hướng Dẫn Vận Hành Hệ Thống (Local Environment)
+# Local Guide: Chay Pipeline Bang Docker Compose
 
-Tài liệu này hướng dẫn cách sử dụng Docker Compose để quản lý cụm HPC và chạy pipeline xử lý dữ liệu.
+Tai lieu nay dung cho moi truong local Windows/Docker Compose.
 
----
+## 1. Docker mount va vi tri file
 
-## 1. Các Script & Lệnh Chính
+`docker-compose.yml` mount ca repo vao Airflow/Spark:
 
-| Lệnh / Script | Công dụng | Tần suất dùng |
-| :--- | :--- | :--- |
-| \docker-compose up -d\ | Khởi động cluster (HDFS, Spark, ClickHouse, Airflow) | Mỗi khi bắt đầu làm việc |
-| \docker-compose down\ | Tắt cluster | Khi dừng làm việc |
-| \docker-compose down -v\ | Xóa sạch dữ liệu toàn bộ cluster (Factory Reset) | Khi muốn chạy setup lại từ đầu |
-| \./run_pipeline.sh\ | Chạy toàn bộ luồng pipeline từ đầu đến cuối | Khi muốn xử lý dữ liệu mới |
+```text
+./ -> /opt/airflow
+./ -> /opt/spark/work-dir
+```
 
-> [!IMPORTANT]
-> **Quy tắc vàng:**
-> Lần đầu tiên chạy \docker-compose up -d\ có thể mất thời gian do tải image Docker. Các lần sau sẽ khởi động rất nhanh.
+Vi vay cac path local can dat theo convention code hien tai:
 
----
+```text
+crawlers/data/                         -> /opt/airflow/crawlers/data
+data/stopwords_vi.txt                  -> /opt/airflow/data/stopwords_vi.txt
+data/slang_dict.json                   -> /opt/airflow/data/slang_dict.json
+models/phobert_finetuned/final/        -> /opt/airflow/models/phobert_finetuned/final
+```
 
-## 2. Quy Trình Chạy Pipeline Chuẩn
+Neu model hien co o `models/phobert_finetuned_v2/final`, co 2 cach:
 
-Để chạy dự án, hãy thực hiện theo thứ tự sau:
+- Copy/rename thanh `models/phobert_finetuned/final` de dung default env.
+- Hoac sua `.env`: `LOCAL_SENTIMENT_MODEL_PATH=/opt/airflow/models/phobert_finetuned_v2/final`.
 
-### Bước 1: Khởi động hệ thống
-Mở Terminal tại thư mục project:
-\\ash
+## 2. Start cluster
+
+```powershell
 docker-compose up -d
-\
-### Bước 2: Dọn dẹp dữ liệu cũ (Tùy chọn)
-Nếu bạn muốn xóa sạch dữ liệu cũ để chạy lại bản mới nhất:
-\\ash
+docker-compose ps
+```
+
+Neu can reset sach Docker volume:
+
+```powershell
 docker-compose down -v
 docker-compose up -d
-\
-### Bước 3: Thực thi Pipeline xử lý
-Đảm bảo đã cấp quyền thực thi cho các file bash:
-\\ash
-chmod +x run_pipeline.sh scripts/*.sh
-\Sau đó khởi chạy:
-\\ash
-./run_pipeline.sh
-\
----
+```
 
-## 4. Quản lý Dữ liệu Thử nghiệm (Crawlers)
+## 3. Chay full pipeline dung Airflow UI
 
-Dữ liệu thô dùng để chạy thử pipeline được lưu tại thư mục local: \crawlers/data/\. Mặc định đã có sẵn ít dữ liệu để chạy thử.
+1. Airflow UI: <http://localhost:8081>
+2. Login: `admin/admin`
+3. Unpause DAG `full_processing_pipeline`
+4. Trigger DAG
 
-### Cách lấy dữ liệu mới:
-1. **Kích hoạt môi trường ảo (venv):**
-   \\ash
-   source venv/bin/activate  # Hoặc .env\Scriptsctivate trên Windows
-   \
-2. **Chạy các bản Crawler:**
-   * **VOZ:** \python crawlers/voz.py   * **VatVo:** \python crawlers/vatvo.py   * **VnExpress:** \python crawlers/vnexpress.py
-Sau đó chạy \./run_pipeline.sh\ để đẩy vào hệ thống.
+DAG se tu chay:
 
----
+```text
+validate_runtime_mounts
+  -> crawl_sources
+  -> upload_reference_files_to_hdfs
+  -> spark_cleaning
+  -> ClickHouse ingest/dbt tasks
+```
 
-## 5. Truy Cập Các Giao Diện (Web UI)
+## 4. Lenh kiem tra nhanh
 
-*   **HDFS Web UI:** [http://localhost:9870](http://localhost:9870)
-*   **Spark Master:** [http://localhost:8080](http://localhost:8080)
-*   **Airflow UI:** [http://localhost:8081](http://localhost:8081) (\dmin\ / \dmin\)
-*   **ClickHouse:** [http://localhost:8123](http://localhost:8123)
-*   **Dashboard:** \streamlit run dashboard/app.py
+Kiem tra mount trong container:
+
+```powershell
+docker exec airflow-scheduler ls /opt/airflow/crawlers/data/voz
+docker exec airflow-scheduler ls /opt/airflow/data/stopwords_vi.txt
+docker exec airflow-scheduler ls /opt/airflow/data/slang_dict.json
+docker exec airflow-scheduler ls /opt/airflow/models/phobert_finetuned/final
+```
+
+Kiem tra HDFS sau khi DAG chay:
+
+```powershell
+docker exec namenode hdfs dfs -ls /user/root/ref
+docker exec namenode hdfs dfs -find /user/root/raw_data -type f
+docker exec namenode hdfs dfs -find /user/root/staged/stg_posts_core -name "*.parquet"
+```
+
+Theo doi log:
+
+```powershell
+docker-compose logs -f airflow-scheduler
+```
+
+## 5. Luu y Windows
+
+Khong dung `chmod` trong Windows CMD/PowerShell. Lenh `chmod` chi co trong Linux/Git Bash/WSL. Voi flow local hien tai, nen trigger pipeline bang Airflow UI thay vi chay shell script truc tiep.
+HDFS Web UI: http://localhost:9870
+Spark Master: http://localhost:8080
+Airflow UI: http://localhost:8081 (\�dmin\ / \�dmin)
+ClickHouse: http://localhost:8123
+Dashboard: \streamlit run dashboard/app.py

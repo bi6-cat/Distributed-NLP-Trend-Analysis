@@ -9,8 +9,8 @@ services:
       - "9000:9000"
     environment:
       - CLICKHOUSE_DB=tech_radar
-      - CLICKHOUSE_USER=root
-      - CLICKHOUSE_PASSWORD=root
+      - CLICKHOUSE_USER=admin
+      - CLICKHOUSE_PASSWORD=clickhouse_secret
       - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
     ulimits:
       nofile:

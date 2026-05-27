@@ -125,16 +125,27 @@ class MinHashDeduplicator:
             Spark DataFrame đã loại bỏ duplicate.
         """
         from datasketch import MinHashLSH
-        from pyspark.sql.functions import col
+        from pyspark.sql.functions import col, expr
 
         logger.info("[Dedup] Bắt đầu MinHash LSH deduplication "
                     f"(num_perm={self.num_perm}, threshold={self.threshold}, k={self.k})")
 
+        # Gắn row id ổn định để dedup theo từng row thay vì chỉ theo post_id.
+        working_df = df.withColumn("__dedup_row_id", expr("uuid()")).cache()
+        working_df.count()
+
         # ── Bước 1: Collect metadata về driver ───────────────────────────────
         rows = (
-            df.select("post_id", "segmented_text", "created_at")
+            working_df.select("__dedup_row_id", "post_id", "segmented_text", "created_at")
               .rdd
-              .map(lambda r: (r["post_id"], r["segmented_text"] or "", r["created_at"] or 0))
+              .map(
+                  lambda r: (
+                      r["__dedup_row_id"],
+                      r["post_id"],
+                      r["segmented_text"] or "",
+                      r["created_at"] or 0,
+                  )
+              )
               .collect()
         )
         logger.info(f"[Dedup] Collected {len(rows):,} records về driver")
@@ -142,22 +153,22 @@ class MinHashDeduplicator:
         # ── Bước 2: Build MinHash signatures ─────────────────────────────────
         lsh = MinHashLSH(threshold=self.threshold, num_perm=self.num_perm)
 
-        # post_id → created_at (để so sánh oldest)
+        # row_id → created_at (để so sánh oldest)
         created_at_map: dict[str, int] = {}
-        # post_id → MinHash (để insert vào LSH)
+        # row_id → MinHash (để insert vào LSH)
         minhash_map: dict[str, object] = {}
 
         skipped = 0
-        for post_id, text, created_at in rows:
+        for row_id, _, text, created_at in rows:
             mh = self._compute_minhash(text)
             if mh is None:
                 skipped += 1
                 continue
-            minhash_map[post_id] = mh
+            minhash_map[row_id] = mh
             if hasattr(created_at, 'timestamp'):
-                created_at_map[post_id] = int(created_at.timestamp())
+                created_at_map[row_id] = int(created_at.timestamp())
             else:
-                created_at_map[post_id] = int(created_at)
+                created_at_map[row_id] = int(created_at)
 
         logger.info(f"[Dedup] Đã tính signature cho {len(minhash_map):,} records "
                     f"(bỏ qua {skipped:,} records không có text)")
@@ -184,21 +195,21 @@ class MinHashDeduplicator:
 
         # Insert và query LSH — O(n) amortized
         inserted_ids = []
-        for post_id, mh in minhash_map.items():
+        for row_id, mh in minhash_map.items():
             # Query trước khi insert để tìm gần đúng (approximate neighbors)
             try:
                 neighbors = lsh.query(mh)
-                for neighbor_id in neighbors:
-                    if neighbor_id != post_id:
-                        union(post_id, neighbor_id)
+                for neighbor_row_id in neighbors:
+                    if neighbor_row_id != row_id:
+                        union(row_id, neighbor_row_id)
             except Exception:
-                pass  # post_id chưa có trong LSH, bỏ qua
+                pass  # row_id chưa có trong LSH, bỏ qua
 
-            # Insert vào LSH (dùng post_id làm key)
+            # Insert vào LSH (dùng row_id làm key)
             try:
-                lsh.insert(post_id, mh)
-                inserted_ids.append(post_id)
-                parent.setdefault(post_id, post_id)
+                lsh.insert(row_id, mh)
+                inserted_ids.append(row_id)
+                parent.setdefault(row_id, row_id)
             except ValueError:
                 # Trùng key — có thể xảy ra với dữ liệu test nhỏ
                 pass
@@ -206,25 +217,30 @@ class MinHashDeduplicator:
         logger.info(f"[Dedup] Đã insert {len(inserted_ids):,} signatures vào LSH index")
 
         # ── Bước 4: Xác định post_ids cần giữ (1 per cluster = oldest) ───────
-        # Với mỗi post_id, root của Union-Find là representative được giữ lại
-        post_ids_to_keep: Set[str] = {find(pid) for pid in inserted_ids}
+        # Với mỗi row_id, root của Union-Find là representative được giữ lại
+        row_ids_to_keep: Set[str] = {find(row_id) for row_id in inserted_ids}
 
         # Thêm lại các records bị skip (không có text) — không ảnh hưởng dedup
-        for post_id, _, _ in rows:
-            if post_id not in minhash_map:
-                post_ids_to_keep.add(post_id)
+        for row_id, _, _, _ in rows:
+            if row_id not in minhash_map:
+                row_ids_to_keep.add(row_id)
 
-        n_removed = len(rows) - len(post_ids_to_keep)
+        n_removed = len(rows) - len(row_ids_to_keep)
         pct = n_removed / max(len(rows), 1) * 100
         logger.info(f"[Dedup] Phát hiện {n_removed:,} duplicates ({pct:.1f}% records loại bỏ)")
-        logger.info(f"[Dedup] Giữ lại {len(post_ids_to_keep):,} records duy nhất")
+        logger.info(f"[Dedup] Giữ lại {len(row_ids_to_keep):,} records duy nhất")
 
         # ── Bước 5: Broadcast + filter ────────────────────────────────────────
-        bc_keep = spark.sparkContext.broadcast(post_ids_to_keep)
+        bc_keep = spark.sparkContext.broadcast(row_ids_to_keep)
 
-        deduped_df = df.filter(col("post_id").isin(list(bc_keep.value)))
+        deduped_df = (
+            working_df
+            .filter(col("__dedup_row_id").isin(list(bc_keep.value)))
+            .drop("__dedup_row_id")
+        )
 
         bc_keep.unpersist()
+        working_df.unpersist()
 
         return deduped_df
 

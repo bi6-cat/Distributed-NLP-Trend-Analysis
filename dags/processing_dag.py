@@ -1,44 +1,3 @@
-"""
-dags/processing_dag.py — Airflow DAG: Tích hợp CMS Keyword Streaming
-
-Task 2.5 (Member 3 — Phase 2)
-Dự án: Vietnamese Social Media Trend & Controversy Analysis System
-
-File này chứa 2 DAGs:
-
-1. full_processing_pipeline:
-    crawl → spark_cleaning → lda_topic_modeling → sentiment_analysis
-    ├→ save_lda_to_clickhouse
-    ├→ cms_keyword_counting
-    └→ dbt_transform → pipeline_end
-    Nguồn dữ liệu chung: stg_posts_core (cleaning output)
-
-2. bertopic_weekly_inference (Chủ nhật 3:00 AM):
-    load_model → run_inference_pipeline (stg_posts_core 7 ngày) → save_topics_to_clickhouse
-    Nguồn dữ liệu: stg_posts_core (cùng nguồn với LDA, filter 7 ngày)
-
-CMS Streaming Architecture:
-    Mỗi 15 phút, DAG:
-    1. Đọc dữ liệu mới từ HDFS (incremental — chỉ file mới từ lần chạy trước)
-    2. Tokenize + đếm keywords bằng Count-Min Sketch
-    3. Merge với CMS state cũ (load từ pickle trên HDFS)
-    4. Lưu CMS state mới (pickle) và export top-50 keywords → ClickHouse
-
-    Tại sao CMS thay vì exact count?
-    → Bộ nhớ cố định O(d×w) ≈ 80KB, bất kể bao nhiêu keyword
-    → Phù hợp cho streaming liên tục 24/7 không lo OOM
-    → Ref: Cormode & Muthukrishnan (2005), CS246 Stanford
-
-Phụ thuộc:
-    - Member 2: HDFS + Spark cluster + Airflow sẵn sàng
-    - Member 1: Dữ liệu raw trên HDFS (crawl liên tục)
-    - algorithms/count_min_sketch.py (Task 2.3 — Member 3)
-
-Cấu hình Airflow:
-    Đặt file này vào thư mục $AIRFLOW_HOME/dags/
-    Hoặc cấu hình dags_folder trong airflow.cfg
-"""
-
 import json
 import logging
 import os
@@ -71,19 +30,24 @@ WEBHDFS_HOSTNAME: str = WEBHDFS_HOST.split(":")[0]
 HDFS_USER: str = os.getenv("HDFS_USER", os.getenv("HADOOP_USER_NAME", "root"))
 HDFS_USER_DIR: str = f"/user/{HDFS_USER}"
 HDFS_URI_PREFIX: str = f"hdfs://{HDFS_NAMENODE}"
+HDFS_STAGED_ROOT: str = os.getenv("HDFS_STAGED_ROOT", f"{HDFS_URI_PREFIX}{HDFS_USER_DIR}/staged").rstrip("/")
 SPARK_MASTER: str = os.getenv("SPARK_MASTER_URL", "spark://spark-master:7077")
 
 # ── Đường dẫn HDFS ──
-# stg_posts_core là nguồn duy nhất dùng chung cho LDA và BERTopic
-STAGED_HDFS_PATH:    str = f"{HDFS_URI_PREFIX}{HDFS_USER_DIR}/staged/stg_posts_core"
+STAGED_HDFS_PATH:    str = os.getenv("HDFS_STG_POSTS_CORE", f"{HDFS_STAGED_ROOT}/stg_posts_core")
 RAW_HDFS_PATH:       str = f"{HDFS_URI_PREFIX}{HDFS_USER_DIR}/raw_data"
-LDA_HDFS_OUTPUT:     str = f"{HDFS_URI_PREFIX}{HDFS_USER_DIR}/results/lda"
+LDA_HDFS_OUTPUT:     str = os.getenv("LDA_HDFS_OUTPUT", f"{HDFS_URI_PREFIX}{HDFS_USER_DIR}/results/lda")
+HDFS_STG_POST_TOPICS: str = os.getenv("HDFS_STG_POST_TOPICS", f"{HDFS_STAGED_ROOT}/stg_post_topics")
+HDFS_STG_TOPICS: str = os.getenv("HDFS_STG_TOPICS", f"{HDFS_STAGED_ROOT}/stg_topics")
+HDFS_STG_POSTS_NLP: str = os.getenv("HDFS_STG_POSTS_NLP", f"{HDFS_STAGED_ROOT}/stg_posts_nlp")
+HDFS_STG_KEYWORD_FREQ: str = os.getenv("HDFS_STG_KEYWORD_FREQ", f"{HDFS_STAGED_ROOT}/stg_keyword_freq")
+HDFS_STG_CRISIS_EVENTS: str = os.getenv("HDFS_STG_CRISIS_EVENTS", f"{HDFS_STAGED_ROOT}/stg_crisis_events")
 HDFS_CMS_STATE_PATH: str = "/data/results/cms/cms_state.pkl"
 HDFS_CMS_TOPK_PATH:  str = "/data/results/cms/top_keywords.json"
 
 # ── Đường dẫn local (Docker volume /opt/airflow) ──
-# cleaning ghi ra đây → LDA và BERTopic đọc từ đây (cùng nguồn)
 STAGED_LOCAL_PATH:   str = os.getenv("STAGED_LOCAL_PATH", "/opt/airflow/data/preprocessed/stg_posts_core")
+PROCESSED_LOCAL_ROOT: str = os.getenv("PROCESSED_LOCAL_ROOT", "/opt/airflow/data/processed").rstrip("/")
 RAW_LOCAL_PATH:      str = os.getenv("RAW_LOCAL_PATH", "/opt/airflow/crawlers/data")
 LDA_LOCAL_OUTPUT:    str = os.getenv("LDA_LOCAL_OUTPUT", "/opt/airflow/output/lda")
 LOCAL_SENTIMENT_MODEL_PATH: str = os.getenv("LOCAL_SENTIMENT_MODEL_PATH", "/opt/airflow/models/phobert_finetuned/final")
@@ -92,11 +56,11 @@ LOCAL_SLANG_DICT_PATH: str = os.getenv("LOCAL_SLANG_DICT_PATH", "/opt/airflow/da
 LOCAL_CMS_STATE_PATH: str = "output/cms/cms_state.pkl"
 LOCAL_CMS_TOPK_PATH:  str = "output/cms/top_keywords.json"
 
-# Alias cho CMS tasks (giữ backward compat)
+# Alias cho CMS tasks
 HDFS_STAGED_PATH: str = STAGED_HDFS_PATH
 LOCAL_STAGED_PATH: str = "data/fake/"
 
-# ── CMS Config (theo TECH_STACK.md Section 5.3) ──
+# ── CMS Config ──
 CMS_DEPTH: int = 5       # d = 5 hàm hash
 CMS_WIDTH: int = 2048    # w = 2048 chiều rộng
 CMS_TOP_K: int = 50      # Xuất top-50 keywords
@@ -107,13 +71,147 @@ CMS_TOP_K: int = 50      # Xuất top-50 keywords
 USE_LOCAL: bool = _env_bool("USE_LOCAL", False)
 
 # ── ClickHouse config ──
-# TODO [Member 2/5]: Cấu hình ClickHouse connection
 CLICKHOUSE_HOST: str = os.getenv("CLICKHOUSE_HOST", "clickhouse")
 CLICKHOUSE_PORT: int = int(os.getenv("CLICKHOUSE_PORT", "8123"))
 CLICKHOUSE_DB: str = os.getenv("CLICKHOUSE_DB", "tech_radar")
 CLICKHOUSE_TABLE: str = os.getenv("CLICKHOUSE_TABLE", "stg_keyword_freq")
 CLICKHOUSE_USER: str = os.getenv("CLICKHOUSE_USER", "root")
 CLICKHOUSE_PASSWORD: str = os.getenv("CLICKHOUSE_PASSWORD", "root")
+
+
+# ============================================================================
+# Helper task — HDFS staged Parquet -> ClickHouse
+# ============================================================================
+
+def task_ingest_hdfs_dataset(dataset_name: str, mode: Optional[str] = None) -> None:
+    import sys as _sys
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _sys.path.insert(0, root)
+    from scripts.hdfs_to_clickhouse import ingest_dataset_to_clickhouse
+
+    logger.info("[INGEST] Loading staged dataset into ClickHouse: %s", dataset_name)
+    ingest_dataset_to_clickhouse(dataset_name, mode_override=mode)
+
+
+def task_validate_runtime_mounts() -> None:
+    """Fail early when Docker-mounted local inputs are not visible to Airflow."""
+    required_raw_files = [
+        os.path.join(RAW_LOCAL_PATH, "voz", "comments.csv"),
+        os.path.join(RAW_LOCAL_PATH, "voz", "posts.csv"),
+        os.path.join(RAW_LOCAL_PATH, "vnexpress", "comment_vnexpress.csv"),
+        os.path.join(RAW_LOCAL_PATH, "vnexpress", "post_vnexpress.csv"),
+    ]
+    required_ref_files = [
+        LOCAL_STOPWORDS_PATH,
+        LOCAL_SLANG_DICT_PATH,
+    ]
+    required_model_files = [
+        os.path.join(LOCAL_SENTIMENT_MODEL_PATH, "config.json"),
+        os.path.join(LOCAL_SENTIMENT_MODEL_PATH, "tokenizer_config.json"),
+    ]
+
+    missing = [path for path in required_raw_files + required_ref_files + required_model_files if not os.path.exists(path)]
+
+    model_weights = [
+        os.path.join(LOCAL_SENTIMENT_MODEL_PATH, "model.safetensors"),
+        os.path.join(LOCAL_SENTIMENT_MODEL_PATH, "pytorch_model.bin"),
+    ]
+    if not any(os.path.exists(path) for path in model_weights):
+        missing.append(f"{LOCAL_SENTIMENT_MODEL_PATH}/model.safetensors or pytorch_model.bin")
+
+    tokenizer_assets = [
+        os.path.join(LOCAL_SENTIMENT_MODEL_PATH, "vocab.txt"),
+        os.path.join(LOCAL_SENTIMENT_MODEL_PATH, "bpe.codes"),
+    ]
+    if not any(os.path.exists(path) for path in tokenizer_assets):
+        missing.append(f"{LOCAL_SENTIMENT_MODEL_PATH}/vocab.txt or bpe.codes")
+
+    if missing:
+        raise FileNotFoundError(
+            "Missing Docker-mounted runtime inputs:\n"
+            + "\n".join(f"- {path}" for path in missing)
+            + "\nExpected repo mappings: ./crawlers/data -> /opt/airflow/crawlers/data, "
+            "./data -> /opt/airflow/data, ./models -> /opt/airflow/models."
+        )
+
+    logger.info("[PREFLIGHT] Raw data path OK: %s", RAW_LOCAL_PATH)
+    logger.info("[PREFLIGHT] Stopwords OK: %s", LOCAL_STOPWORDS_PATH)
+    logger.info("[PREFLIGHT] Slang dict OK: %s", LOCAL_SLANG_DICT_PATH)
+    logger.info("[PREFLIGHT] Sentiment model OK: %s", LOCAL_SENTIMENT_MODEL_PATH)
+
+
+def task_upload_reference_files_to_hdfs() -> None:
+    """Upload local NLP reference assets to HDFS paths used by Spark jobs."""
+    if USE_LOCAL:
+        logger.info("[REF] USE_LOCAL=true; skip HDFS reference upload.")
+        return
+
+    import requests as _req
+
+    webhdfs = f"http://{WEBHDFS_HOST}/webhdfs/v1"
+    hdfs_ref_dir = f"{HDFS_USER_DIR}/ref"
+    local_to_hdfs = {
+        LOCAL_STOPWORDS_PATH: f"{hdfs_ref_dir}/stopwords_vi.txt",
+        LOCAL_SLANG_DICT_PATH: f"{hdfs_ref_dir}/slang_dict.json",
+    }
+    upload_sentiment_model = _env_bool("UPLOAD_SENTIMENT_MODEL_TO_HDFS", False)
+    hdfs_model_dir = os.getenv(
+        "HDFS_SENTIMENT_MODEL_DIR",
+        f"{HDFS_USER_DIR}/models/phobert_finetuned/final",
+    ).rstrip("/")
+
+    def _mkdirs(hdfs_dir: str) -> None:
+        _req.put(
+            f"{webhdfs}{hdfs_dir}?op=MKDIRS&user.name={HDFS_USER}",
+            timeout=30,
+        ).raise_for_status()
+
+    def _upload_file(local_path: str, hdfs_path: str) -> None:
+        if not os.path.exists(local_path):
+            raise FileNotFoundError(f"Reference file not found: {local_path}")
+
+        create = _req.put(
+            f"{webhdfs}{hdfs_path}?op=CREATE&overwrite=true&user.name={HDFS_USER}",
+            allow_redirects=False,
+            timeout=30,
+        )
+        create.raise_for_status()
+        location = create.headers.get("Location")
+        if not location:
+            raise RuntimeError(f"WebHDFS did not return upload Location for {hdfs_path}")
+
+        with open(local_path, "rb") as fh:
+            _req.put(location, data=fh, timeout=120).raise_for_status()
+
+        logger.info("[REF] Uploaded %s -> hdfs://%s%s", local_path, HDFS_NAMENODE, hdfs_path)
+
+    _mkdirs(hdfs_ref_dir)
+
+    for local_path, hdfs_path in local_to_hdfs.items():
+        _upload_file(local_path, hdfs_path)
+
+    if upload_sentiment_model:
+        if not os.path.isdir(LOCAL_SENTIMENT_MODEL_PATH):
+            raise FileNotFoundError(f"Sentiment model directory not found: {LOCAL_SENTIMENT_MODEL_PATH}")
+
+        _mkdirs(hdfs_model_dir)
+        uploaded = 0
+        for entry in sorted(os.listdir(LOCAL_SENTIMENT_MODEL_PATH)):
+            local_file = os.path.join(LOCAL_SENTIMENT_MODEL_PATH, entry)
+            if not os.path.isfile(local_file):
+                continue
+            _upload_file(local_file, f"{hdfs_model_dir}/{entry}")
+            uploaded += 1
+
+        logger.info(
+            "[REF] Uploaded sentiment model directory (%s files) -> hdfs://%s%s",
+            uploaded,
+            HDFS_NAMENODE,
+            hdfs_model_dir,
+        )
+    else:
+        logger.info("[REF] Sentiment model upload disabled (set UPLOAD_SENTIMENT_MODEL_TO_HDFS=true to enable).")
 
 
 # ============================================================================
@@ -151,7 +249,6 @@ def _load_cms_state() -> "CountMinSketch":
     Returns:
         CountMinSketch đã khôi phục hoặc mới.
     """
-    # Import tại đây để tránh circular dependency khi Airflow parse DAG
     import sys
     sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from algorithms.count_min_sketch import CountMinSketch
@@ -567,6 +664,7 @@ def task_run_cms_daily() -> None:
     if df.empty:
         logger.warning("[CMS] Không có dữ liệu mới trong 24h — skip.")
         return
+
     logger.info(f"[CMS] Input: {len(df):,} rows | sources: {df['source'].value_counts().to_dict()}")
 
     # ── 2. Load NLP resources (stopwords + slang) ──
@@ -585,7 +683,6 @@ def task_run_cms_daily() -> None:
         logger.warning("[CMS] slang_dict.json not found — proceeding without")
 
     # ── 3. Tokenize + CMS update (per-source tracking) ──
-    # One CMS per source so top_k returns source-specific counts, not global counts
     from algorithms.count_min_sketch import CountMinSketch as _CMS
     source_cms: Dict[str, object] = {}
     source_keywords: Dict[str, set] = {}
@@ -623,6 +720,41 @@ def task_run_cms_daily() -> None:
         return
 
     # ── 5. Output: insert vào ClickHouse stg_keyword_freq ──
+    df_out = _pd.DataFrame(results)
+    df_out["estimated_count"] = df_out["estimated_count"].astype("int64")
+    window_date = now.date().isoformat()
+    try:
+        if USE_LOCAL:
+            out_dir = os.path.join(PROCESSED_LOCAL_ROOT, "stg_keyword_freq", f"window_date={window_date}")
+            os.makedirs(out_dir, exist_ok=True)
+            out_path = os.path.join(out_dir, "part-00000.parquet")
+            df_out.to_parquet(out_path, index=False)
+            logger.info(f"[CMS] Wrote staged Parquet -> {out_path}")
+        else:
+            import tempfile
+            import requests as _req
+
+            hdfs_dir = HDFS_STG_KEYWORD_FREQ.replace(f"hdfs://{HDFS_NAMENODE}", "").rstrip("/")
+            hdfs_file = f"{hdfs_dir}/window_date={window_date}/part-00000.parquet"
+            webhdfs = f"http://{WEBHDFS_HOST}/webhdfs/v1"
+            with tempfile.TemporaryDirectory() as tmpdir:
+                local_path = os.path.join(tmpdir, "part-00000.parquet")
+                df_out.to_parquet(local_path, index=False)
+                parent = os.path.dirname(hdfs_file)
+                _req.put(f"{webhdfs}{parent}?op=MKDIRS&user.name={HDFS_USER}", timeout=30).raise_for_status()
+                create = _req.put(
+                    f"{webhdfs}{hdfs_file}?op=CREATE&overwrite=true&user.name={HDFS_USER}",
+                    allow_redirects=False,
+                    timeout=30,
+                )
+                create.raise_for_status()
+                with open(local_path, "rb") as fh:
+                    _req.put(create.headers["Location"], data=fh, timeout=120).raise_for_status()
+            logger.info(f"[CMS] Wrote staged Parquet -> hdfs://{HDFS_NAMENODE}{hdfs_file}")
+        return
+    except Exception as exc:
+        logger.warning(f"[CMS] Could not write staged Parquet ({exc}); falling back to legacy ClickHouse insert")
+
     ch_host = os.environ.get("CLICKHOUSE_HOST", "clickhouse")
     try:
         import clickhouse_connect
@@ -748,6 +880,11 @@ with DAG(
 
     pipeline_start = DummyOperator(task_id="pipeline_start")
 
+    validate_runtime_mounts = PythonOperator(
+        task_id="validate_runtime_mounts",
+        python_callable=task_validate_runtime_mounts,
+    )
+
     # ── Task từ Member 1: Crawl ──
     # Thay bằng crawl thực tế qua BashOperator
     # Note: Truyền biến môi trường HDFS_HOST để python script tự nhận dạng hostname docker
@@ -762,6 +899,11 @@ with DAG(
             "python3 -u /opt/airflow/crawlers/upload_to_hdfs.py"
         ),
         execution_timeout=timedelta(hours=2),
+    )
+
+    upload_reference_files_to_hdfs = PythonOperator(
+        task_id="upload_reference_files_to_hdfs",
+        python_callable=task_upload_reference_files_to_hdfs,
     )
 
     spark_common_conf = (
@@ -785,6 +927,7 @@ with DAG(
             f"HDFS_INPUT='{RAW_LOCAL_PATH if USE_LOCAL else RAW_HDFS_PATH}' "
             f"HDFS_OUTPUT='{STAGED_LOCAL_PATH if USE_LOCAL else STAGED_HDFS_PATH}' "
             f"HDFS_USER='{HDFS_USER}' "
+            f"HDFS_STAGED_ROOT='{HDFS_STAGED_ROOT}' "
             f"CLICKHOUSE_HOST='{CLICKHOUSE_HOST}' "
             "&& spark-submit "
             f"{spark_common_conf}"
@@ -801,6 +944,10 @@ with DAG(
             "export PYTHONPATH='/opt/airflow' "
             f"HADOOP_USER_NAME='{HDFS_USER}' "
             f"HDFS_USER='{HDFS_USER}' "
+            f"HDFS_STAGED_ROOT='{HDFS_STAGED_ROOT}' "
+            f"HDFS_STG_POST_TOPICS='{HDFS_STG_POST_TOPICS}' "
+            f"HDFS_STG_TOPICS='{HDFS_STG_TOPICS}' "
+            f"PROCESSED_LOCAL_ROOT='{PROCESSED_LOCAL_ROOT}' "
             "&& spark-submit "
             f"{spark_common_conf}"
             "/opt/airflow/spark_jobs/lda_job.py "
@@ -821,7 +968,9 @@ with DAG(
             "export PYTHONPATH='/opt/airflow' "
             f"HADOOP_USER_NAME='{HDFS_USER}' "
             f"HDFS_INPUT='{STAGED_LOCAL_PATH if USE_LOCAL else STAGED_HDFS_PATH}' "
+            f"HDFS_OUTPUT='{os.path.join(PROCESSED_LOCAL_ROOT, 'stg_posts_nlp') if USE_LOCAL else HDFS_STG_POSTS_NLP}' "
             f"HDFS_USER='{HDFS_USER}' "
+            f"HDFS_STAGED_ROOT='{HDFS_STAGED_ROOT}' "
             f"CLICKHOUSE_HOST='{CLICKHOUSE_HOST}' "
             f"CLICKHOUSE_DB='{CLICKHOUSE_DB}' "
             f"CLICKHOUSE_USER='{CLICKHOUSE_USER}' "
@@ -835,6 +984,8 @@ with DAG(
             f"--conf spark.executorEnv.CLICKHOUSE_PASS={CLICKHOUSE_PASSWORD} "
             f"--conf spark.executorEnv.NLP_MODEL_PATH={LOCAL_SENTIMENT_MODEL_PATH} "
             "--conf spark.executorEnv.NLP_MODEL_VERSION=phobert_v1 "
+            f"--conf spark.executorEnv.HDFS_OUTPUT={os.path.join(PROCESSED_LOCAL_ROOT, 'stg_posts_nlp') if USE_LOCAL else HDFS_STG_POSTS_NLP} "
+            "--conf spark.executorEnv.WRITE_CLICKHOUSE_DIRECT=false "
             "/opt/airflow/spark_jobs/sentiment_job.py"
         ),
         execution_timeout=timedelta(hours=2),
@@ -847,9 +998,28 @@ with DAG(
     )
 
     # ── Task từ Member 3: Push LDA results → ClickHouse ──
-    save_lda_to_ch = PythonOperator(
-        task_id="save_lda_to_clickhouse",
-        python_callable=task_save_lda_to_clickhouse,
+    ingest_stg_posts_core = PythonOperator(
+        task_id="ingest_stg_posts_core",
+        python_callable=task_ingest_hdfs_dataset,
+        op_kwargs={"dataset_name": "stg_posts_core"},
+    )
+
+    ingest_stg_posts_nlp = PythonOperator(
+        task_id="ingest_stg_posts_nlp",
+        python_callable=task_ingest_hdfs_dataset,
+        op_kwargs={"dataset_name": "stg_posts_nlp"},
+    )
+
+    ingest_stg_post_topics = PythonOperator(
+        task_id="ingest_stg_post_topics",
+        python_callable=task_ingest_hdfs_dataset,
+        op_kwargs={"dataset_name": "stg_post_topics"},
+    )
+
+    ingest_stg_topics = PythonOperator(
+        task_id="ingest_stg_topics",
+        python_callable=task_ingest_hdfs_dataset,
+        op_kwargs={"dataset_name": "stg_topics"},
     )
 
     # ── Task từ Member 3: CMS keyword frequency (daily batch) ──
@@ -858,19 +1028,50 @@ with DAG(
         python_callable=task_run_cms_daily,
     )
 
+    ingest_stg_keyword_freq = PythonOperator(
+        task_id="ingest_stg_keyword_freq",
+        python_callable=task_ingest_hdfs_dataset,
+        op_kwargs={"dataset_name": "stg_keyword_freq"},
+    )
+
+    crisis_detection = BashOperator(
+        task_id="crisis_to_hdfs_stg_crisis_events",
+        bash_command=(
+            "export PYTHONPATH='/opt/airflow' "
+            f"HADOOP_USER_NAME='{HDFS_USER}' "
+            f"HDFS_USER='{HDFS_USER}' "
+            f"HDFS_STG_POSTS_CORE='{STAGED_HDFS_PATH}' "
+            f"HDFS_STG_CRISIS_EVENTS='{HDFS_STG_CRISIS_EVENTS}' "
+            f"CLICKHOUSE_HOST='{CLICKHOUSE_HOST}' "
+            f"CLICKHOUSE_DB='{CLICKHOUSE_DB}' "
+            f"CLICKHOUSE_USER='{CLICKHOUSE_USER}' "
+            f"CLICKHOUSE_PASS='{CLICKHOUSE_PASSWORD}' "
+            "TARGET_DATE=\"{{ dag_run.conf.get('target_date', ds) }}\" "
+            "&& spark-submit "
+            f"{spark_common_conf}"
+            "/opt/airflow/spark_jobs/crisis_detection.py"
+        ),
+        execution_timeout=timedelta(hours=2),
+    )
+
+    ingest_stg_crisis_events = PythonOperator(
+        task_id="ingest_stg_crisis_events",
+        python_callable=task_ingest_hdfs_dataset,
+        op_kwargs={"dataset_name": "stg_crisis_events"},
+    )
+
     pipeline_end = DummyOperator(task_id="pipeline_end")
 
     # ── DAG Flow ──
-    # crawl → clean → LDA → sentiment
-    #                    ├→ save_lda_to_ch ─┐
-    # clean ────────────┘                   ├──► dbt_transform → end
-    # clean ─────────────────────────→ CMS ─┘
-    pipeline_start >> crawl_sources >> spark_cleaning
-    spark_cleaning >> lda_topic_modeling
-    lda_topic_modeling >> sentiment_analysis
-    sentiment_analysis >> save_lda_to_ch >> dbt_transform
-    sentiment_analysis >> run_cms >> dbt_transform
-    dbt_transform >> pipeline_end
+    # crawl → clean → ingest_stg_posts_core → LDA → sentiment → CMS
+    #                                         ├→ save_lda_to_ch ─┐
+    #                                         └──────────────────┴──► dbt_transform → end
+    pipeline_start >> validate_runtime_mounts >> crawl_sources >> upload_reference_files_to_hdfs >> spark_cleaning >> ingest_stg_posts_core
+    ingest_stg_posts_core >> lda_topic_modeling >> sentiment_analysis >> ingest_stg_posts_nlp
+    lda_topic_modeling >> [ingest_stg_post_topics, ingest_stg_topics]
+    ingest_stg_posts_nlp >> run_cms >> ingest_stg_keyword_freq
+    [ingest_stg_post_topics, ingest_stg_topics, ingest_stg_keyword_freq] >> crisis_detection
+    crisis_detection >> ingest_stg_crisis_events >> dbt_transform >> pipeline_end
 
 
 # ============================================================================
@@ -932,19 +1133,9 @@ def task_save_bertopic_to_clickhouse() -> None:
     and inserts into stg_post_topics + stg_topics.
     Runs after task_bertopic_run_pipeline so parquet files are already written.
     """
-    import sys as _sys
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    _sys.path.insert(0, root)
-    from scripts.save_topics_to_ch import main as save_to_ch
-
-    # Inside Docker the service hostname is always "clickhouse", regardless of USE_LOCAL
-    ch_host = os.environ.get("CLICKHOUSE_HOST", "clickhouse")
-    save_to_ch(
-        input_dir="output/bertopic_inference",
-        host=ch_host,
-        port=CLICKHOUSE_PORT,
-    )
-    logger.info("[BERTopic] Topics pushed to ClickHouse.")
+    task_ingest_hdfs_dataset("stg_post_topics")
+    task_ingest_hdfs_dataset("stg_topics")
+    logger.info("[BERTopic] Staged topic datasets loaded into ClickHouse.")
 
 
 # ── Cấu hình path riêng cho BERTopic ──

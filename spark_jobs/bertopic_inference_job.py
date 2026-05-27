@@ -49,13 +49,15 @@ HDFS_NAMENODE: str       = os.getenv("HDFS_NAMENODE", "namenode:9000")
 WEBHDFS_HOST: str        = os.getenv("WEBHDFS_HOST",  "namenode:9870")
 HDFS_USER: str           = os.getenv("HDFS_USER", os.getenv("HADOOP_USER_NAME", "root"))
 HDFS_HOME: str           = os.getenv("HDFS_HOME", f"/user/{HDFS_USER}")
+HDFS_STAGED_ROOT: str    = os.getenv("HDFS_STAGED_ROOT", f"hdfs://{HDFS_NAMENODE}{HDFS_HOME}/staged").rstrip("/")
+PROCESSED_LOCAL_ROOT: str = os.getenv("PROCESSED_LOCAL_ROOT", "/opt/airflow/data/processed").rstrip("/")
 HDFS_STAGED_PATH: str    = f"{HDFS_HOME}/staged/stg_posts_core"   # Parquet từ cleaning_job
 HDFS_MODEL_PATH: str     = f"{HDFS_HOME}/models/bertopic/bertopic_model"
-HDFS_OUTPUT_TOPICS: str  = f"{HDFS_HOME}/results/bertopic/post_topics/"
-HDFS_OUTPUT_TOPIC_DEFS: str = f"{HDFS_HOME}/results/bertopic/topics/"
+HDFS_OUTPUT_TOPICS: str  = os.getenv("HDFS_STG_POST_TOPICS", f"{HDFS_STAGED_ROOT}/stg_post_topics")
+HDFS_OUTPUT_TOPIC_DEFS: str = os.getenv("HDFS_STG_TOPICS", f"{HDFS_STAGED_ROOT}/stg_topics")
 
 LOCAL_MODEL_PATH: str   = "output/task3.1_bertopic/output/bertopic_model"
-LOCAL_OUTPUT_PATH: str  = "output/bertopic_inference/"
+LOCAL_OUTPUT_PATH: str  = PROCESSED_LOCAL_ROOT
 HF_MODEL_REPO: str      = os.getenv("HF_MODEL_REPO", "ABCDHAQ/Bertopic")
 
 BATCH_SIZE: int    = 512   # docs per encode batch
@@ -391,10 +393,13 @@ def export_results(
     """
     if local:
         out_dir = Path(local_output_path or LOCAL_OUTPUT_PATH)
-        out_dir.mkdir(parents=True, exist_ok=True)
+        pt_dir = out_dir / "stg_post_topics"
+        td_dir = out_dir / "stg_topics"
+        pt_dir.mkdir(parents=True, exist_ok=True)
+        td_dir.mkdir(parents=True, exist_ok=True)
 
-        pt_path = out_dir / "post_topic_assignment.parquet"
-        td_path = out_dir / "topics.parquet"
+        pt_path = pt_dir / "post_topic_assignment.parquet"
+        td_path = td_dir / "topics.parquet"
         post_topics_df.to_parquet(pt_path, index=False)
         topics_df.to_parquet(td_path, index=False)
         logger.info(f"[LOCAL] Wrote {len(post_topics_df):,} rows → {pt_path}")
@@ -409,8 +414,8 @@ def export_results(
             post_topics_df.to_parquet(pt_local, index=False)
             topics_df.to_parquet(td_local, index=False)
 
-            _webhdfs_upload(pt_local, hdfs_output_topics + "post_topic_assignment.parquet")
-            _webhdfs_upload(td_local, hdfs_output_topic_defs + "topics.parquet")
+            _webhdfs_upload(pt_local, hdfs_output_topics.rstrip("/") + "/post_topic_assignment.parquet")
+            _webhdfs_upload(td_local, hdfs_output_topic_defs.rstrip("/") + "/topics.parquet")
 
         logger.info(
             f"[CLUSTER] Uploaded {len(post_topics_df):,} post-topic rows "

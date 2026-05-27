@@ -6,20 +6,40 @@ models:
     description: >
       Wide fact table (grain: topic_id × source × hour_bucket).
       Merges trend scoring + sentiment timeseries into ONE table.
-      source_type and topic_label are embedded — zero JOINs needed in dashboards.
-      Atomic metric sums (reaction_sum, comment_sum, view_sum) preserved for
-      granular breakdowns at aggregate level.
     columns:
       - name: topic_id
         tests:
           - not_null
+      - name: source
+      - name: hour_bucket
+      - name: bucket_date
+      - name: source_type
+      - name: topic_label
+      - name: mention_count
+      - name: unique_authors
+      - name: engagement_sum
+      - name: reaction_sum
+      - name: comment_sum
+      - name: view_sum
+      - name: velocity
+      - name: acceleration
+      - name: engagement_normalized
       - name: trend_score
         tests:
           - not_null
-      - name: volume_zscore
-        description: Standard deviations from 7-day rolling mean (volume anomaly signal)
+      - name: trend_rank
+      - name: pos_count
+      - name: neg_count
+      - name: neu_count
+      - name: neg_ratio
+      - name: neg_ratio_24h_avg
+      - name: mention_7d_avg
+      - name: mention_7d_stddev
       - name: z_score_neg_ratio
         description: Standard deviations from 24h rolling mean of neg_ratio (sentiment anomaly signal)
+      - name: volume_zscore
+        description: Standard deviations from 7-day rolling mean (volume anomaly signal)
+      - name: computed_at
 
   # ------ CRISIS FACT ------
   - name: fct_crisis_events
@@ -31,6 +51,17 @@ models:
         tests:
           - unique
           - not_null
+      - name: detected_at
+      - name: detected_date
+      - name: severity
+      - name: anomaly_score
+      - name: trigger_conditions
+      - name: neg_ratio
+      - name: mention_velocity
+      - name: evidence_post_ids
+      - name: affected_topics
+      - name: affected_topic_labels
+      - name: severity_rank
 
   # ------ DIMENSIONS ------
   - name: dim_topics
@@ -42,3 +73,10 @@ models:
         tests:
           - unique
           - not_null
+      - name: label
+      - name: top_keywords
+      - name: coherence_score
+      - name: model_version
+      - name: total_mentions
+      - name: first_seen
+      - name: last_seen
