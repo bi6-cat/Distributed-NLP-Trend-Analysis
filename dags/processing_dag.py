@@ -142,7 +142,7 @@ def task_validate_runtime_mounts() -> None:
 
 
 def task_upload_reference_files_to_hdfs() -> None:
-    """Upload local NLP reference files to HDFS paths used by Spark jobs."""
+    """Upload local NLP reference assets to HDFS paths used by Spark jobs."""
     if USE_LOCAL:
         logger.info("[REF] USE_LOCAL=true; skip HDFS reference upload.")
         return
@@ -155,10 +155,19 @@ def task_upload_reference_files_to_hdfs() -> None:
         LOCAL_STOPWORDS_PATH: f"{hdfs_ref_dir}/stopwords_vi.txt",
         LOCAL_SLANG_DICT_PATH: f"{hdfs_ref_dir}/slang_dict.json",
     }
+    upload_sentiment_model = _env_bool("UPLOAD_SENTIMENT_MODEL_TO_HDFS", False)
+    hdfs_model_dir = os.getenv(
+        "HDFS_SENTIMENT_MODEL_DIR",
+        f"{HDFS_USER_DIR}/models/phobert_finetuned/final",
+    ).rstrip("/")
 
-    _req.put(f"{webhdfs}{hdfs_ref_dir}?op=MKDIRS&user.name={HDFS_USER}", timeout=30).raise_for_status()
+    def _mkdirs(hdfs_dir: str) -> None:
+        _req.put(
+            f"{webhdfs}{hdfs_dir}?op=MKDIRS&user.name={HDFS_USER}",
+            timeout=30,
+        ).raise_for_status()
 
-    for local_path, hdfs_path in local_to_hdfs.items():
+    def _upload_file(local_path: str, hdfs_path: str) -> None:
         if not os.path.exists(local_path):
             raise FileNotFoundError(f"Reference file not found: {local_path}")
 
@@ -176,6 +185,33 @@ def task_upload_reference_files_to_hdfs() -> None:
             _req.put(location, data=fh, timeout=120).raise_for_status()
 
         logger.info("[REF] Uploaded %s -> hdfs://%s%s", local_path, HDFS_NAMENODE, hdfs_path)
+
+    _mkdirs(hdfs_ref_dir)
+
+    for local_path, hdfs_path in local_to_hdfs.items():
+        _upload_file(local_path, hdfs_path)
+
+    if upload_sentiment_model:
+        if not os.path.isdir(LOCAL_SENTIMENT_MODEL_PATH):
+            raise FileNotFoundError(f"Sentiment model directory not found: {LOCAL_SENTIMENT_MODEL_PATH}")
+
+        _mkdirs(hdfs_model_dir)
+        uploaded = 0
+        for entry in sorted(os.listdir(LOCAL_SENTIMENT_MODEL_PATH)):
+            local_file = os.path.join(LOCAL_SENTIMENT_MODEL_PATH, entry)
+            if not os.path.isfile(local_file):
+                continue
+            _upload_file(local_file, f"{hdfs_model_dir}/{entry}")
+            uploaded += 1
+
+        logger.info(
+            "[REF] Uploaded sentiment model directory (%s files) -> hdfs://%s%s",
+            uploaded,
+            HDFS_NAMENODE,
+            hdfs_model_dir,
+        )
+    else:
+        logger.info("[REF] Sentiment model upload disabled (set UPLOAD_SENTIMENT_MODEL_TO_HDFS=true to enable).")
 
 
 # ============================================================================
@@ -1027,13 +1063,11 @@ with DAG(
     pipeline_end = DummyOperator(task_id="pipeline_end")
 
     # ── DAG Flow ──
-    # crawl → clean → LDA → sentiment
-    #                    ├→ save_lda_to_ch ─┐
-    # clean ────────────┘                   ├──► dbt_transform → end
-    # clean ─────────────────────────→ CMS ─┘
+    # crawl → clean → ingest_stg_posts_core → LDA → sentiment → CMS
+    #                                         ├→ save_lda_to_ch ─┐
+    #                                         └──────────────────┴──► dbt_transform → end
     pipeline_start >> validate_runtime_mounts >> crawl_sources >> upload_reference_files_to_hdfs >> spark_cleaning >> ingest_stg_posts_core
-    ingest_stg_posts_core >> sentiment_analysis >> ingest_stg_posts_nlp
-    ingest_stg_posts_core >> lda_topic_modeling
+    ingest_stg_posts_core >> lda_topic_modeling >> sentiment_analysis >> ingest_stg_posts_nlp
     lda_topic_modeling >> [ingest_stg_post_topics, ingest_stg_topics]
     ingest_stg_posts_nlp >> run_cms >> ingest_stg_keyword_freq
     [ingest_stg_post_topics, ingest_stg_topics, ingest_stg_keyword_freq] >> crisis_detection

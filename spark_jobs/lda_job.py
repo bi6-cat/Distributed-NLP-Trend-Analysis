@@ -53,6 +53,9 @@ import math
 import os
 import re
 import sys
+import tempfile
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -83,15 +86,16 @@ _TEXT_PREPROCESSOR = None
 # ============================================================================
 # HẰNG SỐ MẶC ĐỊNH
 # ============================================================================
-DEFAULT_K: int = 10              # Tune trên data/preprocessed/result.csv (coherence tốt)
+DEFAULT_K: int = 12              # Giảm số topics để bớt fragmented trên corpus hiện tại
 DEFAULT_MAX_ITER: int = 60       # Tăng nhẹ để hội tụ ổn định hơn trên local processed data
 DEFAULT_OPTIMIZER: str = "em"    # "em" ổn định hơn "online" cho batch
 DEFAULT_VOCAB_SIZE: int = 4_000  # Giảm nhiễu từ hiếm trên tập processed hiện tại
-DEFAULT_MIN_DF: int = 3          # Giữ đủ từ khóa quan trọng khi corpus còn nhỏ
+DEFAULT_MIN_DF: int = 5          # Lọc bớt terms hiếm/rác cho topic ổn định hơn
 MAX_TERMS_PER_TOPIC: int = 15    # Số từ hiển thị cho mỗi topic
 DEFAULT_EVAL_MAX_DOCS: int = 5000
 HDFS_USER: str = os.environ.get("HDFS_USER", os.environ.get("HADOOP_USER_NAME", "root"))
 HDFS_NAMENODE: str = os.environ.get("HDFS_NAMENODE", "namenode:9000")
+WEBHDFS_HOST: str = os.environ.get("WEBHDFS_HOST", "namenode:9870")
 HDFS_STAGED_ROOT: str = os.environ.get(
     "HDFS_STAGED_ROOT",
     f"hdfs://{HDFS_NAMENODE}/user/{HDFS_USER}/staged",
@@ -123,8 +127,9 @@ def load_stopwords(filepath: str) -> Set[str]:
         Set các stopword đã lowercase.
     """
     stopwords: Set[str] = set()
+    resolved_path = _resolve_hdfs_resource(filepath)
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(resolved_path, "r", encoding="utf-8") as f:
             for line in f:
                 word = line.strip().lower()
                 if word:
@@ -153,8 +158,9 @@ def load_slang_dict(filepath: str) -> Dict[str, str]:
         Dict mapping {từ_slang: từ_chuẩn}.
     """
     slang_dict: Dict[str, str] = {}
+    resolved_path = _resolve_hdfs_resource(filepath)
     try:
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(resolved_path, "r", encoding="utf-8") as f:
             slang_dict = json.load(f)
         logger.info(f"Loaded {len(slang_dict):,} slang entries from {filepath}")
     except FileNotFoundError:
@@ -162,6 +168,31 @@ def load_slang_dict(filepath: str) -> Dict[str, str]:
     except json.JSONDecodeError:
         logger.error(f"Invalid JSON format: {filepath}")
     return slang_dict
+
+
+def _resolve_hdfs_resource(filepath: str) -> str:
+    """Fetch HDFS resource to a local temp file so regular open() can read it."""
+    if not filepath.startswith("hdfs://"):
+        return filepath
+
+    local_path = os.path.join(tempfile.gettempdir(), os.path.basename(filepath))
+    if os.path.exists(local_path):
+        return local_path
+
+    try:
+        parsed = urllib.parse.urlparse(filepath)
+        hdfs_path = parsed.path
+        open_url = (
+            f"http://{WEBHDFS_HOST}/webhdfs/v1{hdfs_path}"
+            f"?op=OPEN&user.name={urllib.parse.quote(HDFS_USER)}"
+        )
+        with urllib.request.urlopen(open_url, timeout=60) as response, open(local_path, "wb") as fh:
+            fh.write(response.read())
+        logger.info(f"Fetched HDFS resource → {local_path}")
+        return local_path
+    except Exception as exc:
+        logger.warning(f"Unable to fetch HDFS resource {filepath}: {exc}")
+        return filepath
 
 
 # ============================================================================
@@ -358,7 +389,7 @@ def load_data(
 
     Cluster mode:
         Đọc Parquet từ HDFS /data/staged/ (output từ Member 2 cleaning_job.py)
-        Schema kỳ vọng: [post_id, title, content, source, date, ...]
+        Schema kỳ vọng: output staged từ cleaning_job / stg_posts_core
 
     Local mode:
         Đọc CSV từ data/real/ hoặc data/fake/
@@ -428,7 +459,7 @@ def load_data(
             df = spark.read.parquet(input_path)
             # Map stg_posts_core schema → canonical schema
             text_col = next(
-                (c for c in ["segmented_text", "clean_text", "body", "title", "text"] if c in df.columns),
+                (c for c in ["topic_text", "segmented_text", "clean_text", "body", "title", "text"] if c in df.columns),
                 None,
             )
             if text_col is None:
@@ -441,7 +472,7 @@ def load_data(
                 _build_created_at_expr(df).alias("created_at"),
                 F.lit("").cast("string").alias("url"),
                 F.col(text_col).cast("string").alias("text"),
-                _pick_col_or_lit(df, ["clean_text", "segmented_text"], "").cast("string").alias("preprocessed_text"),
+                _pick_col_or_lit(df, ["topic_text", "clean_text", "segmented_text"], "").cast("string").alias("preprocessed_text"),
             )
             df = df.filter(F.col("text").isNotNull() & (F.trim(F.col("text")) != ""))
             row_count = df.count()
@@ -548,36 +579,38 @@ def load_data(
             df = df.unionByName(extra_df)
     else:
         # ── CLUSTER MODE: đọc Parquet từ HDFS ──
-        # TODO [Member 2]: Xác nhận schema Parquet sau cleaning_job.py
         logger.info(f"Reading Parquet from HDFS: {input_path}")
         df = spark.read.parquet(input_path)
-
-        text_cols = [
-            c for c in ["title", "content", "tieu_de", "noi_dung"]
-            if c in df.columns
-        ]
-        if text_cols:
-            df = df.withColumn(
-                "text",
-                F.concat_ws(
-                    " ",
-                    *[F.coalesce(F.col(c), F.lit("")) for c in text_cols],
-                ),
-            )
-        elif "text" not in df.columns:
-            logger.error(
-                f"No text column found. Available: {df.columns}"
-            )
+        text_col = next(
+            (
+                c
+                for c in [
+                    "topic_text",
+                    "body",
+                    "clean_text",
+                    "segmented_text",
+                    "title",
+                    "content",
+                    "tieu_de",
+                    "noi_dung",
+                    "text",
+                ]
+                if c in df.columns
+            ),
+            None,
+        )
+        if text_col is None:
+            logger.error(f"No text column found in staged parquet. Available: {df.columns}")
             sys.exit(1)
 
         df = df.select(
             _pick_col_or_lit(df, ["post_id", "thread_id", "videoId", "id_post"]).cast("string").alias("post_id"),
             _pick_col_or_lit(df, ["source"], "unknown").cast("string").alias("source"),
-            _pick_col_or_lit(df, ["author", "username", "authorDisplayName", "user"], "unknown").cast("string").alias("author"),
+            _pick_col_or_lit(df, ["author", "author_name", "username", "authorDisplayName", "user"], "unknown").cast("string").alias("author"),
             _build_created_at_expr(df).alias("created_at"),
             _pick_col_or_lit(df, ["url", "video_url", "article_url"], "").cast("string").alias("url"),
-            F.col("text").cast("string").alias("text"),
-            F.lit(None).cast("string").alias("preprocessed_text"),
+            F.col(text_col).cast("string").alias("text"),
+            _pick_col_or_lit(df, ["topic_text", "segmented_text", "clean_text"], "").cast("string").alias("preprocessed_text"),
         )
 
     # Loại bỏ rows rỗng
@@ -1169,59 +1202,61 @@ def main() -> None:
 
         # 4. Tiền xử lý tiếng Việt
         logger.info("Preprocessing Vietnamese text...")
-        if args.local:
+        has_preprocessed = "preprocessed_text" in df.columns
+        if has_preprocessed:
+            preprocessed_count = df.filter(
+                F.col("preprocessed_text").isNotNull()
+                & (F.trim(F.col("preprocessed_text")) != "")
+            ).count()
+        else:
+            preprocessed_count = 0
+
+        if preprocessed_count > 0:
+            logger.info(
+                f"Using preprocessed_text directly for tokenization ({preprocessed_count:,} docs)."
+            )
+            df = (
+                df
+                .withColumn("preprocessed_text", F.lower(F.col("preprocessed_text")))
+                .withColumn("tokens", F.split(F.trim(F.col("preprocessed_text")), r"\s+"))
+                .withColumn(
+                    "tokens",
+                    F.expr(
+                        "filter(tokens, x -> length(x) >= 2 "
+                        "AND NOT x rlike '^[0-9]+$')"
+                    ),
+                )
+                .filter(F.size(F.col("tokens")) > 0)
+            )
+        elif args.local:
             # Local fallback: dùng hoàn toàn Spark SQL built-in để tránh
             # crash Python worker trên Windows.
             logger.info("Using Spark SQL local preprocessing path (no Python UDF workers).")
-            has_preprocessed = "preprocessed_text" in df.columns
-            if has_preprocessed:
-                preprocessed_count = df.filter(
-                    F.col("preprocessed_text").isNotNull()
-                    & (F.trim(F.col("preprocessed_text")) != "")
-                ).count()
-            else:
-                preprocessed_count = 0
-
-            if preprocessed_count > 0:
-                logger.info(
-                    f"Using preprocessed_text directly for tokenization ({preprocessed_count:,} docs)."
+            stopwords_lit = F.array(*[F.lit(w) for w in sorted(stopwords)])
+            df = (
+                df
+                .withColumn("clean_text", F.lower(F.col("text")))
+                .withColumn("clean_text", F.regexp_replace(F.col("clean_text"), r"<[^>]+>", " "))
+                .withColumn("clean_text", F.regexp_replace(F.col("clean_text"), r"https?://\S+|www\.\S+", " "))
+                .withColumn(
+                    "clean_text",
+                    F.regexp_replace(
+                        F.col("clean_text"),
+                        r"[^\w\sàáảãạăắằẳẵặâấầẩẫậèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵđ_]",
+                        " ",
+                    ),
                 )
-                df = (
-                    df
-                    .withColumn("preprocessed_text", F.lower(F.col("preprocessed_text")))
-                    .withColumn("tokens", F.split(F.trim(F.col("preprocessed_text")), r"\s+"))
-                    .withColumn(
-                        "tokens",
-                        F.expr("filter(tokens, x -> length(x) >= 2 AND NOT x rlike '^[0-9]+$')"),
-                    )
-                    .filter(F.size(F.col("tokens")) > 0)
+                .withColumn("words", F.split(F.trim(F.col("clean_text")), r"\s+"))
+                .withColumn("_stopwords", stopwords_lit)
+                .withColumn(
+                    "tokens",
+                    F.expr(
+                        "filter(words, x -> length(x) >= 2 AND NOT x rlike '^[0-9]+$' AND NOT array_contains(_stopwords, x))"
+                    ),
                 )
-            else:
-                stopwords_lit = F.array(*[F.lit(w) for w in sorted(stopwords)])
-                df = (
-                    df
-                    .withColumn("clean_text", F.lower(F.col("text")))
-                    .withColumn("clean_text", F.regexp_replace(F.col("clean_text"), r"<[^>]+>", " "))
-                    .withColumn("clean_text", F.regexp_replace(F.col("clean_text"), r"https?://\S+|www\.\S+", " "))
-                    .withColumn(
-                        "clean_text",
-                        F.regexp_replace(
-                            F.col("clean_text"),
-                            r"[^\w\sàáảãạăắằẳẵặâấầẩẫậèéẻẽẹêếềểễệìíỉĩịòóỏõọôốồổỗộơớờởỡợùúủũụưứừửữựỳýỷỹỵđ_]",
-                            " ",
-                        ),
-                    )
-                    .withColumn("words", F.split(F.trim(F.col("clean_text")), r"\s+"))
-                    .withColumn("_stopwords", stopwords_lit)
-                    .withColumn(
-                        "tokens",
-                        F.expr(
-                            "filter(words, x -> length(x) >= 2 AND NOT x rlike '^[0-9]+$' AND NOT array_contains(_stopwords, x))"
-                        ),
-                    )
-                    .drop("clean_text", "words", "_stopwords")
-                    .filter(F.size(F.col("tokens")) > 0)
-                )
+                .drop("clean_text", "words", "_stopwords")
+                .filter(F.size(F.col("tokens")) > 0)
+            )
         else:
             preprocess_udf = create_preprocessing_udf(stopwords_bc, slang_dict_bc)
             df = df.withColumn("tokens", preprocess_udf(F.col("text")))
