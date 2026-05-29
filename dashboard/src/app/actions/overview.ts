@@ -5,27 +5,28 @@ import {
   getTrendingTopicsFromCH,
   getOverallSentimentFromCH,
 } from "@/lib/dal/radar";
+import type { ResolvedTimeRange } from "@/lib/time-range";
 
 /**
  * Overview KPIs
  */
-export async function getOverviewKPIs() {
-  return getOverviewKPIsFromCH();
+export async function getOverviewKPIs(timeRange: ResolvedTimeRange) {
+  return getOverviewKPIsFromCH(timeRange);
 }
 
 /**
  * Top 10 Trending Topics
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function getTrendingTopics(): Promise<any[]> {
-  return getTrendingTopicsFromCH();
+export async function getTrendingTopics(timeRange: ResolvedTimeRange): Promise<any[]> {
+  return getTrendingTopicsFromCH(timeRange);
 }
 
 /**
  * Overall Sentiment Distribution
  */
-export async function getOverallSentiment() {
-  const row = await getOverallSentimentFromCH();
+export async function getOverallSentiment(timeRange: ResolvedTimeRange) {
+  const row = await getOverallSentimentFromCH(timeRange);
   
   return [
     { name: "Positive", value: Number(row.positive) || 0, color: "#10b981", soft: "#d1fae5" },

@@ -272,3 +272,12 @@ nlp-worker-2/
 .venv/
 __pycache__/
 node_modules/
+models/phobert_finetuned.zip
+models/phobert_finetuned/final/added_tokens.json
+models/phobert_finetuned/final/bpe.codes
+models/phobert_finetuned/final/config.json
+models/phobert_finetuned/final/model.safetensors
+models/phobert_finetuned/final/README.md
+models/phobert_finetuned/final/special_tokens_map.json
+models/phobert_finetuned/final/tokenizer_config.json
+models/phobert_finetuned/final/vocab.txt

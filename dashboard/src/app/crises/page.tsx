@@ -2,13 +2,21 @@ import { Activity, Siren, Radio } from "lucide-react";
 import { ActiveEventsTimeline } from "@/components/crises/active-events-timeline";
 import { IncidentDetailCards } from "@/components/crises/incident-detail-cards";
 import { getRecentCrises, getCrisisStats } from "@/app/actions/crises";
+import { resolveTimeRange } from "@/lib/dal/time-range";
+import type { TimeRangeSearchParams } from "@/lib/time-range";
 
 export const revalidate = 3600;
+export const dynamic = "force-dynamic";
 
-export default async function CrisisMonitorPage() {
+export default async function CrisisMonitorPage({
+  searchParams,
+}: {
+  searchParams?: TimeRangeSearchParams;
+}) {
+  const timeRange = await resolveTimeRange(searchParams);
   const [crises, stats] = await Promise.all([
-    getRecentCrises(),
-    getCrisisStats()
+    getRecentCrises(timeRange),
+    getCrisisStats(timeRange)
   ]);
 
   const activeCount = crises.filter(c => (c as Record<string, unknown>).severity === 'HIGH').length;
@@ -30,6 +38,9 @@ export default async function CrisisMonitorPage() {
           <p className="mt-1.5 text-sm text-slate-500">
             Real-time anomaly detection
           </p>
+          <p className="mt-2 text-xs font-medium text-slate-500">
+            {timeRange.label}: {timeRange.start} to {timeRange.end}
+          </p>
         </div>
         <div className="flex items-center gap-2">
           <span className="inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-rose-50 to-orange-50 ring-1 ring-inset ring-rose-200/60 px-3 py-1.5 text-xs font-semibold text-rose-700">
@@ -46,10 +57,16 @@ export default async function CrisisMonitorPage() {
         </div>
       </div>
 
+      {crises.length === 0 && total24h === 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
+          No data in this range. Try Latest data 7d.
+        </div>
+      )}
+
       {/* Stat strip */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
-          { label: "Last 24h", value: total24h.toString(), sub: "events detected", tone: "slate" },
+          { label: "Selected range", value: total24h.toString(), sub: "events detected", tone: "slate" },
           { label: "High severity", value: highSeverity.toString(), sub: "requires action", tone: "rose" },
           { label: "Avg. velocity", value: `+${avgVelocity.toFixed(0)}/hr`, sub: "across active", tone: "amber" },
           { label: "Resolved today", value: "0", sub: "auto-cleared", tone: "emerald" }, // Mocked resolved

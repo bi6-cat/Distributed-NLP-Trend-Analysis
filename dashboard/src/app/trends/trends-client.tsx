@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Search,
   Sparkles,
@@ -13,6 +13,7 @@ import { TrendScoreChart } from "@/components/trends/trend-score-chart";
 import { SentimentTimelineChart } from "@/components/trends/sentiment-timeline-chart";
 import { WordCloud } from "@/components/trends/word-cloud";
 import { EvidencePostCards } from "@/components/trends/evidence-post-cards";
+import type { ResolvedTimeRange } from "@/lib/time-range";
 
 type Topic = {
   id: number;
@@ -23,22 +24,43 @@ type Topic = {
   score: number;
 };
 
-export default function TrendsClient({ initialTopics }: { initialTopics: Topic[] }) {
+export default function TrendsClient({
+  initialTopics,
+  timeRange,
+}: {
+  initialTopics: Topic[];
+  timeRange: ResolvedTimeRange;
+}) {
   // Guard against empty array
-  const topics = initialTopics.length > 0 ? initialTopics : [
-    { id: 0, label: "No topics found", first_seen: "-", last_seen: "-", mentions: 0, score: 0 }
-  ];
+  const topics = useMemo(
+    () =>
+      initialTopics.length > 0
+        ? initialTopics
+        : [{ id: 0, label: "No topics found", first_seen: "-", last_seen: "-", mentions: 0, score: 0 }],
+    [initialTopics],
+  );
 
   const [activeId, setActiveId] = useState(topics[0].id);
   const activeTopic = topics.find((t) => t.id === activeId) ?? topics[0];
+
+  useEffect(() => {
+    if (!topics.some((topic) => topic.id === activeId)) {
+      setActiveId(topics[0].id);
+    }
+  }, [activeId, topics]);
 
   return (
     <div className="space-y-6">
       {/* Page header */}
       <div>
-        <p className="text-xs font-semibold uppercase tracking-[0.08em] text-indigo-600">
-          Analytics
-        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-xs font-semibold uppercase tracking-[0.08em] text-indigo-600">
+            Analytics
+          </p>
+          <span className="rounded-md bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">
+            {timeRange.label}: {timeRange.start} to {timeRange.end}
+          </span>
+        </div>
         <h1 className="mt-1 text-3xl font-bold tracking-tight text-slate-900">
           Trends Explorer
         </h1>
@@ -46,6 +68,12 @@ export default function TrendsClient({ initialTopics }: { initialTopics: Topic[]
           Drill into topic-level trends, sentiment, and evidence over time.
         </p>
       </div>
+
+      {initialTopics.length === 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
+          No data in this range. Try Latest data 7d.
+        </div>
+      )}
 
       {/* Master-detail layout */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-5">
@@ -167,8 +195,8 @@ export default function TrendsClient({ initialTopics }: { initialTopics: Topic[]
 
           {/* Charts row */}
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-            <TrendScoreChart topicId={activeId} />
-            <SentimentTimelineChart topicId={activeId} />
+            <TrendScoreChart topicId={activeTopic.id} timeRange={timeRange} />
+            <SentimentTimelineChart topicId={activeTopic.id} timeRange={timeRange} />
           </div>
 
           {/* Bottom split pane */}
@@ -183,7 +211,7 @@ export default function TrendsClient({ initialTopics }: { initialTopics: Topic[]
                     <h3 className="text-sm font-semibold text-slate-900">Top Keywords</h3>
                   </div>
                 </div>
-                <WordCloud topicId={activeId} />
+                <WordCloud topicId={activeTopic.id} />
               </div>
             )}
             <div className="xl:col-span-7 rounded-xl bg-white border border-slate-200/80 shadow-[0_1px_2px_rgba(15,23,42,0.04)] p-6 flex flex-col h-[480px]">
@@ -199,7 +227,7 @@ export default function TrendsClient({ initialTopics }: { initialTopics: Topic[]
                   Sorted by engagement
                 </span>
               </div>
-              <EvidencePostCards topicId={activeId} />
+              <EvidencePostCards topicId={activeTopic.id} timeRange={timeRange} />
             </div>
           </div>
         </div>

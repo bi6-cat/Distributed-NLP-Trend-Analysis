@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { getTopicEvidencePosts } from "@/app/actions/trends";
 import { EvidencePostsLoading } from "@/components/ui/data-loading";
+import type { ResolvedTimeRange } from "@/lib/time-range";
 import { EvidencePostCardsClient } from "./evidence-post-cards-client";
 
 type PostData = {
@@ -14,7 +15,13 @@ type PostData = {
   engagement: number;
 };
 
-export function EvidencePostCards({ topicId }: { topicId: number }) {
+export function EvidencePostCards({
+  topicId,
+  timeRange,
+}: {
+  topicId: number;
+  timeRange: ResolvedTimeRange;
+}) {
   const [posts, setPosts] = useState<PostData[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -22,7 +29,7 @@ export function EvidencePostCards({ topicId }: { topicId: number }) {
     let isMounted = true;
 
     setIsLoading(true);
-    getTopicEvidencePosts(topicId)
+    getTopicEvidencePosts(topicId, timeRange)
       .then((nextPosts) => {
         if (isMounted) setPosts(nextPosts);
       })
@@ -37,7 +44,7 @@ export function EvidencePostCards({ topicId }: { topicId: number }) {
     return () => {
       isMounted = false;
     };
-  }, [topicId]);
+  }, [topicId, timeRange]);
 
   if (isLoading) {
     return <EvidencePostsLoading />;

@@ -43,7 +43,7 @@ export function SentimentTimelineChartClient({ data }: { data: SentimentData[] }
           </div>
           <div>
             <h3 className="text-sm font-semibold text-slate-900">Sentiment Over Time</h3>
-            <p className="text-[11px] text-slate-500">Volume by polarity (last 24h)</p>
+            <p className="text-[11px] text-slate-500">Volume by polarity (selected range)</p>
           </div>
         </div>
         <div className="flex items-center gap-3">

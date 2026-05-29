@@ -9,20 +9,32 @@ import {
 import { SentimentDonutChart } from "@/components/dashboard/sentiment-donut";
 import { TrendingTopicsTable } from "@/components/dashboard/trending-topics-table";
 import { getOverviewKPIs, getTrendingTopics, getOverallSentiment } from "@/app/actions/overview";
+import { resolveTimeRange } from "@/lib/dal/time-range";
+import type { TimeRangeSearchParams } from "@/lib/time-range";
 
 export const revalidate = 3600;
+export const dynamic = "force-dynamic";
 
-export default async function OverviewPage() {
+export default async function OverviewPage({
+  searchParams,
+}: {
+  searchParams?: TimeRangeSearchParams;
+}) {
+  const timeRange = await resolveTimeRange(searchParams);
   const [kpis, trendingTopics, sentimentData] = await Promise.all([
-    getOverviewKPIs(),
-    getTrendingTopics(),
-    getOverallSentiment()
+    getOverviewKPIs(timeRange),
+    getTrendingTopics(timeRange),
+    getOverallSentiment(timeRange)
   ]);
   
   // Format numbers securely
   const dailyMentions = Number(kpis.daily_mentions) || 0;
   const activeCrises = Number(kpis.active_crises) || 0;
   const mentionDelta = Number(kpis.mention_delta_pct) || 0;
+  const hasData =
+    dailyMentions > 0 ||
+    trendingTopics.length > 0 ||
+    sentimentData.some((item) => Number(item.value) > 0);
   
   // A simple threshold for the heat indicator: 
   // if active crises > 0 or mention delta > 50%
@@ -45,11 +57,17 @@ export default async function OverviewPage() {
         </div>
         <div className="flex items-center gap-2 text-xs text-slate-500">
           <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-          Live
+          {timeRange.label}
           <span className="text-slate-300">·</span>
-          Updated 2 min ago
+          {timeRange.start} to {timeRange.end}
         </div>
       </div>
+
+      {!hasData && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800">
+          No data in this range. Try Latest data 7d.
+        </div>
+      )}
 
       {/* KPI strip */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
@@ -167,7 +185,7 @@ export default async function OverviewPage() {
 
       {/* Charts row */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-5">
-        <SentimentDonutChart className="xl:col-span-4" data={sentimentData} />
+        <SentimentDonutChart className="xl:col-span-4" data={sentimentData} periodLabel={timeRange.label} />
         <TrendingTopicsTable className="xl:col-span-8" topics={trendingTopics} />
       </div>
     </div>
