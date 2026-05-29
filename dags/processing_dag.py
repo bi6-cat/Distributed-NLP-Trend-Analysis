@@ -988,7 +988,7 @@ with DAG(
             "--conf spark.executorEnv.WRITE_CLICKHOUSE_DIRECT=false "
             "/opt/airflow/spark_jobs/sentiment_job.py"
         ),
-        execution_timeout=timedelta(hours=2),
+        execution_timeout=timedelta(hours=24),
     )
 
     # ── Task từ Member 5: Trend Scoring (bằng dbt) ──

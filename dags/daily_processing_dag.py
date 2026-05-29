@@ -119,7 +119,7 @@ with DAG(
         external_dag_id="daily_processing_pipeline",
         external_task_id="sentiment_analysis",
         execution_delta=timedelta(hours=2),
-        timeout=3600,
+        timeout=86400,
         poke_interval=60,
         mode="reschedule",
         soft_fail=False,
