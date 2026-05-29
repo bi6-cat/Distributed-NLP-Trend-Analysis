@@ -86,7 +86,7 @@ _TEXT_PREPROCESSOR = None
 # ============================================================================
 # HẰNG SỐ MẶC ĐỊNH
 # ============================================================================
-DEFAULT_K: int = 12              # Giảm số topics để bớt fragmented trên corpus hiện tại
+DEFAULT_K: int = 20              # Tăng số topics để bớt fragmented trên corpus hiện tại
 DEFAULT_MAX_ITER: int = 60       # Tăng nhẹ để hội tụ ổn định hơn trên local processed data
 DEFAULT_OPTIMIZER: str = "em"    # "em" ổn định hơn "online" cho batch
 DEFAULT_VOCAB_SIZE: int = 4_000  # Giảm nhiễu từ hiếm trên tập processed hiện tại
@@ -884,6 +884,7 @@ def extract_topics(
     lda_model,
     vocabulary: List[str],
     max_terms: int = MAX_TERMS_PER_TOPIC,
+    llm_model_path: str = None,
 ) -> List[Dict]:
     """
     Trích xuất top từ khóa đại diện cho mỗi topic từ LDA model.
@@ -925,11 +926,30 @@ def extract_topics(
             "keywords": keywords,
         })
 
+    # Tích hợp LLM Labeling
+    if llm_model_path and os.path.exists(llm_model_path):
+        try:
+            from llama_cpp import Llama
+            logger.info(f"Loading LLM {llm_model_path} for Topic Labeling...")
+            llm = Llama(model_path=llm_model_path, n_ctx=2048, verbose=False)
+            
+            for t in results:
+                top_kws = ", ".join([kw["word"] for kw in t["keywords"][:15]])
+                prompt = f"<s>[INST] Bạn là chuyên gia phân tích mạng xã hội. Dựa vào các từ khóa sau của một chủ đề thảo luận: {top_kws}. Hãy đặt tên chủ đề này thật ngắn gọn (1 đến 4 từ tiếng Việt). Chỉ trả về tên chủ đề, không giải thích. [/INST]"
+                output = llm(prompt, max_tokens=15, stop=["\n", "</s>"], temperature=0.1)
+                label = output["choices"][0]["text"].strip()
+                t["topic_label"] = label
+        except ImportError:
+            logger.warning("Thư viện llama-cpp-python chưa được cài đặt. Dùng label mặc định.")
+        except Exception as e:
+            logger.warning(f"Lỗi khi chạy LLM: {e}. Dùng label mặc định.")
+
+    for t in results:
         # Log top-5 keywords
         kw_str = ", ".join(
-            f'{kw["word"]}({kw["weight"]:.3f})' for kw in keywords[:5]
+            f'{kw["word"]}({kw["weight"]:.3f})' for kw in t["keywords"][:5]
         )
-        logger.info(f"  Topic {topic_id}: [{topic_label}] — {kw_str}")
+        logger.info(f"  Topic {t['topic_id']}: [{t['topic_label']}] — {kw_str}")
 
     return results
 
@@ -1161,6 +1181,10 @@ def parse_args() -> argparse.Namespace:
         "--eval-max-docs", type=int, default=DEFAULT_EVAL_MAX_DOCS,
         help="Số documents tối đa dùng để tính coherence trong k-sweep.",
     )
+    parser.add_argument(
+        "--llm-model-path", type=str, default="models/llm/mistral-7b-instruct-v0.2.Q4_K_M.gguf",
+        help="Đường dẫn file GGUF của LLM (Mistral 7B) để predict topic label.",
+    )
     return parser.parse_args()
 
 
@@ -1215,17 +1239,40 @@ def main() -> None:
             logger.info(
                 f"Using preprocessed_text directly for tokenization ({preprocessed_count:,} docs)."
             )
+            # Lấy toàn bộ topic_stopwords từ TextPreprocessor để lọc nhiễu triệt để
+            try:
+                from preprocessing.text_cleaner import TextPreprocessor
+                preprocessor = TextPreprocessor(
+                    stopwords_path=args.stopwords_path,
+                    slang_dict_path=args.slang_dict_path,
+                    use_vncorenlp=False
+                )
+                all_stopwords = preprocessor.topic_stopwords
+                logger.info(f"Loaded {len(all_stopwords)} topic stopwords from TextPreprocessor.")
+            except Exception as exc:
+                logger.warning(f"Không thể load TextPreprocessor ({exc}). Fallback về hardcoded noise list.")
+                # Danh sách noise tokens/generic words cần loại bỏ
+                noise_tokens = [
+                    "attachments", "jpg", "png", "webp", "last", "com", "www", "vozfapp",
+                    "nói", "cần", "xem", "nhất", "trước", "qua"
+                ]
+                all_stopwords = set(stopwords) | set(noise_tokens)
+
+            stopwords_lit = F.array(*[F.lit(w) for w in sorted(all_stopwords)])
             df = (
                 df
                 .withColumn("preprocessed_text", F.lower(F.col("preprocessed_text")))
                 .withColumn("tokens", F.split(F.trim(F.col("preprocessed_text")), r"\s+"))
+                .withColumn("_stopwords", stopwords_lit)
                 .withColumn(
                     "tokens",
                     F.expr(
                         "filter(tokens, x -> length(x) >= 2 "
-                        "AND NOT x rlike '^[0-9]+$')"
+                        "AND NOT x rlike '^[0-9]+$' "
+                        "AND NOT array_contains(_stopwords, x))"
                     ),
                 )
+                .drop("_stopwords")
                 .filter(F.size(F.col("tokens")) > 0)
             )
         elif args.local:
@@ -1284,7 +1331,7 @@ def main() -> None:
 
         # 7. Trích xuất topics
         logger.info("Extracting topic descriptions:")
-        topics = extract_topics(lda_model, vocabulary)
+        topics = extract_topics(lda_model, vocabulary, llm_model_path=args.llm_model_path)
 
         # 8. Gán topic cho từng bài viết/comment
         logger.info("Inferring best topic per document...")

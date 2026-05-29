@@ -1,0 +1,22 @@
+# Spark workers do not run BERTopic. Keep this image lighter than Airflow.
+
+# Crawling/model fetch helpers used by Spark jobs
+requests==2.31.0
+kagglehub==0.2.7
+
+# Big Data (M2)
+pyspark==3.5.0
+pyarrow==14.0.2
+clickhouse-connect==0.7.7
+pydantic==2.6.3
+datasketch==1.10.0
+
+# NLP & Sentiment (M4) - CPU build for Spark workers
+transformers==4.39.0
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.0+cpu
+vncorenlp==1.0.3
+underthesea==6.8.0
+scikit-learn==1.4.0
+numpy==1.26.4
+pandas==2.2.1

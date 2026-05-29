@@ -50,6 +50,9 @@ STAGED_LOCAL_PATH:   str = os.getenv("STAGED_LOCAL_PATH", "/opt/airflow/data/pre
 PROCESSED_LOCAL_ROOT: str = os.getenv("PROCESSED_LOCAL_ROOT", "/opt/airflow/data/processed").rstrip("/")
 RAW_LOCAL_PATH:      str = os.getenv("RAW_LOCAL_PATH", "/opt/airflow/crawlers/data")
 LDA_LOCAL_OUTPUT:    str = os.getenv("LDA_LOCAL_OUTPUT", "/opt/airflow/output/lda")
+BERTOPIC_WINDOW_DAYS: int = int(os.getenv("BERTOPIC_WINDOW_DAYS", "1"))
+BERTOPIC_TOP_N_TOPICS: int = int(os.getenv("BERTOPIC_TOP_N_TOPICS", "50"))
+BERTOPIC_HF_MODEL_REPO: str = os.getenv("HF_MODEL_REPO", "ABCDHAQ/Bertopic")
 LOCAL_SENTIMENT_MODEL_PATH: str = os.getenv("LOCAL_SENTIMENT_MODEL_PATH", "/opt/airflow/models/phobert_finetuned/final")
 LOCAL_STOPWORDS_PATH: str = os.getenv("LOCAL_STOPWORDS_PATH", "/opt/airflow/data/stopwords_vi.txt")
 LOCAL_SLANG_DICT_PATH: str = os.getenv("LOCAL_SLANG_DICT_PATH", "/opt/airflow/data/slang_dict.json")
@@ -861,6 +864,35 @@ def task_save_lda_to_clickhouse() -> None:
     logger.info("[LDA] Topics pushed to ClickHouse.")
 
 
+def task_run_bertopic_daily() -> None:
+    """
+    Run BERTopic inference as the daily topic-modeling step.
+
+    Output stays on the existing staged contract:
+        - stg_post_topics
+        - stg_topics
+
+    That lets downstream ClickHouse ingestion, dbt, and dashboard code keep using
+    the same tables while replacing LDA with BERTopic.
+    """
+    import sys as _sys
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    _sys.path.insert(0, root)
+
+    from spark_jobs.bertopic_inference_job import main as bertopic_main
+
+    bertopic_main(
+        input_path=STAGED_LOCAL_PATH if USE_LOCAL else STAGED_HDFS_PATH,
+        model_path=None,
+        output_path=PROCESSED_LOCAL_ROOT if USE_LOCAL else None,
+        local=USE_LOCAL,
+        window_days=BERTOPIC_WINDOW_DAYS,
+        top_n_topics=BERTOPIC_TOP_N_TOPICS,
+    )
+    logger.info("[BERTopic] Daily topic modeling finished.")
+
+
 # ============================================================================
 # DAG 2: FULL PROCESSING PIPELINE (historical/full reprocessing)
 # ============================================================================
@@ -997,7 +1029,7 @@ with DAG(
         bash_command="cd /opt/airflow/warehouse/dbt_project && dbt run --profiles-dir .",
     )
 
-    # ── Task từ Member 3: Push LDA results → ClickHouse ──
+    # ── Task từ Member 3: Push topic results → ClickHouse ──
     ingest_stg_posts_core = PythonOperator(
         task_id="ingest_stg_posts_core",
         python_callable=task_ingest_hdfs_dataset,
@@ -1064,7 +1096,7 @@ with DAG(
 
     # ── DAG Flow ──
     # crawl → clean → ingest_stg_posts_core → LDA → sentiment → CMS
-    #                                         ├→ save_lda_to_ch ─┐
+    #                                         ├→ topic ingest ─┐
     #                                         └──────────────────┴──► dbt_transform → end
     pipeline_start >> validate_runtime_mounts >> crawl_sources >> upload_reference_files_to_hdfs >> spark_cleaning >> ingest_stg_posts_core
     ingest_stg_posts_core >> lda_topic_modeling >> sentiment_analysis >> ingest_stg_posts_nlp
@@ -1086,18 +1118,16 @@ with DAG(
 
 def task_bertopic_load_model(**context) -> None:
     """
-    Task 1: Load BERTopic model từ HDFS → lưu path vào XCom.
+    Task 1: Validate BERTopic Hugging Face repo config.
 
-    Không load cả model vào XCom (quá lớn) — chỉ lưu đường dẫn tmp dir.
-    Để model sống trong driver memory, dùng một PythonOperator duy nhất
-    chạy toàn bộ pipeline (xem task_bertopic_run_pipeline bên dưới).
+    Không load cả model vào XCom (quá lớn). Model được tải trực tiếp từ
+    Hugging Face trong task_bertopic_run_pipeline.
     """
-    logger.info("[BERTopic] Checking model path...")
-    model_path = (
-        HDFS_MODEL_PATH if not USE_LOCAL else LOCAL_BERTOPIC_MODEL_PATH
-    )
-    logger.info(f"Model path: {model_path}")
-    context["ti"].xcom_push(key="model_path", value=model_path)
+    repo = BERTOPIC_HF_MODEL_REPO.strip()
+    if not repo:
+        raise ValueError("HF_MODEL_REPO is empty; expected a Hugging Face repo such as ABCDHAQ/Bertopic")
+    logger.info("[BERTopic] Hugging Face repo: %s", repo)
+    context["ti"].xcom_push(key="hf_model_repo", value=repo)
 
 
 def task_bertopic_run_pipeline() -> None:
@@ -1138,16 +1168,12 @@ def task_save_bertopic_to_clickhouse() -> None:
     logger.info("[BERTopic] Staged topic datasets loaded into ClickHouse.")
 
 
-# ── Cấu hình path riêng cho BERTopic ──
-HDFS_MODEL_PATH: str = f"{HDFS_USER_DIR}/models/bertopic/bertopic_model"
-LOCAL_BERTOPIC_MODEL_PATH: str = "output/task3.1_bertopic/output/bertopic_model"
-
 with DAG(
     dag_id="bertopic_weekly_inference",
     default_args=default_args,
     description=(
         "BERTopic weekly inference — chạy Chủ nhật 3h sáng. "
-        "Load model PhoBERT từ HDFS, inference 7 ngày dữ liệu, "
+        "Load model từ Hugging Face, inference 7 ngày dữ liệu, "
         "export stg_post_topics + stg_topics. Member 3 — Task 3.x"
     ),
     schedule_interval="0 3 * * 0",        # Chủ nhật 3:00 AM
@@ -1158,9 +1184,9 @@ with DAG(
 
     bt_start = DummyOperator(task_id="bertopic_start")
 
-    # Task 1: Kiểm tra model tồn tại (lightweight check)
+    # Task 1: Kiểm tra Hugging Face repo config (lightweight check)
     bt_check_model = PythonOperator(
-        task_id="check_model_path",
+        task_id="check_hf_model_repo",
         python_callable=task_bertopic_load_model,
         provide_context=True,
     )

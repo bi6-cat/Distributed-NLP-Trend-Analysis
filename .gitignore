@@ -1,6 +1,8 @@
 # ── Data files (không commit raw/fake data lên git) ──────────
 data/fake/
 data/raw/
+data/data/
+data/staged/
 data/*.csv
 data/*.json
 data/*.parquet
@@ -39,6 +41,7 @@ dashboard/next-dev*.err
 tutorial_work/
 
 # ── Model files (too large for git) ──────────
+models/
 output/**/*.pkl
 output/**/*.model
 output/**/*_model

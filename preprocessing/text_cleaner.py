@@ -301,13 +301,16 @@ class TextPreprocessor:
             "ngày", "có_thể", "nhé", "nữa", "fen", "tq", "tr", "views", "kb",
             "wick", "hê", "nhỉ", "bên", "chứ", "mấy", "chỉ", "vì", "họ",
             "những", "đẹp", "lên", "thêm", "khác", "giờ", "hết", "mỗi",
-            "đúng", "for", "edited", "fan",
+            "đúng", "for", "edited", "fan", "nan",
             # generic verbs / adjectives / discourse fillers that still dominate topics
             "mua", "dùng", "xài", "làm", "bị", "nhiều", "ngon", "chắc",
             "bảo", "nhìn", "cao", "tốt", "gần", "biết", "nay", "đấy",
-            "cả", "lấy", "cứ", "lắm", "việc", "bằng", "nghe", "mở", "về", "cần"
+            "cả", "lấy", "cứ", "lắm", "việc", "bằng", "nghe", "mở", "về", "cần",
             # residual noise from current corpus
-            "webp", "ktc", "via", "thenextvoz", "đt",
+            "attachments", "attachment", "views", "jpg", "jpeg", "png", "webp",
+            "screenshot", "sent", "using", "from", "via", "vozfapp", "vozvnapp",
+            "thenextvoz", "com", "www", "http", "https", "the", "with", "you",
+            "is", "to", "on", "in", "ktc", "đt",
         }
 
     def _filter_topic_tokens(self, text: str) -> str:

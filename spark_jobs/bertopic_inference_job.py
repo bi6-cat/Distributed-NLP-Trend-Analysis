@@ -59,6 +59,8 @@ HDFS_OUTPUT_TOPIC_DEFS: str = os.getenv("HDFS_STG_TOPICS", f"{HDFS_STAGED_ROOT}/
 LOCAL_MODEL_PATH: str   = "output/task3.1_bertopic/output/bertopic_model"
 LOCAL_OUTPUT_PATH: str  = PROCESSED_LOCAL_ROOT
 HF_MODEL_REPO: str      = os.getenv("HF_MODEL_REPO", "ABCDHAQ/Bertopic")
+LOCAL_STOPWORDS_PATH: str = os.getenv("LOCAL_STOPWORDS_PATH", "/opt/airflow/data/stopwords_vi.txt")
+LOCAL_SLANG_DICT_PATH: str = os.getenv("LOCAL_SLANG_DICT_PATH", "/opt/airflow/data/slang_dict.json")
 
 BATCH_SIZE: int    = 512   # docs per encode batch
 MAX_TEXT_LEN: int  = 500   # ký tự — khớp với giới hạn khi training
@@ -199,15 +201,37 @@ def load_staged_posts(
             df = df[df["created_at"] >= cutoff]
             logger.info(f"Filtered to last {window_days} days: {len(df):,} rows")
 
-    # Build clean_text (giống notebook cell 4)
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, root)
+    from preprocessing.text_cleaner import TextPreprocessor
+
+    topic_preprocessor = TextPreprocessor(
+        slang_dict_path=LOCAL_SLANG_DICT_PATH,
+        stopwords_path=LOCAL_STOPWORDS_PATH,
+        use_vncorenlp=False,
+    )
+
+    # Rebuild topic text from display/body text so BERTopic uses the current
+    # local slang dictionary and stopword list, without requiring a full M2 rerun.
+    def _first_nonempty(row, columns: Tuple[str, ...]) -> str:
+        for col in columns:
+            value = row.get(col, "")
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text and text.lower() != "nan":
+                return text
+        return ""
+
     def _build_text(row) -> str:
-        title = str(row.get("title", "") or "").strip()
-        seg   = str(row.get("segmented_text", "") or "").strip()
-        body  = str(row.get("body", "") or "").strip()
-        text  = seg if seg else body
-        if title and title.lower() not in text.lower():
-            text = f"{title} {text}"
-        return text.strip()[:MAX_TEXT_LEN]
+        source_text = _first_nonempty(row, ("body", "title"))
+        if source_text:
+            processed = topic_preprocessor.preprocess_for_topic(source_text)
+            if processed:
+                return processed[:MAX_TEXT_LEN]
+
+        fallback = _first_nonempty(row, ("topic_text", "segmented_text", "clean_text"))
+        return fallback[:MAX_TEXT_LEN]
 
     df["clean_text"] = df.apply(_build_text, axis=1)
     df = df[df["clean_text"].str.len() >= 10].copy()
@@ -228,12 +252,10 @@ def load_bertopic_model(
     hf_repo: Optional[str] = None,
 ):
     """
-    Load VietnameseBERTopicModel từ HuggingFace Hub, local, hoặc HDFS.
+    Load VietnameseBERTopicModel từ HuggingFace Hub.
 
-    Thứ tự ưu tiên:
-        1. HuggingFace Hub (hf_repo được set) — dùng trên server thật
-        2. Local path (local=True) — dùng khi dev/Docker
-        3. HDFS (mặc định) — dùng khi cluster thật có HDFS
+    Local/HDFS mode chỉ quyết định nguồn dữ liệu input/output. Model luôn được
+    load từ Hugging Face để daily pipeline không phụ thuộc artifact local/HDFS.
 
     Returns:
         VietnameseBERTopicModel instance.
@@ -242,9 +264,11 @@ def load_bertopic_model(
     sys.path.insert(0, root)
     from models.bertopic_model import VietnameseBERTopicModel
 
-    repo = hf_repo or HF_MODEL_REPO
+    repo = (hf_repo if hf_repo is not None else HF_MODEL_REPO).strip()
+    if not repo:
+        raise ValueError("HF_MODEL_REPO is empty; set it to a Hugging Face BERTopic repo, e.g. ABCDHAQ/Bertopic")
 
-    if repo:
+    try:
         logger.info(f"[HuggingFace] Loading BERTopic from {repo}")
         from bertopic import BERTopic
         from sentence_transformers import SentenceTransformer
@@ -257,17 +281,8 @@ def load_bertopic_model(
         wrapper.probs_ = None
         logger.info(f"[HuggingFace] Loaded — {len(topic_model.get_topic_info())} topics")
         return wrapper
-
-    if local:
-        model_dir = local_model_path or LOCAL_MODEL_PATH
-        logger.info(f"[LOCAL] Loading BERTopic model from {model_dir}")
-        return VietnameseBERTopicModel.load(model_dir, verbose=False)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        local_model_dir = os.path.join(tmpdir, "bertopic_model")
-        _webhdfs_download_dir(hdfs_model_path, local_model_dir)
-        logger.info(f"[CLUSTER] Loading BERTopic model from tmp")
-        return VietnameseBERTopicModel.load(local_model_dir, verbose=False)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to load BERTopic model from Hugging Face repo '{repo}': {exc}") from exc
 
 
 # ============================================================================
@@ -440,7 +455,7 @@ def main(
 
     Args:
         input_path:    HDFS staged path hoặc local CSV path.
-        model_path:    HDFS model path hoặc local model dir.
+        model_path:    Deprecated; model is always loaded from HF_MODEL_REPO.
         output_path:   HDFS output prefix hoặc local output dir.
         local:         True = local mode (dev/test), False = HDFS cluster.
         window_days:   Số ngày dữ liệu cần inference (default: 7).
@@ -451,6 +466,7 @@ def main(
     logger.info(f"Mode     : {'LOCAL' if local else 'CLUSTER'}")
     logger.info(f"Window   : last {window_days} days")
     logger.info(f"Top-N    : {top_n_topics if top_n_topics else 'disabled'}")
+    logger.info(f"HF repo  : {HF_MODEL_REPO}")
     logger.info("=" * 60)
 
     # 1. Load model
@@ -501,7 +517,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model-path",
         default=None,
-        help="HDFS model path hoặc local model dir (default: HDFS_MODEL_PATH)",
+        help="Deprecated; ignored because model is loaded from HF_MODEL_REPO.",
     )
     parser.add_argument(
         "--output-path",
