@@ -15,6 +15,9 @@ data/preprocessed/*.csv
 data/preprocessed/*.parquet
 output/
 crawlers/data/
+offline_topics_output*/
+offline_bertopic_model*/
+stg_posts_core_for_topics/
 
 # ── Runtime files ──────────────────────────────────────────────
 *.pid
@@ -281,3 +284,14 @@ models/phobert_finetuned/final/README.md
 models/phobert_finetuned/final/special_tokens_map.json
 models/phobert_finetuned/final/tokenizer_config.json
 models/phobert_finetuned/final/vocab.txt
+crawlers/data-full/vatvo/articles.csv
+crawlers/data-full/vatvo/crawled_links.json
+crawlers/data-full/vatvo/progress.json
+crawlers/data-full/vnexpress/comment_vnexpress.csv
+crawlers/data-full/vnexpress/post_vnexpress.csv
+crawlers/data-full/vnexpress/vnexpress_checkpoint.json
+crawlers/data-full/voz/checkpoint.json
+crawlers/data-full/voz/comments.csv
+crawlers/data-full/voz/posts.csv
+
+/temp/*
