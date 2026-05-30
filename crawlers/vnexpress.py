@@ -1,7 +1,6 @@
 import json
 import os
 import tempfile
-from pathlib import Path
 from datetime import datetime, timedelta
 import re
 import pandas as pd
@@ -12,11 +11,11 @@ from selenium.common.exceptions import WebDriverException
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
 import time
+from remote_storage import RemoteStorage
 
 # ========== CONFIG ==========
-SCRIPT_DIR = Path(__file__).resolve().parent
-DATA_DIR = Path(os.getenv("DATA_DIR", str(SCRIPT_DIR / "data")))
-VNEXPRESS_DIR = DATA_DIR / "vnexpress"
+STORAGE = RemoteStorage()
+VNEXPRESS_DIR = "vnexpress"
 
 BASE_URLS = [
     "https://vnexpress.net/khoa-hoc-cong-nghe/thiet-bi",
@@ -25,31 +24,29 @@ BASE_URLS = [
     "https://vnexpress.net/khoa-hoc-cong-nghe/chuyen-doi-so"
 ]
 
-VNEXPRESS_DIR.mkdir(parents=True, exist_ok=True)
-
-CHECKPOINT_PATH = VNEXPRESS_DIR / "vnexpress_checkpoint.json"
-POST_CSV_PATH = VNEXPRESS_DIR / "post_vnexpress.csv"
-COMMENT_CSV_PATH = VNEXPRESS_DIR / "comment_vnexpress.csv"
+CHECKPOINT_PATH = "vnexpress_checkpoint.json"
+POST_CSV_PATH = "post_vnexpress.csv"
+COMMENT_CSV_PATH = "comment_vnexpress.csv"
 
 REQUEST_TIMEOUT = 30
 SLEEP_AFTER_OPEN_POST = 3
 MAX_CLICK_ROUNDS = 300
+CSV_FLUSH_POST_BATCH = int(os.getenv("VNEXPRESS_CSV_FLUSH_POST_BATCH", "5"))
 
 # ========== CHECKPOINT HELPERS ==========
-def load_checkpoint(path: Path):
-    if not path.exists():
-        return {
+def load_checkpoint(path):
+    return STORAGE.read_json(
+        STORAGE.path(VNEXPRESS_DIR, path),
+        {
             "bases": {},
             "processed_posts": [],
             "updated_at": None,
-        }
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+        },
+    )
 
-def save_checkpoint(path: Path, checkpoint: dict):
+def save_checkpoint(path, checkpoint: dict):
     checkpoint["updated_at"] = datetime.now().isoformat()
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(checkpoint, f, ensure_ascii=False, indent=2)
+    STORAGE.write_json(STORAGE.path(VNEXPRESS_DIR, path), checkpoint)
 
 def append_unique(lst, value):
     if value not in lst:
@@ -61,7 +58,6 @@ def create_driver():
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
     options.add_argument("--disable-blink-features=AutomationControlled")
     options.add_argument(f"--user-data-dir={profile_dir.name}")
     options.add_argument("--no-first-run")
@@ -277,12 +273,31 @@ def parse_post_and_comments_from_link(driver, link: str):
 
     return post_record, comment_records
 
-def append_records_to_csv(path: Path, records: list):
+def append_records_to_csv(path, records: list):
     if not records:
         return
-    df = pd.DataFrame(records)
-    write_header = not path.exists()
-    df.to_csv(path, mode="a", index=False, header=write_header, encoding="utf-8-sig")
+    STORAGE.append_csv(
+        STORAGE.path(VNEXPRESS_DIR, path),
+        records,
+        encoding="utf-8-sig",
+    )
+
+def flush_crawled_batch(post_batch, comment_batch, link_batch, base_state, checkpoint, processed_posts):
+    if not link_batch:
+        return
+
+    append_records_to_csv(POST_CSV_PATH, post_batch)
+    append_records_to_csv(COMMENT_CSV_PATH, comment_batch)
+
+    for link in link_batch:
+        append_unique(base_state["crawled_links"], link)
+        append_unique(checkpoint["processed_posts"], link)
+        processed_posts.add(link)
+
+    save_checkpoint(CHECKPOINT_PATH, checkpoint)
+    post_batch.clear()
+    comment_batch.clear()
+    link_batch.clear()
 
 # ========== PAGE-BY-PAGE RUN ==========
 checkpoint = load_checkpoint(CHECKPOINT_PATH)
@@ -360,28 +375,43 @@ try:
                     continue
 
             # Crawl hết queue của page hiện tại trước khi chuyển page
+            post_batch = []
+            comment_batch = []
+            link_batch = []
+
             while base_state.get("queued_links", []):
                 link_post = base_state["queued_links"].pop(0)
-                save_checkpoint(CHECKPOINT_PATH, checkpoint)
-
                 if link_post in processed_posts or link_post in base_state.get("crawled_links", []):
                     continue
 
                 print(f"[POST] {link_post}")
                 try:
                     post_record, comment_records = safe_parse_post_and_comments(driver_state, link_post)
-                    append_records_to_csv(POST_CSV_PATH, [post_record])
-                    append_records_to_csv(COMMENT_CSV_PATH, comment_records)
+                    post_batch.append(post_record)
+                    comment_batch.extend(comment_records)
+                    link_batch.append(link_post)
 
-                    append_unique(base_state["crawled_links"], link_post)
-                    append_unique(checkpoint["processed_posts"], link_post)
-                    processed_posts.add(link_post)
-
-                    save_checkpoint(CHECKPOINT_PATH, checkpoint)
+                    if len(post_batch) >= CSV_FLUSH_POST_BATCH:
+                        flush_crawled_batch(
+                            post_batch,
+                            comment_batch,
+                            link_batch,
+                            base_state,
+                            checkpoint,
+                            processed_posts,
+                        )
                     print(f"  -> lưu xong post + {len(comment_records)} comments")
 
                 except Exception as e:
                     # Không raise để pipeline vẫn tiếp tục; đưa link lỗi về cuối queue để thử lại lần chạy sau
+                    flush_crawled_batch(
+                        post_batch,
+                        comment_batch,
+                        link_batch,
+                        base_state,
+                        checkpoint,
+                        processed_posts,
+                    )
                     base_state["queued_links"].append(link_post)
                     save_checkpoint(CHECKPOINT_PATH, checkpoint)
                     print(f"  -> lỗi post, giữ lại queue cho lần chạy sau: {e}")
@@ -389,6 +419,15 @@ try:
                     break
 
             # Nếu còn queue sau lỗi thì chuyển base_url tiếp theo, pipeline vẫn chạy
+            flush_crawled_batch(
+                post_batch,
+                comment_batch,
+                link_batch,
+                base_state,
+                checkpoint,
+                processed_posts,
+            )
+
             if base_state.get("queued_links", []):
                 print("  -> còn link lỗi trong queue, tạm dừng base này và chuyển base khác")
                 break
@@ -398,17 +437,10 @@ try:
 
 finally:
     close_driver(driver_state.get("driver"), driver_state.get("profile_dir"))
+    STORAGE.close()
 
 print("DONE")
 print(f"Checkpoint: {CHECKPOINT_PATH}")
 print(f"Post CSV: {POST_CSV_PATH}")
 print(f"Comment CSV: {COMMENT_CSV_PATH}")
-
-print("\n===========================================")
-print("🚀 Bắt đầu tự động đẩy dữ liệu lên HDFS...")
-print("===========================================")
-try:
-    from upload_to_hdfs import main as upload_main
-    upload_main()
-except Exception as e:
-    print(f"❌ Lỗi khi tự động tải dữ liệu lên HDFS: {e}")
+print("Data and checkpoint were written directly to HDFS.")

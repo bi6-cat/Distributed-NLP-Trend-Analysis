@@ -294,4 +294,10 @@ crawlers/data-full/voz/checkpoint.json
 crawlers/data-full/voz/comments.csv
 crawlers/data-full/voz/posts.csv
 
+<<<<<<< HEAD
+data/
+crawlers/data/
+server_data/
+=======
 /temp/*
+>>>>>>> origin/develop
