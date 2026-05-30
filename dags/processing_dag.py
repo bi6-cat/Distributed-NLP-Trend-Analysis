@@ -988,6 +988,8 @@ with DAG(
             "--k 20 "
             f"--stopwords-path '{LOCAL_STOPWORDS_PATH if USE_LOCAL else f'{HDFS_URI_PREFIX}{HDFS_USER_DIR}/ref/stopwords_vi.txt'}' "
             f"--slang-dict-path '{LOCAL_SLANG_DICT_PATH if USE_LOCAL else f'{HDFS_URI_PREFIX}{HDFS_USER_DIR}/ref/slang_dict.json'}' "
+            "--ollama-url 'http://ollama:11434' "
+            "--ollama-model 'mistral-local' "
             f"{lda_local_flag}"
         ),
         execution_timeout=timedelta(hours=2),

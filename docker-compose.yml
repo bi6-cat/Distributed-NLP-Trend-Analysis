@@ -114,7 +114,31 @@ services:
       - nlp_network
 
   # ==========================================
-  # 3. CLICKHOUSE
+  # 3. OLLAMA (Local LLM — Mistral 7B GGUF)
+  # ==========================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ./models/llm:/models         # mount thư mục chứa file .gguf
+      - ollama_data:/root/.ollama    # cache model registry của Ollama
+    environment:
+      - OLLAMA_MODELS=/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - nlp_network
+
+  # ==========================================
+  # 4. CLICKHOUSE
   # ==========================================
   clickhouse:
     image: clickhouse/clickhouse-server:24.3
@@ -202,6 +226,7 @@ volumes:
   hadoop_datanode:
   postgres_data:
   clickhouse_data:
+  ollama_data:
 
 networks:
   nlp_network:

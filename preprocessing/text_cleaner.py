@@ -306,11 +306,14 @@ class TextPreprocessor:
             "mua", "dùng", "xài", "làm", "bị", "nhiều", "ngon", "chắc",
             "bảo", "nhìn", "cao", "tốt", "gần", "biết", "nay", "đấy",
             "cả", "lấy", "cứ", "lắm", "việc", "bằng", "nghe", "mở", "về", "cần",
+            "nói", "xem", "nhất", "trước", "qua", "xong", "chút", "tui",
+            "hơi", "món", "nha", "kiểu", "hôm", "chủ", "chả", "hả", "nè",
+            "thằng", "bọn", "mẹ", "mày",
             # residual noise from current corpus
             "attachments", "attachment", "views", "jpg", "jpeg", "png", "webp",
             "screenshot", "sent", "using", "from", "via", "vozfapp", "vozvnapp",
             "thenextvoz", "com", "www", "http", "https", "the", "with", "you",
-            "is", "to", "on", "in", "ktc", "đt",
+            "is", "to", "on", "in", "last", "ktc", "đt",
         }
 
     def _filter_topic_tokens(self, text: str) -> str:

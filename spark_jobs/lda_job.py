@@ -696,9 +696,9 @@ def build_tfidf_features(
             - cv_model: CountVectorizerModel (lưu lại cho evaluation)
             - vocabulary: List[str] mapping index→word
     """
-    logger.info(
-        f"Building TF-IDF — vocab_size={vocab_size}, min_df={min_df}"
-    )
+    # LDA trong Spark MLlib huấn luyện trên term counts (TF) thay vì TF-IDF.
+    # IDF vẫn được tính để phục vụ các phân tích/đánh giá khác nếu cần.
+    logger.info(f"Building CountVectorizer (TF) — vocab_size={vocab_size}, min_df={min_df}")
 
     # Bước 1: CountVectorizer → Term Frequency
     cv = CountVectorizer(
@@ -718,7 +718,7 @@ def build_tfidf_features(
     idf_model = idf.fit(tf_df)
     tfidf_df = idf_model.transform(tf_df)
 
-    logger.info("TF-IDF features ready.")
+    logger.info("Vectorizer features ready (tf_features + tfidf_features).")
     return tfidf_df, cv_model, vocabulary
 
 
@@ -880,11 +880,176 @@ def evaluate_k_sweep(
 # TRÍCH XUẤT & MÔ TẢ TOPICS
 # ============================================================================
 
+def _call_ollama_label(
+    keywords: List[Tuple[str, float]],
+    ollama_url: str,
+    model: str = "mistral-local",
+    timeout: int = 90,
+) -> Optional[str]:
+    """
+    Gọi Ollama HTTP API để sinh label ngắn gọn cho topic.
+    Dùng stdlib urllib — không cần cài thư viện ngoài.
+
+    Args:
+        keywords: Top keywords của topic.
+        ollama_url: Base URL của Ollama, ví dụ "http://ollama:11434" (Docker)
+                    hoặc "http://localhost:11434" (host).
+        model: Tên model đã đăng ký trong Ollama.
+        timeout: Giây timeout mỗi request.
+
+    Returns:
+        Label string hoặc None nếu lỗi.
+    """
+    import json as _json
+    import urllib.request as _req
+    import urllib.error as _uerr
+
+    # Format: "tukhoa(weight)" để model thấy mức độ quan trọng tương đối.
+    kw_parts: List[str] = []
+    for w, wt in keywords[:15]:
+        try:
+            kw_parts.append(f"{w}({float(wt):.3f})")
+        except Exception:
+            kw_parts.append(f"{w}")
+    kw_str = ", ".join(kw_parts)
+
+    # Few-shot + ràng buộc định dạng để tránh model nói dài / lạc format.
+    # Lưu ý: /api/generate của Ollama dùng một trường "prompt", nên "System Prompt"
+    # được nhúng trực tiếp vào prompt này.
+    prompt = (
+        "You are an expert data analyst. Generate ONE Vietnamese topic label from keywords.\n"
+        "\n"
+        "STRICT OUTPUT CONTRACT:\n"
+        "- Output EXACTLY ONE LINE, ONLY the label text.\n"
+        "- Vietnamese only. No English words.\n"
+        "- 3 to 6 words.\n"
+        "- Must be a NOUN PHRASE (cụm danh từ), not a sentence. Do NOT use any subject like \"tôi/mình/người ta\".\n"
+        "- Do NOT end with: \"và\", \"hoặc\", \"với\", \"của\", \"cho\", \"trong\", \"khi\", \"giữa\", \"về\".\n"
+        "- No trailing punctuation.\n"
+        "\n"
+        "Examples:\n"
+        "Keywords: chạy, học, đường, chỗ, thi\n"
+        "Label: Kinh nghiệm thi bằng lái xe\n"
+        "\n"
+        "Keywords: máy, sạc, pin, pro, camera\n"
+        "Label: Đánh giá pin và camera\n"
+        "\n"
+        "Now label this topic:\n"
+        f"Keywords: {kw_str}\n"
+        "Label:"
+    )
+    payload = _json.dumps({
+        "model":  model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature":    0.1,
+            "top_p":          0.9,
+            "repeat_penalty": 1.1,
+            # Cho đủ token để tránh nhãn bị cụt (vd: "sử dụng", "đặc tính"...)
+            "num_predict":    80,
+            # Stop để chỉ lấy 1 nhãn, tránh model viết lại prompt hoặc thêm phần khác.
+            "stop":           ["\n", "Keywords:", "Label:", "</s>"],
+        },
+    }).encode("utf-8")
+
+    request = _req.Request(
+        f"{ollama_url.rstrip('/')}/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    # NOTE: Không bắt buộc có dấu vì nhiều model local hay trả về không dấu dù prompt yêu cầu.
+    # Ta chỉ enforce format (1 dòng, 3-6 từ, không giải thích) và blacklist intro phrases.
+
+    def _normalize_label(raw_text: str) -> str:
+        text = (raw_text or "").split("\n")[0].strip()
+        text = text.strip(" \"'`")
+        text = text.rstrip(".,;: ").rstrip(",")
+        # Bỏ đánh số đầu dòng kiểu "1." hoặc "1)"
+        text = re.sub(r"^\s*\d+\s*[\.\)]\s*", "", text)
+        # Bỏ ngoặc/emoji/dấu lạ hay bị model nhét vào
+        text = re.sub(r"[\[\]\(\)\{\}]+", " ", text)
+        text = re.sub(r"[:;|]+", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+        # Ép tối đa 6 từ (space-separated). Giữ token dạng có '_' vì là 1 từ.
+        words = text.split()
+        return " ".join(words[:6]).strip()
+
+    def _is_valid_label(text: str) -> bool:
+        if not text:
+            return False
+        if "," in text:
+            return False
+        # Blacklist các cụm "mở bài" hay bị model thêm vào.
+        lowered = text.lower()
+        for bad in [
+            "topic is",
+            "topic:",
+            "choices for",
+            "discussion about",
+            "chủ đề là",
+            "thảo luận về",
+            "lựa chọn cho",
+        ]:
+            if bad in lowered:
+                return False
+        words = text.split()
+        if len(words) < 3 or len(words) > 6:
+            return False
+        return True
+
+    try:
+        with _req.urlopen(request, timeout=timeout) as resp:
+            result = _json.loads(resp.read())
+            raw = result.get("response", "").strip()
+            text = _normalize_label(raw)
+            if _is_valid_label(text):
+                return text
+
+        # Retry 1 lần với chỉ thị mạnh hơn nếu model lạc tiếng Anh/không dấu/không đúng độ dài.
+        retry_prompt = (
+            prompt
+            + "\n\nREMINDER: Output ONLY ONE LINE label (3-6 words). Vietnamese only. NO English words. NO sentence."
+        )
+        retry_payload = _json.dumps({
+            "model":  model,
+            "prompt": retry_prompt,
+            "stream": False,
+            "options": {
+                "temperature":    0.1,
+                "top_p":          0.9,
+                "repeat_penalty": 1.1,
+                "num_predict":    80,
+                "stop":           ["\n", "Keywords:", "Label:", "</s>"],
+            },
+        }).encode("utf-8")
+        retry_req = _req.Request(
+            f"{ollama_url.rstrip('/')}/api/generate",
+            data=retry_payload,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with _req.urlopen(retry_req, timeout=timeout) as resp2:
+            result2 = _json.loads(resp2.read())
+            raw2 = result2.get("response", "").strip()
+            text2 = _normalize_label(raw2)
+            return text2 if _is_valid_label(text2) else None
+    except _uerr.URLError as exc:
+        logger.warning(f"Ollama API error: {exc}")
+        return None
+    except Exception as exc:
+        logger.warning(f"Ollama unexpected error: {exc}")
+        return None
+
+
 def extract_topics(
     lda_model,
     vocabulary: List[str],
     max_terms: int = MAX_TERMS_PER_TOPIC,
-    llm_model_path: str = None,
+    ollama_url: Optional[str] = None,
+    ollama_model: str = "mistral-local",
 ) -> List[Dict]:
     """
     Trích xuất top từ khóa đại diện cho mỗi topic từ LDA model.
@@ -915,10 +1080,9 @@ def extract_topics(
             word = vocabulary[idx] if idx < len(vocabulary) else f"UNK_{idx}"
             keywords.append({"word": word, "weight": float(weight)})
 
-        # Tạo label tự động từ top-3 keywords
-        # Ví dụ: "iphone | giá | camera" → dễ đọc trên dashboard
+        # Label mặc định top-3 (fallback nếu LLM không chạy)
         top3_words = [kw["word"] for kw in keywords[:3]]
-        topic_label = " | ".join(top3_words)
+        topic_label = " ".join(top3_words)
 
         results.append({
             "topic_id": topic_id,
@@ -926,26 +1090,24 @@ def extract_topics(
             "keywords": keywords,
         })
 
-    # Tích hợp LLM Labeling
-    if llm_model_path and os.path.exists(llm_model_path):
-        try:
-            from llama_cpp import Llama
-            logger.info(f"Loading LLM {llm_model_path} for Topic Labeling...")
-            llm = Llama(model_path=llm_model_path, n_ctx=2048, verbose=False)
-            
-            for t in results:
-                top_kws = ", ".join([kw["word"] for kw in t["keywords"][:15]])
-                prompt = f"<s>[INST] Bạn là chuyên gia phân tích mạng xã hội. Dựa vào các từ khóa sau của một chủ đề thảo luận: {top_kws}. Hãy đặt tên chủ đề này thật ngắn gọn (1 đến 4 từ tiếng Việt). Chỉ trả về tên chủ đề, không giải thích. [/INST]"
-                output = llm(prompt, max_tokens=15, stop=["\n", "</s>"], temperature=0.1)
-                label = output["choices"][0]["text"].strip()
+    # ── Tích hợp LLM Labeling qua Ollama HTTP API ──
+    if ollama_url:
+        logger.info(f"LLM Labeling via Ollama at {ollama_url} (model={ollama_model})...")
+        success_count = 0
+        for t in results:
+            kws = [(kw["word"], float(kw.get("weight", 0.0))) for kw in t["keywords"]]
+            label = _call_ollama_label(kws, ollama_url, model=ollama_model)
+            if label:
                 t["topic_label"] = label
-        except ImportError:
-            logger.warning("Thư viện llama-cpp-python chưa được cài đặt. Dùng label mặc định.")
-        except Exception as e:
-            logger.warning(f"Lỗi khi chạy LLM: {e}. Dùng label mặc định.")
+                success_count += 1
+            else:
+                logger.warning(
+                    f"  Topic {t['topic_id']}: LLM không trả kết quả, "
+                    f"giữ label mặc định: '{t['topic_label']}'"
+                )
+        logger.info(f"LLM labeled {success_count}/{len(results)} topics thành công.")
 
     for t in results:
-        # Log top-5 keywords
         kw_str = ", ".join(
             f'{kw["word"]}({kw["weight"]:.3f})' for kw in t["keywords"][:5]
         )
@@ -996,37 +1158,46 @@ def save_results(
         except Exception as exc:
             logger.warning(f"Skipping LDA model save in local mode: {exc}")
 
-        # ── Local: lưu parquet đơn (cùng format với BERTopic, đọc được bởi save_topics_to_ch) ──
-        import pandas as _pd
+        # ── Local: ghi parquet bằng Spark writer (tránh pandas + permission issues trên bind mount) ──
         model_version = f"lda_k{k}" if k else f"lda_k{len(topics)}"
-        now_ts = datetime.now(tz=timezone.utc)
-        os.makedirs(output_path, exist_ok=True)
+        # Spark TimestampType không thích timezone-aware datetime trong một số môi trường.
+        now_ts = datetime.utcnow()
 
-        topics_export = [
-            {
-                "topic_id":       int(t["topic_id"]),
-                "label":          str(t["topic_label"]),
-                "top_keywords":   [kw["word"] for kw in t["keywords"]],
-                "coherence_score": None,
-                "model_version":  model_version,
-                "created_at":     now_ts,
-            }
+        topics_schema = StructType([
+            StructField("topic_id", IntegerType(), False),
+            StructField("label", StringType(), False),
+            StructField("top_keywords", ArrayType(StringType()), False),
+            StructField("coherence_score", FloatType(), True),
+            StructField("model_version", StringType(), False),
+            StructField("created_at", TimestampType(), False),
+        ])
+        topics_rows = [
+            (
+                int(t["topic_id"]),
+                str(t["topic_label"]),
+                [kw["word"] for kw in t["keywords"]],
+                None,
+                model_version,
+                now_ts,
+            )
             for t in topics
         ]
+        # Local default: ghi ngay trong output_path để dễ inspect (không cần lần theo PROCESSED_LOCAL_ROOT).
         topics_parquet = os.environ.get(
             "LOCAL_STG_TOPICS",
-            os.path.join(PROCESSED_LOCAL_ROOT, "stg_topics", "topics.parquet"),
+            os.path.join(output_path, "topics.parquet"),
         )
         os.makedirs(os.path.dirname(topics_parquet), exist_ok=True)
-        _pd.DataFrame(topics_export).to_parquet(topics_parquet, index=False)
+        topics_df = spark.createDataFrame(topics_rows, schema=topics_schema)
+        topics_df.write.mode("overwrite").parquet(topics_parquet)
         logger.info(f"Saving topics → {topics_parquet}")
 
         assignment_parquet = os.environ.get(
             "LOCAL_STG_POST_TOPICS",
-            os.path.join(PROCESSED_LOCAL_ROOT, "stg_post_topics", "post_topic_assignment.parquet"),
+            os.path.join(output_path, "post_topic_assignment.parquet"),
         )
         os.makedirs(os.path.dirname(assignment_parquet), exist_ok=True)
-        assignments_df.toPandas().to_parquet(assignment_parquet, index=False)
+        assignments_df.write.mode("overwrite").parquet(assignment_parquet)
         logger.info(f"Saving post-topic assignments → {assignment_parquet}")
     else:
         # ── Lưu LDA model (Spark MLlib format) ──
@@ -1182,8 +1353,17 @@ def parse_args() -> argparse.Namespace:
         help="Số documents tối đa dùng để tính coherence trong k-sweep.",
     )
     parser.add_argument(
-        "--llm-model-path", type=str, default="models/llm/mistral-7b-instruct-v0.2.Q4_K_M.gguf",
-        help="Đường dẫn file GGUF của LLM (Mistral 7B) để predict topic label.",
+        "--ollama-url", type=str, default="",
+        help=(
+            "Base URL của Ollama service để label topic bằng LLM. "
+            "Ví dụ: 'http://ollama:11434' (trong Docker) "
+            "hoặc 'http://localhost:11434' (chạy local). "
+            "Để trống để bỏ qua LLM labeling."
+        ),
+    )
+    parser.add_argument(
+        "--ollama-model", type=str, default="mistral-local",
+        help="Tên model đã đăng ký trong Ollama (sau khi ollama create).",
     )
     return parser.parse_args()
 
@@ -1239,6 +1419,14 @@ def main() -> None:
             logger.info(
                 f"Using preprocessed_text directly for tokenization ({preprocessed_count:,} docs)."
             )
+            # Safety layer cho staged data cũ hoặc môi trường chưa đồng bộ TextPreprocessor.
+            lda_noise_tokens = {
+                "attachments", "attachment", "jpg", "jpeg", "png", "webp",
+                "last", "com", "www", "http", "https", "vozfapp", "vozvnapp",
+                "nói", "cần", "xem", "nhất", "trước", "qua", "xong", "chút",
+                "tui", "hơi", "món", "nha", "kiểu", "hôm", "chủ", "chả",
+                "hả", "nè", "thằng", "bọn", "mẹ", "mày",
+            }
             # Lấy toàn bộ topic_stopwords từ TextPreprocessor để lọc nhiễu triệt để
             try:
                 from preprocessing.text_cleaner import TextPreprocessor
@@ -1247,16 +1435,11 @@ def main() -> None:
                     slang_dict_path=args.slang_dict_path,
                     use_vncorenlp=False
                 )
-                all_stopwords = preprocessor.topic_stopwords
+                all_stopwords = set(preprocessor.topic_stopwords) | lda_noise_tokens
                 logger.info(f"Loaded {len(all_stopwords)} topic stopwords from TextPreprocessor.")
             except Exception as exc:
                 logger.warning(f"Không thể load TextPreprocessor ({exc}). Fallback về hardcoded noise list.")
-                # Danh sách noise tokens/generic words cần loại bỏ
-                noise_tokens = [
-                    "attachments", "jpg", "png", "webp", "last", "com", "www", "vozfapp",
-                    "nói", "cần", "xem", "nhất", "trước", "qua"
-                ]
-                all_stopwords = set(stopwords) | set(noise_tokens)
+                all_stopwords = set(stopwords) | lda_noise_tokens
 
             stopwords_lit = F.array(*[F.lit(w) for w in sorted(all_stopwords)])
             df = (
@@ -1329,9 +1512,14 @@ def main() -> None:
             optimizer=args.optimizer,
         )
 
-        # 7. Trích xuất topics
+        # 7. Trích xuất topics (+ LLM labeling nếu --ollama-url được truyền)
         logger.info("Extracting topic descriptions:")
-        topics = extract_topics(lda_model, vocabulary, llm_model_path=args.llm_model_path)
+        topics = extract_topics(
+            lda_model,
+            vocabulary,
+            ollama_url=args.ollama_url or None,
+            ollama_model=args.ollama_model,
+        )
 
         # 8. Gán topic cho từng bài viết/comment
         logger.info("Inferring best topic per document...")
