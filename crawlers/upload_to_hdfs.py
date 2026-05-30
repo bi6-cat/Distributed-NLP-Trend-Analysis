@@ -10,10 +10,6 @@ SSH_PASSWORD = os.getenv("SSH_PASSWORD", "8[qXdBXt8mY)Lk3b")
 SSH_KEY_PATH = os.getenv("SSH_KEY_PATH")
 
 DATA_DIR = os.getenv("DATA_DIR", "crawlers/data")
-REMOTE_DATA_DIR = os.getenv(
-    "REMOTE_DATA_DIR",
-    "/tmp/distributed-nlp-trend-analysis/crawlers/data",
-)
 HDFS_BASE_DIR = os.getenv("HDFS_BASE_DIR", "/user/root/raw_data")
 HDFS_CMD = os.getenv("HDFS_CMD")
 HDFS_CONTAINER = os.getenv("HDFS_CONTAINER")
@@ -177,16 +173,18 @@ def resolve_hdfs_target(ssh):
     )
 
 
-def list_remote_data_files(ssh):
-    command = (
-        f"if [ -d {q(REMOTE_DATA_DIR)} ]; then "
-        f"find {q(REMOTE_DATA_DIR)} -type f \\( -name '*.csv' -o -name '*.json' \\); "
-        "fi"
-    )
-    exit_code, stdout_text, _ = run_with_output(ssh, command)
-    if exit_code != 0 or not stdout_text:
-        return []
-    return [line.strip() for line in stdout_text.splitlines() if line.strip()]
+def list_local_data_files():
+    local_files = []
+    for root, dirs, files in os.walk(DATA_DIR):
+        for file in files:
+            if not file.endswith((".csv", ".json")):
+                continue
+
+            local_path = os.path.join(root, file)
+            rel_path = os.path.relpath(local_path, DATA_DIR).replace("\\", "/")
+            local_files.append((local_path, rel_path))
+
+    return local_files
 
 
 def upload_one(ssh, sftp, hdfs_cmd, hdfs_container, source_path, rel_path, source_is_remote):
@@ -265,38 +263,21 @@ def main():
     else:
         print(f"Using HDFS CLI: {hdfs_cmd}")
 
-    remote_files = list_remote_data_files(ssh)
-    if remote_files:
-        print(f"Uploading from remote data dir: {REMOTE_DATA_DIR}")
-        for remote_path in remote_files:
-            rel_path = posixpath.relpath(remote_path, REMOTE_DATA_DIR)
+    print(f"Uploading all files from local: {DATA_DIR}")
+    local_files = list_local_data_files()
+    if local_files:
+        for local_path, rel_path in local_files:
             upload_one(
                 ssh,
                 sftp,
                 hdfs_cmd,
                 hdfs_container,
-                remote_path,
+                local_path,
                 rel_path,
-                source_is_remote=True,
+                source_is_remote=False,
             )
     else:
-        print(f"Remote data dir is empty or missing, uploading from local: {DATA_DIR}")
-        for root, dirs, files in os.walk(DATA_DIR):
-            for file in files:
-                if not file.endswith((".csv", ".json")):
-                    continue
-
-                local_path = os.path.join(root, file)
-                rel_path = os.path.relpath(local_path, DATA_DIR).replace("\\", "/")
-                upload_one(
-                    ssh,
-                    sftp,
-                    hdfs_cmd,
-                    hdfs_container,
-                    local_path,
-                    rel_path,
-                    source_is_remote=False,
-                )
+        print(f"No local .csv/.json files found in: {DATA_DIR}")
 
     sftp.close()
     ssh.close()

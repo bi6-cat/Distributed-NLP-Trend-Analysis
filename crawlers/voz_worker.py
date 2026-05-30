@@ -10,8 +10,9 @@ from typing import List, Tuple, Dict, Any, Optional
 
 from bs4 import BeautifulSoup
 
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
+import undetected_chromedriver as uc
+from curl_cffi import requests as cffi_requests
+
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
@@ -47,11 +48,22 @@ LONG_SLEEP_MIN = 120
 LONG_SLEEP_MAX = 300
 
 HEADLESS = False
+HIDE_WINDOW = False
+CHROME_PROFILE_DIR = os.getenv(
+    "VOZ_CHROME_PROFILE_DIR",
+    os.path.join(LOCAL_DATA_DIR, ".chrome", "voz_worker"),
+)
+ALLOW_RESOURCE_BLOCKING = os.getenv(
+    "VOZ_BLOCK_HEAVY_RESOURCES",
+    "0",
+).strip().lower() in {"1", "true", "yes", "y"}
+CLOUDFLARE_WAIT_SECONDS = int(os.getenv("VOZ_CLOUDFLARE_WAIT_SECONDS", "180"))
 
 
 Link_FORUM = [
-    "https://voz.vn/s/review-san-pham.103/",
-    "https://voz.vn/f/tu-van-cau-hinh.70/",
+    # "https://voz.vn/s/review-san-pham.103/",
+    # "https://voz.vn/f/tu-van-cau-hinh.70/",
+    "https://voz.vn/f/dien-thoai-di-dong.76/",
     "https://voz.vn/f/overclocking-cooling-modding.6/",
     "https://voz.vn/f/amd.25/",
     "https://voz.vn/f/intel.24/",
@@ -166,50 +178,34 @@ def get_worker_forums(
     return links[start:end]
 
 
+def get_worker_profile_dir(profile_root: str, worker_id: int) -> str:
+    return os.path.join(os.path.abspath(profile_root), f"worker_{worker_id}")
+
+
 # =====================================================
-# DRIVER
+# DRIVER (undetected-chromedriver)
 # =====================================================
 
-# def create_driver() -> Tuple[webdriver.Chrome, tempfile.TemporaryDirectory]:
-#     profile_dir = tempfile.TemporaryDirectory(prefix="voz-chrome-")
+def create_driver() -> Tuple[uc.Chrome, Optional[tempfile.TemporaryDirectory]]:
+    """
+    Dùng undetected_chromedriver để bypass Cloudflare và bot detection.
 
-#     options = Options()
+    Profile lưu cookie/session giữa các lần chạy; nếu Cloudflare xuất hiện,
+    xác minh thủ công một lần trong cửa sổ Chrome — clearance sẽ được giữ lại.
+    """
+    profile_dir = None
+    user_data_dir = os.path.abspath(CHROME_PROFILE_DIR)
+    os.makedirs(user_data_dir, exist_ok=True)
 
-#     if HEADLESS:
-#         options.add_argument("--headless=new")
-
-#     options.add_argument("--disable-blink-features=AutomationControlled")
-#     options.add_argument(f"--user-data-dir={profile_dir.name}")
-#     options.add_argument("--no-first-run")
-#     options.add_argument("--no-default-browser-check")
-
-#     # Một số option giúp Selenium ổn định hơn khi chạy nhiều worker
-#     options.add_argument("--disable-gpu")
-#     options.add_argument("--disable-extensions")
-#     options.add_argument("--disable-notifications")
-#     options.add_argument("--disable-popup-blocking")
-
-#     # Nếu chạy trên server Linux không có GUI thì mở 2 dòng này
-#     # options.add_argument("--no-sandbox")
-#     # options.add_argument("--disable-dev-shm-usage")
-
-#     driver = webdriver.Chrome(options=options)
-#     driver.set_page_load_timeout(60)
-
-#     return driver, profile_dir
-
-def create_driver():
-    profile_dir = tempfile.TemporaryDirectory(prefix="voz-chrome-")
-
-    options = Options()
+    options = uc.ChromeOptions()
     options.page_load_strategy = "eager"
 
-    options.add_argument("--headless=new")
+    if HIDE_WINDOW and not HEADLESS:
+        # Đẩy cửa sổ ra ngoài màn hình, ít bị detect hơn headless
+        options.add_argument("--window-position=-32000,-32000")
     options.add_argument("--window-size=1366,768")
-
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-notifications")
@@ -220,46 +216,102 @@ def create_driver():
     options.add_argument("--disable-sync")
     options.add_argument("--metrics-recording-only")
     options.add_argument("--mute-audio")
-
     options.add_argument("--no-first-run")
     options.add_argument("--no-default-browser-check")
-    options.add_argument("--disable-blink-features=AutomationControlled")
 
-    options.add_argument("--blink-settings=imagesEnabled=false")
+    if ALLOW_RESOURCE_BLOCKING:
+        options.add_argument("--blink-settings=imagesEnabled=false")
 
-    options.add_argument("--log-level=3")
-    options.add_experimental_option("excludeSwitches", ["enable-logging"])
-
-    options.add_argument(f"--user-data-dir={profile_dir.name}")
-
-    driver = webdriver.Chrome(options=options)
+    driver = uc.Chrome(
+        options=options,
+        user_data_dir=user_data_dir,
+        headless=HEADLESS,
+        version_main=148,
+    )
     driver.set_page_load_timeout(45)
     driver.implicitly_wait(0)
 
-    # Chặn tài nguyên nặng
-    try:
-        driver.execute_cdp_cmd("Network.enable", {})
-        driver.execute_cdp_cmd("Network.setBlockedURLs", {
-            "urls": [
-                "*.png",
-                "*.jpg",
-                "*.jpeg",
-                "*.gif",
-                "*.webp",
-                "*.svg",
-                "*.ico",
-                "*.woff",
-                "*.woff2",
-                "*.ttf",
-                "*.otf",
-                "*.mp4",
-                "*.webm",
-            ]
-        })
-    except Exception as e:
-        logger.warning(f"Cannot block resources: {e}")
+    if ALLOW_RESOURCE_BLOCKING:
+        try:
+            driver.execute_cdp_cmd("Network.enable", {})
+            driver.execute_cdp_cmd("Network.setBlockedURLs", {
+                "urls": [
+                    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp",
+                    "*.svg", "*.ico", "*.woff", "*.woff2", "*.ttf",
+                    "*.otf", "*.mp4", "*.webm",
+                ]
+            })
+        except Exception as e:
+            logger.warning(f"Cannot block resources: {e}")
 
     return driver, profile_dir
+
+
+# =====================================================
+# CURL_CFFI SESSION
+# =====================================================
+
+def _sync_cookies_to_cffi(driver: uc.Chrome, session: cffi_requests.Session) -> None:
+    """Đồng bộ cookie từ UC driver sang curl_cffi session."""
+    for cookie in driver.get_cookies():
+        session.cookies.set(
+            cookie["name"],
+            cookie["value"],
+            domain=cookie.get("domain", ""),
+        )
+
+
+def create_cffi_session(driver: uc.Chrome) -> cffi_requests.Session:
+    """
+    Tạo curl_cffi session giả lập TLS fingerprint Chrome.
+    Cookie được đồng bộ từ driver để dùng chung clearance Cloudflare.
+    """
+    session = cffi_requests.Session(impersonate="chrome120")
+    _sync_cookies_to_cffi(driver, session)
+    return session
+
+
+def is_cloudflare_challenge_cffi(soup: BeautifulSoup, status_code: int) -> bool:
+    if status_code in (403, 429, 503):
+        return True
+
+    page_text = soup.get_text(" ", strip=True).lower()
+    text_signals = [
+        "just a moment",
+        "checking your browser",
+        "verify you are human",
+        "cf-challenge",
+        "cdn-cgi/challenge-platform",
+    ]
+    return (
+        any(signal in page_text for signal in text_signals)
+        or soup.select_one('input[name="cf-turnstile-response"]') is not None
+        or soup.select_one(".cf-browser-verification") is not None
+    )
+
+
+def fetch_page_cffi(
+    session: cffi_requests.Session,
+    url: str,
+) -> Optional[BeautifulSoup]:
+    """
+    Fetch trang bằng curl_cffi (nhanh, không cần browser).
+    Trả về None nếu bị Cloudflare block hoặc lỗi.
+    """
+    try:
+        resp = session.get(url, timeout=30, allow_redirects=True)
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        if is_cloudflare_challenge_cffi(soup, resp.status_code):
+            logger.debug(f"curl_cffi bị Cloudflare block: {url}")
+            return None
+
+        return soup
+    except Exception as e:
+        logger.debug(f"curl_cffi lỗi ({url}): {e}")
+        return None
+
+
 # =====================================================
 # CHECKPOINT
 # =====================================================
@@ -306,7 +358,7 @@ def save_checkpoint(cp: Dict[str, Any]) -> None:
 
 
 # =====================================================
-# SAFE LOAD PAGE
+# SAFE LOAD PAGE (UC driver)
 # =====================================================
 
 def random_sleep() -> None:
@@ -315,17 +367,79 @@ def random_sleep() -> None:
     time.sleep(sleep_time)
 
 
-def load_page_once(driver: webdriver.Chrome, url: str) -> BeautifulSoup:
-    logger.info(f"LOAD: {url}")
+def is_cloudflare_challenge(driver: uc.Chrome, soup: BeautifulSoup) -> bool:
+    title = (driver.title or "").lower()
+    current_url = (driver.current_url or "").lower()
+    page_text = soup.get_text(" ", strip=True).lower()
+
+    title_signals = [
+        "just a moment",
+        "checking your browser",
+        "verify you are human",
+        "cf-challenge",
+        "cloudflare",
+    ]
+    text_signals = [
+        "just a moment",
+        "checking your browser",
+        "verify you are human",
+        "cf-challenge",
+        "cdn-cgi/challenge-platform",
+    ]
+
+    return (
+        "cdn-cgi/challenge-platform" in current_url
+        or any(signal in title for signal in title_signals)
+        or any(signal in page_text for signal in text_signals)
+        or soup.select_one('input[name="cf-turnstile-response"]') is not None
+        or soup.select_one(".cf-browser-verification") is not None
+    )
+
+
+def wait_for_cloudflare_clearance(
+    driver: uc.Chrome,
+    url: str,
+    timeout: int = CLOUDFLARE_WAIT_SECONDS,
+) -> BeautifulSoup:
+    if HEADLESS:
+        raise RuntimeError(
+            "Cloudflare challenge detected in headless mode. "
+            "Run without --headless once and complete the browser check manually."
+        )
+
+    logger.warning(
+        "Cloudflare challenge detected. Complete the check in the opened Chrome "
+        f"window within {timeout}s: {url}"
+    )
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        time.sleep(3)
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        if not is_cloudflare_challenge(driver, soup):
+            logger.info("Cloudflare check cleared, continue crawling.")
+            random_sleep()
+            return soup
+
+    raise RuntimeError(
+        f"Cloudflare challenge was not cleared within {timeout}s: {url}"
+    )
+
+
+def load_page_once(driver: uc.Chrome, url: str) -> BeautifulSoup:
+    logger.info(f"LOAD (UC): {url}")
     driver.get(url)
     random_sleep()
-    return BeautifulSoup(driver.page_source, "html.parser")
+    soup = BeautifulSoup(driver.page_source, "html.parser")
+
+    if is_cloudflare_challenge(driver, soup):
+        soup = wait_for_cloudflare_clearance(driver, url)
+
+    return soup
 
 
-def load_page(driver: webdriver.Chrome, url: str) -> BeautifulSoup:
-    """
-    Load page có retry + backoff để tránh retry quá dồn dập.
-    """
+def load_page(driver: uc.Chrome, url: str) -> BeautifulSoup:
+    """Load page có retry + backoff."""
     last_error = None
 
     for attempt in range(1, MAX_RETRY + 1):
@@ -343,6 +457,32 @@ def load_page(driver: webdriver.Chrome, url: str) -> BeautifulSoup:
             time.sleep(wait_time)
 
     raise RuntimeError(f"Cannot load page after {MAX_RETRY} retries: {url}") from last_error
+
+
+def load_forum_page(
+    driver: uc.Chrome,
+    url: str,
+    cffi_session: Optional[cffi_requests.Session],
+) -> BeautifulSoup:
+    """
+    Thử fetch bằng curl_cffi trước (nhanh hơn, không tốn browser resource).
+    Nếu bị block hoặc lỗi, fall back sang UC driver và sync lại cookies.
+    """
+    if cffi_session is not None:
+        soup = fetch_page_cffi(cffi_session, url)
+        if soup is not None:
+            logger.info(f"LOAD (cffi): {url}")
+            random_sleep()
+            return soup
+
+        logger.info(f"curl_cffi failed, fallback UC driver: {url}")
+
+    soup = load_page(driver, url)
+
+    if cffi_session is not None:
+        _sync_cookies_to_cffi(driver, cffi_session)
+
+    return soup
 
 
 # =====================================================
@@ -402,7 +542,7 @@ def get_threads(soup: BeautifulSoup) -> List[str]:
 # REACTION POPUP
 # =====================================================
 
-def close_overlay_if_any(driver: webdriver.Chrome) -> None:
+def close_overlay_if_any(driver: uc.Chrome) -> None:
     try:
         driver.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
         time.sleep(random.uniform(0.2, 0.5))
@@ -411,7 +551,7 @@ def close_overlay_if_any(driver: webdriver.Chrome) -> None:
 
 
 def extract_reactions_from_message(
-    driver: webdriver.Chrome,
+    driver: uc.Chrome,
     message_element,
     timeout: int = 5
 ) -> Optional[str]:
@@ -478,7 +618,7 @@ def safe_attr(obj, attr: str) -> Optional[str]:
 
 def parse_posts(
     soup: BeautifulSoup,
-    driver: webdriver.Chrome,
+    driver: uc.Chrome,
     url: str
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
 
@@ -576,9 +716,7 @@ def parse_posts(
 # =====================================================
 
 def save_data(posts: List[Dict[str, Any]], comments: List[Dict[str, Any]]) -> None:
-    """
-    Mỗi worker ghi file riêng nên không bị conflict với worker khác.
-    """
+    """Mỗi worker ghi file riêng nên không bị conflict với worker khác."""
     if posts:
         STORAGE.append_csv(
             STORAGE.path(VOZ_DIR, POST_FILE),
@@ -593,11 +731,11 @@ def save_data(posts: List[Dict[str, Any]], comments: List[Dict[str, Any]]) -> No
 
 
 # =====================================================
-# CRAWL THREAD
+# CRAWL THREAD (UC driver — cần JS để lấy reactions)
 # =====================================================
 
 def crawl_thread(
-    driver: webdriver.Chrome,
+    driver: uc.Chrome,
     thread_url: str,
     checkpoint: Dict[str, Any]
 ) -> bool:
@@ -654,19 +792,20 @@ def crawl_thread(
 
 
 # =====================================================
-# CRAWL FORUM
+# CRAWL FORUM (dùng curl_cffi cho listing pages)
 # =====================================================
 
 def crawl_forum(
-    driver: webdriver.Chrome,
+    driver: uc.Chrome,
     forum_url: str,
     checkpoint: Dict[str, Any],
-    thread_counter: Dict[str, int]
+    thread_counter: Dict[str, int],
+    cffi_session: Optional[cffi_requests.Session] = None,
 ) -> None:
 
     logger.info(f"FORUM: {forum_url}")
 
-    soup = load_page(driver, forum_url)
+    soup = load_forum_page(driver, forum_url, cffi_session)
     last_page = get_last_page(soup)
 
     done_pages = checkpoint["forums"].get(
@@ -683,7 +822,7 @@ def crawl_forum(
 
         logger.info(f"FORUM PAGE {p}/{last_page}: {page_url}")
 
-        soup = load_page(driver, page_url)
+        soup = load_forum_page(driver, page_url, cffi_session)
         threads = get_threads(soup)
 
         logger.info(f"THREADS FOUND: {len(threads)}")
@@ -733,19 +872,28 @@ def run(
     delay_min: int,
     delay_max: int,
     headless: bool,
+    hide_window: bool,
     long_sleep_every: int,
     long_sleep_min: int,
     long_sleep_max: int,
+    chrome_profile_dir: str,
+    cloudflare_wait_seconds: int,
+    block_heavy_resources: bool,
 ) -> None:
 
     global STORAGE
     global CHECKPOINT_FILE, POST_FILE, COMMENT_FILE
-    global DELAY_MIN, DELAY_MAX, HEADLESS
+    global DELAY_MIN, DELAY_MAX, HEADLESS, HIDE_WINDOW
+    global CHROME_PROFILE_DIR, CLOUDFLARE_WAIT_SECONDS, ALLOW_RESOURCE_BLOCKING
     global LONG_SLEEP_EVERY_THREADS, LONG_SLEEP_MIN, LONG_SLEEP_MAX
 
     DELAY_MIN = delay_min
     DELAY_MAX = delay_max
     HEADLESS = headless
+    HIDE_WINDOW = hide_window
+    CHROME_PROFILE_DIR = get_worker_profile_dir(chrome_profile_dir, worker_id)
+    CLOUDFLARE_WAIT_SECONDS = cloudflare_wait_seconds
+    ALLOW_RESOURCE_BLOCKING = block_heavy_resources
 
     LONG_SLEEP_EVERY_THREADS = long_sleep_every
     LONG_SLEEP_MIN = long_sleep_min
@@ -768,6 +916,9 @@ def run(
     logger.info(f"COMMENT FILE: {COMMENT_FILE}")
     logger.info(f"DELAY: {DELAY_MIN}-{DELAY_MAX}s")
     logger.info(f"HEADLESS: {HEADLESS}")
+    logger.info(f"CHROME PROFILE: {os.path.abspath(CHROME_PROFILE_DIR)}")
+    logger.info(f"CLOUDFLARE WAIT: {CLOUDFLARE_WAIT_SECONDS}s")
+    logger.info(f"BLOCK HEAVY RESOURCES: {ALLOW_RESOURCE_BLOCKING}")
     logger.info(f"LINKS PER WORKER: {links_per_worker}")
     logger.info(f"FORUM COUNT: {len(my_forums)}")
     logger.info(f"LOCAL DATA DIR: {LOCAL_DATA_DIR}")
@@ -783,8 +934,18 @@ def run(
 
     STORAGE = LocalStorage()
     driver, profile_dir = create_driver()
-    checkpoint = load_checkpoint(worker_id)
 
+    # Warm-up: mở BASE_URL để lấy cookie hợp lệ trước khi tạo cffi session
+    logger.info(f"Warm-up: {BASE_URL}")
+    try:
+        load_page_once(driver, BASE_URL)
+    except Exception as e:
+        logger.warning(f"Warm-up failed: {e}")
+
+    cffi_session = create_cffi_session(driver)
+    logger.info("curl_cffi session created (impersonate=chrome120)")
+
+    checkpoint = load_checkpoint(worker_id)
     thread_counter = {"count": 0}
 
     try:
@@ -794,7 +955,8 @@ def run(
                     driver=driver,
                     forum_url=forum,
                     checkpoint=checkpoint,
-                    thread_counter=thread_counter
+                    thread_counter=thread_counter,
+                    cffi_session=cffi_session,
                 )
             except Exception as e:
                 logger.error(f"ERROR FORUM {forum}: {e}")
@@ -806,7 +968,8 @@ def run(
             pass
 
         try:
-            profile_dir.cleanup()
+            if profile_dir is not None:
+                profile_dir.cleanup()
         except Exception:
             pass
 
@@ -860,6 +1023,32 @@ if __name__ == "__main__":
     )
 
     parser.add_argument(
+        "--hide-window",
+        action="store_true",
+        help="Ẩn cửa sổ Chrome khỏi màn hình (đẩy ra ngoài viewport, ít bị Cloudflare detect hơn --headless)."
+    )
+
+    parser.add_argument(
+        "--chrome-profile-dir",
+        default=CHROME_PROFILE_DIR,
+        help="Thu muc Chrome profile de giu cookie/session hop le giua cac lan chay."
+    )
+
+    parser.add_argument(
+        "--cloudflare-wait-seconds",
+        type=int,
+        default=CLOUDFLARE_WAIT_SECONDS,
+        help="So giay cho ban xac minh Cloudflare thu cong khi chay non-headless."
+    )
+
+    parser.add_argument(
+        "--block-heavy-resources",
+        action="store_true",
+        default=ALLOW_RESOURCE_BLOCKING,
+        help="Chan anh/font/video de tang toc. Nen tat neu hay gap Cloudflare."
+    )
+
+    parser.add_argument(
         "--long-sleep-every",
         type=int,
         default=50,
@@ -888,7 +1077,11 @@ if __name__ == "__main__":
         delay_min=args.delay_min,
         delay_max=args.delay_max,
         headless=args.headless,
+        hide_window=args.hide_window,
         long_sleep_every=args.long_sleep_every,
         long_sleep_min=args.long_sleep_min,
         long_sleep_max=args.long_sleep_max,
+        chrome_profile_dir=args.chrome_profile_dir,
+        cloudflare_wait_seconds=args.cloudflare_wait_seconds,
+        block_heavy_resources=args.block_heavy_resources,
     )
