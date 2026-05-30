@@ -3,9 +3,16 @@
 import { useEffect, useState } from "react";
 import { getTopicTrendScore } from "@/app/actions/trends";
 import { ChartCardLoading } from "@/components/ui/data-loading";
+import type { ResolvedTimeRange } from "@/lib/time-range";
 import { TrendScoreChartClient } from "./trend-score-chart-client";
 
-export function TrendScoreChart({ topicId }: { topicId: number }) {
+export function TrendScoreChart({
+  topicId,
+  timeRange,
+}: {
+  topicId: number;
+  timeRange: ResolvedTimeRange;
+}) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [data, setData] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -14,7 +21,7 @@ export function TrendScoreChart({ topicId }: { topicId: number }) {
     let isMounted = true;
 
     setIsLoading(true);
-    getTopicTrendScore(topicId)
+    getTopicTrendScore(topicId, timeRange)
       .then((nextData) => {
         if (isMounted) setData(nextData);
       })
@@ -29,7 +36,7 @@ export function TrendScoreChart({ topicId }: { topicId: number }) {
     return () => {
       isMounted = false;
     };
-  }, [topicId]);
+  }, [topicId, timeRange]);
 
   if (isLoading) {
     return <ChartCardLoading titleWidth="w-28" accentClassName="bg-indigo-100" />;

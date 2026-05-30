@@ -37,7 +37,7 @@ export function TrendScoreChartClient({ data }: { data: TrendData[] }) {
           </div>
           <div>
             <h3 className="text-sm font-semibold text-slate-900">Trend Score</h3>
-            <p className="text-[11px] text-slate-500">Velocity × engagement (last 24h)</p>
+            <p className="text-[11px] text-slate-500">Velocity × engagement (selected range)</p>
           </div>
         </div>
         <div className="text-right">

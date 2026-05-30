@@ -14,9 +14,10 @@ type SentimentData = {
 interface SentimentDonutChartProps {
   className?: string;
   data: SentimentData[];
+  periodLabel?: string;
 }
 
-export function SentimentDonutChart({ className, data }: SentimentDonutChartProps) {
+export function SentimentDonutChart({ className, data, periodLabel = "Selected range" }: SentimentDonutChartProps) {
   // Guard against empty data
   const safeData = data?.length > 0 ? data : [
     { name: "Positive", value: 1, color: "#10b981", soft: "#d1fae5" },
@@ -39,7 +40,7 @@ export function SentimentDonutChart({ className, data }: SentimentDonutChartProp
           </div>
           <h3 className="text-sm font-semibold text-slate-900">Sentiment Distribution</h3>
         </div>
-        <span className="text-[11px] font-medium text-slate-500">Today</span>
+        <span className="text-[11px] font-medium text-slate-500">{periodLabel}</span>
       </div>
 
       <div className="relative px-6 pb-2 flex-1">

@@ -19,7 +19,7 @@ with_labels AS (
         ex.tid,
         coalesce(t.label, concat('topic_', toString(ex.tid))) AS tid_label
     FROM exploded_topics AS ex
-    LEFT JOIN {{ source('tech_radar', 'stg_topics') }} AS t FINAL
+    LEFT JOIN {{ ref('stg_topics') }} AS t
         ON ex.tid = t.topic_id
 ),
 

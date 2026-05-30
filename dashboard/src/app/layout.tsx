@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import "./globals.css";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
@@ -18,9 +19,13 @@ export default function RootLayout({
     <html lang="en">
       <body className="font-sans antialiased bg-slate-50 text-slate-900 selection:bg-indigo-100 selection:text-indigo-900">
         <NavigationLoadingProvider>
-          <Sidebar />
+          <Suspense fallback={null}>
+            <Sidebar />
+          </Suspense>
           <div className="ml-64 flex flex-col min-h-screen">
-            <Topbar />
+            <Suspense fallback={null}>
+              <Topbar />
+            </Suspense>
             <main className="flex-1 px-8 lg:px-10 py-8">
               <div className="mx-auto max-w-[1400px]">
                 {children}

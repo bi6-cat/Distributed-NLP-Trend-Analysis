@@ -53,6 +53,8 @@ LDA_LOCAL_OUTPUT:    str = os.getenv("LDA_LOCAL_OUTPUT", "/opt/airflow/output/ld
 LOCAL_SENTIMENT_MODEL_PATH: str = os.getenv("LOCAL_SENTIMENT_MODEL_PATH", "/opt/airflow/models/phobert_finetuned/final")
 LOCAL_STOPWORDS_PATH: str = os.getenv("LOCAL_STOPWORDS_PATH", "/opt/airflow/data/stopwords_vi.txt")
 LOCAL_SLANG_DICT_PATH: str = os.getenv("LOCAL_SLANG_DICT_PATH", "/opt/airflow/data/slang_dict.json")
+NLP_TOKENIZER: str = os.getenv("NLP_TOKENIZER", "underthesea")
+NLP_VNCORENLP_JAR: str = os.getenv("NLP_VNCORENLP_JAR", "/opt/airflow/vncorenlp/VnCoreNLP-1.1.1.jar")
 LOCAL_CMS_STATE_PATH: str = "output/cms/cms_state.pkl"
 LOCAL_CMS_TOPK_PATH:  str = "output/cms/top_keywords.json"
 
@@ -898,7 +900,7 @@ with DAG(
             # "python3 -u /opt/airflow/crawlers/vatvo.py || true && "
             "python3 -u /opt/airflow/crawlers/upload_to_hdfs.py"
         ),
-        execution_timeout=timedelta(hours=2),
+        execution_timeout=timedelta(hours=24),
     )
 
     upload_reference_files_to_hdfs = PythonOperator(
@@ -915,7 +917,9 @@ with DAG(
         f"--conf spark.executorEnv.HADOOP_USER_NAME={HDFS_USER} "
         f"--conf spark.executorEnv.HDFS_USER={HDFS_USER} "
         "--conf spark.hadoop.fs.permissions.umask-mode=000 "
-        "--executor-memory 12g "
+        "--executor-memory 28g "
+        "--executor-cores 8 "
+        "--total-executor-cores 8 "
     )
 
     # ── Task từ Member 2: Spark Cleaning + Dedup LSH ──
@@ -929,11 +933,15 @@ with DAG(
             f"HDFS_USER='{HDFS_USER}' "
             f"HDFS_STAGED_ROOT='{HDFS_STAGED_ROOT}' "
             f"CLICKHOUSE_HOST='{CLICKHOUSE_HOST}' "
+            f"NLP_TOKENIZER='{NLP_TOKENIZER}' "
+            f"NLP_VNCORENLP_JAR='{NLP_VNCORENLP_JAR}' "
             "&& spark-submit "
             f"{spark_common_conf}"
+            f"--conf spark.executorEnv.NLP_TOKENIZER={NLP_TOKENIZER} "
+            f"--conf spark.executorEnv.NLP_VNCORENLP_JAR={NLP_VNCORENLP_JAR} "
             "/opt/airflow/spark_jobs/cleaning_job.py"
         ),
-        execution_timeout=timedelta(hours=2),
+        execution_timeout=timedelta(hours=24),
     )
 
     # ── Task từ Member 3: LDA Topic Modeling ──
@@ -958,7 +966,7 @@ with DAG(
             f"--slang-dict-path '{LOCAL_SLANG_DICT_PATH if USE_LOCAL else f'{HDFS_URI_PREFIX}{HDFS_USER_DIR}/ref/slang_dict.json'}' "
             f"{lda_local_flag}"
         ),
-        execution_timeout=timedelta(hours=2),
+        execution_timeout=timedelta(hours=24),
     )
 
     # ── Task từ Member 4: Sentiment Analysis ──
@@ -988,7 +996,7 @@ with DAG(
             "--conf spark.executorEnv.WRITE_CLICKHOUSE_DIRECT=false "
             "/opt/airflow/spark_jobs/sentiment_job.py"
         ),
-        execution_timeout=timedelta(hours=2),
+        execution_timeout=timedelta(hours=48),
     )
 
     # ── Task từ Member 5: Trend Scoring (bằng dbt) ──
@@ -1051,7 +1059,7 @@ with DAG(
             f"{spark_common_conf}"
             "/opt/airflow/spark_jobs/crisis_detection.py"
         ),
-        execution_timeout=timedelta(hours=2),
+        execution_timeout=timedelta(hours=24),
     )
 
     ingest_stg_crisis_events = PythonOperator(
@@ -1169,7 +1177,7 @@ with DAG(
     bt_run = PythonOperator(
         task_id="run_inference_pipeline",
         python_callable=task_bertopic_run_pipeline,
-        execution_timeout=timedelta(hours=3),   # tối đa 3h cho 200K docs
+        execution_timeout=timedelta(hours=24),  # tối đa 24h cho weekly BERTopic inference
     )
 
     # Task 3: Push parquet kết quả → ClickHouse tech_radar

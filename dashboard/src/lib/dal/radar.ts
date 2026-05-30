@@ -1,12 +1,9 @@
 import "server-only";
-import { unstable_cache } from "next/cache";
 import { queryClickhouse } from "@/lib/clickhouse";
+import type { ResolvedTimeRange } from "@/lib/time-range";
 
 const SCHEMA = process.env.CLICKHOUSE_DATABASE ?? "tech_radar";
-const ONE_HOUR = 3600;
 const POSTS_ENRICHED_TABLE = `${SCHEMA}.dbt_int_posts_enriched`;
-
-const CACHE_KEY_REVISION = process.env.DASHBOARD_CACHE_REVISION ?? "";
 
 export type OverviewKpis = {
   daily_mentions: number;
@@ -94,53 +91,72 @@ export type CrisisStats = {
   avg_velocity: number;
 };
 
-const getOverviewKPIsCached = unstable_cache(
-  async (): Promise<OverviewKpis> => {
-    
-    const queryMentions = `
+function timeParams(timeRange: ResolvedTimeRange) {
+  return {
+    start: timeRange.start,
+    end: timeRange.end,
+  };
+}
+
+export async function getOverviewKPIsFromCH(timeRange: ResolvedTimeRange): Promise<OverviewKpis> {
+  const queryMentions = `
+      WITH
+        toDateTime({start: String}) AS range_start,
+        toDateTime({end: String}) AS range_end,
+        dateDiff('second', range_start, range_end) + 1 AS range_seconds
       SELECT 
-        sumIf(mention_count, bucket_date = today()) AS daily_mentions,
-        sumIf(mention_count, bucket_date = yesterday()) AS yesterday_mentions
+        sumIf(mention_count, hour_bucket >= range_start AND hour_bucket <= range_end) AS daily_mentions,
+        sumIf(
+          mention_count,
+          hour_bucket >= range_start - toIntervalSecond(range_seconds)
+            AND hour_bucket < range_start
+        ) AS yesterday_mentions
       FROM ${SCHEMA}.dbt_fct_topic_activity
-      WHERE bucket_date >= yesterday()
+      WHERE hour_bucket >= range_start - toIntervalSecond(range_seconds)
+        AND hour_bucket <= range_end
     `;
 
-    const queryCrises = `
+  const queryCrises = `
+      WITH
+        toDateTime({start: String}) AS range_start,
+        toDateTime({end: String}) AS range_end
       SELECT count(DISTINCT event_id) AS active_crises 
       FROM ${SCHEMA}.dbt_fct_crisis_events 
-      WHERE severity = 'HIGH' AND detected_at >= now() - INTERVAL 24 HOUR
+      WHERE severity = 'HIGH'
+        AND parseDateTimeBestEffortOrNull(toString(detected_at)) >= range_start
+        AND parseDateTimeBestEffortOrNull(toString(detected_at)) <= range_end
     `;
 
-    const [mentionsRows, crisesRows] = await Promise.all([
-      queryClickhouse<OverviewMentionsRow>(queryMentions),
-      queryClickhouse<OverviewCrisesRow>(queryCrises)
-    ]);
+  const params = timeParams(timeRange);
+  const [mentionsRows, crisesRows] = await Promise.all([
+    queryClickhouse<OverviewMentionsRow>(queryMentions, params),
+    queryClickhouse<OverviewCrisesRow>(queryCrises, params)
+  ]);
 
-    const daily = Number(mentionsRows[0]?.daily_mentions) || 0;
-    const yesterday = Number(mentionsRows[0]?.yesterday_mentions) || 0;
-    const activeCrises = Number(crisesRows[0]?.active_crises) || 0;
+  const daily = Number(mentionsRows[0]?.daily_mentions) || 0;
+  const yesterday = Number(mentionsRows[0]?.yesterday_mentions) || 0;
+  const activeCrises = Number(crisesRows[0]?.active_crises) || 0;
 
-    let deltaPct = 0;
-    if (yesterday > 0) {
-      deltaPct = ((daily - yesterday) / yesterday) * 100;
-    } else if (daily > 0) {
-      deltaPct = 100;
-    }
+  let deltaPct = 0;
+  if (yesterday > 0) {
+    deltaPct = ((daily - yesterday) / yesterday) * 100;
+  } else if (daily > 0) {
+    deltaPct = 100;
+  }
 
-    return {
-      daily_mentions: daily,
-      yesterday_mentions: yesterday,
-      active_crises: activeCrises,
-      mention_delta_pct: Number(deltaPct.toFixed(2)),
-    };
-  },
-  ["overview-kpis", CACHE_KEY_REVISION],
-  { revalidate: ONE_HOUR },
-);
+  return {
+    daily_mentions: daily,
+    yesterday_mentions: yesterday,
+    active_crises: activeCrises,
+    mention_delta_pct: Number(deltaPct.toFixed(2)),
+  };
+}
 
-const getTrendingTopicsCached = unstable_cache(
-  async (): Promise<TrendingTopic[]> => {
-    const query = `
+export async function getTrendingTopicsFromCH(timeRange: ResolvedTimeRange): Promise<TrendingTopic[]> {
+  const query = `
+      WITH
+        toDateTime({start: String}) AS range_start,
+        toDateTime({end: String}) AS range_end
       SELECT
         topic_id AS id,
         topic_label AS label,
@@ -148,120 +164,118 @@ const getTrendingTopicsCached = unstable_cache(
         sum(mention_count) AS volume,
         sum(acceleration) AS delta
       FROM ${SCHEMA}.dbt_fct_topic_activity
-      WHERE hour_bucket >= now() - INTERVAL 24 HOUR
+      WHERE hour_bucket >= range_start
+        AND hour_bucket <= range_end
       GROUP BY topic_id, topic_label
       ORDER BY score DESC
       LIMIT 10
     `;
-    const rows = await queryClickhouse<Partial<TrendingTopic>>(query);
-    return rows.map((row) => ({
-      id: Number(row.id) || 0,
-      label: String(row.label ?? ""),
-      score: Number(row.score) || 0,
-      volume: Number(row.volume) || 0,
-      delta: Number(row.delta) || 0,
-    }));
-  },
-  ["overview-trending-topics", CACHE_KEY_REVISION],
-  { revalidate: ONE_HOUR },
-);
+  const rows = await queryClickhouse<Partial<TrendingTopic>>(query, timeParams(timeRange));
+  return rows.map((row) => ({
+    id: Number(row.id) || 0,
+    label: String(row.label ?? ""),
+    score: Number(row.score) || 0,
+    volume: Number(row.volume) || 0,
+    delta: Number(row.delta) || 0,
+  }));
+}
 
-const getOverallSentimentCached = unstable_cache(
-  async (): Promise<SentimentBreakdown> => {
-    const query = `
+export async function getOverallSentimentFromCH(timeRange: ResolvedTimeRange): Promise<SentimentBreakdown> {
+  const query = `
+      WITH
+        toDateTime({start: String}) AS range_start,
+        toDateTime({end: String}) AS range_end
       SELECT
         sum(pos_count) AS positive,
         sum(neu_count) AS neutral,
         sum(neg_count) AS negative
       FROM ${SCHEMA}.dbt_fct_topic_activity
-      WHERE hour_bucket >= now() - INTERVAL 24 HOUR
+      WHERE hour_bucket >= range_start
+        AND hour_bucket <= range_end
     `;
-    const rows = await queryClickhouse<Partial<SentimentBreakdown>>(query);
-    const row = rows[0] ?? {};
-    return {
-      positive: Number(row.positive) || 0,
-      neutral: Number(row.neutral) || 0,
-      negative: Number(row.negative) || 0,
-    };
-  },
-  ["overview-sentiment", CACHE_KEY_REVISION],
-  { revalidate: ONE_HOUR },
-);
+  const rows = await queryClickhouse<Partial<SentimentBreakdown>>(query, timeParams(timeRange));
+  const row = rows[0] ?? {};
+  return {
+    positive: Number(row.positive) || 0,
+    neutral: Number(row.neutral) || 0,
+    negative: Number(row.negative) || 0,
+  };
+}
 
-const getActiveTopicsCached = unstable_cache(
-  async (): Promise<ActiveTopic[]> => {
-    const query = `
-      WITH recent_scores AS (
+export async function getActiveTopicsFromCH(timeRange: ResolvedTimeRange): Promise<ActiveTopic[]> {
+  const query = `
+      WITH
+        toDateTime({start: String}) AS range_start,
+        toDateTime({end: String}) AS range_end,
+        ranged_activity AS (
         SELECT
           topic_id,
+          anyLast(topic_label) AS topic_label,
+          min(hour_bucket) AS first_seen,
+          max(hour_bucket) AS last_seen,
+          sum(mention_count) AS mentions,
           max(trend_score) AS score
         FROM ${SCHEMA}.dbt_fct_topic_activity
-        WHERE hour_bucket >= now() - INTERVAL 24 HOUR
+        WHERE hour_bucket >= range_start
+          AND hour_bucket <= range_end
         GROUP BY topic_id
       )
       SELECT
-        t.topic_id AS id,
-        t.label,
-        formatDateTime(parseDateTimeBestEffort(toString(t.first_seen)), '%b %d') AS first_seen,
-        formatDateTime(parseDateTimeBestEffort(toString(t.last_seen)), '%b %d') AS last_seen,
-        t.total_mentions AS mentions,
-        ifNull(rs.score, 0) AS score
-      FROM ${SCHEMA}.dbt_dim_topics t
-      LEFT JOIN recent_scores rs ON rs.topic_id = t.topic_id
-      WHERE parseDateTimeBestEffortOrNull(toString(t.last_seen)) >= now() - INTERVAL 7 DAY
+        ra.topic_id AS id,
+        ifNull(t.label, ra.topic_label) AS label,
+        formatDateTime(ra.first_seen, '%b %d') AS first_seen,
+        formatDateTime(ra.last_seen, '%b %d') AS last_seen,
+        ra.mentions AS mentions,
+        ra.score AS score
+      FROM ranged_activity ra
+      LEFT JOIN ${SCHEMA}.dbt_dim_topics t ON t.topic_id = ra.topic_id
       ORDER BY score DESC, mentions DESC
       LIMIT 50
     `;
-    const rows = await queryClickhouse<Partial<ActiveTopic>>(query);
-    return rows.map((row) => ({
-      id: Number(row.id) || 0,
-      label: String(row.label ?? ""),
-      first_seen: String(row.first_seen ?? "-"),
-      last_seen: String(row.last_seen ?? "-"),
-      mentions: Number(row.mentions) || 0,
-      score: Number(row.score) || 0,
-    }));
-  },
-  ["trends-active-topics", CACHE_KEY_REVISION],
-  { revalidate: ONE_HOUR },
-);
-
-export async function getOverviewKPIsFromCH() {
-  return getOverviewKPIsCached();
+  const rows = await queryClickhouse<Partial<ActiveTopic>>(query, timeParams(timeRange));
+  return rows.map((row) => ({
+    id: Number(row.id) || 0,
+    label: String(row.label ?? ""),
+    first_seen: String(row.first_seen ?? "-"),
+    last_seen: String(row.last_seen ?? "-"),
+    mentions: Number(row.mentions) || 0,
+    score: Number(row.score) || 0,
+  }));
 }
 
-export async function getTrendingTopicsFromCH() {
-  return getTrendingTopicsCached();
-}
-
-export async function getOverallSentimentFromCH() {
-  return getOverallSentimentCached();
-}
-
-export async function getActiveTopicsFromCH() {
-  return getActiveTopicsCached();
-}
-
-export async function getTopicTrendScoreFromCH(topicId: number): Promise<TrendPoint[]> {
+export async function getTopicTrendScoreFromCH(
+  topicId: number,
+  timeRange: ResolvedTimeRange,
+): Promise<TrendPoint[]> {
   const query = `
+    WITH
+      toDateTime({start: String}) AS range_start,
+      toDateTime({end: String}) AS range_end
     SELECT
       formatDateTime(hour_bucket, '%m-%d %H:%M') AS time,
       max(trend_score) AS score
     FROM ${SCHEMA}.dbt_fct_topic_activity
     WHERE topic_id = {topicId: UInt32}
-      AND hour_bucket >= now() - INTERVAL 7 DAY
+      AND hour_bucket >= range_start
+      AND hour_bucket <= range_end
     GROUP BY hour_bucket
     ORDER BY hour_bucket ASC
   `;
-  const rows = await queryClickhouse<Partial<TrendPoint>>(query, { topicId });
+  const rows = await queryClickhouse<Partial<TrendPoint>>(query, { topicId, ...timeParams(timeRange) });
   return rows.map((row) => ({
     time: String(row.time ?? ""),
     score: Number(row.score) || 0,
   }));
 }
 
-export async function getTopicSentimentFromCH(topicId: number): Promise<SentimentPoint[]> {
+export async function getTopicSentimentFromCH(
+  topicId: number,
+  timeRange: ResolvedTimeRange,
+): Promise<SentimentPoint[]> {
   const query = `
+    WITH
+      toDateTime({start: String}) AS range_start,
+      toDateTime({end: String}) AS range_end
     SELECT
       formatDateTime(hour_bucket, '%m-%d %H:%M') AS time,
       sum(pos_count) AS pos,
@@ -269,11 +283,12 @@ export async function getTopicSentimentFromCH(topicId: number): Promise<Sentimen
       sum(neg_count) AS neg
     FROM ${SCHEMA}.dbt_fct_topic_activity
     WHERE topic_id = {topicId: UInt32}
-      AND hour_bucket >= now() - INTERVAL 7 DAY
+      AND hour_bucket >= range_start
+      AND hour_bucket <= range_end
     GROUP BY hour_bucket
     ORDER BY hour_bucket ASC
   `;
-  const rows = await queryClickhouse<Partial<SentimentPoint>>(query, { topicId });
+  const rows = await queryClickhouse<Partial<SentimentPoint>>(query, { topicId, ...timeParams(timeRange) });
   return rows.map((row) => ({
     time: String(row.time ?? ""),
     pos: Number(row.pos) || 0,
@@ -296,8 +311,14 @@ export async function getTopicKeywordsFromCH(topicId: number) {
   }));
 }
 
-export async function getTopicEvidencePostsFromCH(topicId: number): Promise<TopicEvidencePost[]> {
+export async function getTopicEvidencePostsFromCH(
+  topicId: number,
+  timeRange: ResolvedTimeRange,
+): Promise<TopicEvidencePost[]> {
   const query = `
+    WITH
+      toDateTime({start: String}) AS range_start,
+      toDateTime({end: String}) AS range_end
     SELECT
       toString(post_id) AS id,
       ifNull(author_name, 'unknown') AS author_name,
@@ -307,12 +328,13 @@ export async function getTopicEvidencePostsFromCH(topicId: number): Promise<Topi
       toFloat64(ifNull(engagement, 0)) AS engagement
     FROM ${POSTS_ENRICHED_TABLE}
     WHERE topic_id = {topicId: UInt32}
-      AND created_at >= now() - INTERVAL 7 DAY
+      AND created_at >= range_start
+      AND created_at <= range_end
     ORDER BY engagement DESC, created_at DESC
     LIMIT 25
   `;
 
-  const rows = await queryClickhouse<Partial<TopicEvidencePost>>(query, { topicId });
+  const rows = await queryClickhouse<Partial<TopicEvidencePost>>(query, { topicId, ...timeParams(timeRange) });
   return rows.map((row) => ({
     id: String(row.id ?? ""),
     author_name: String(row.author_name ?? "unknown"),
@@ -323,9 +345,12 @@ export async function getTopicEvidencePostsFromCH(topicId: number): Promise<Topi
   }));
 }
 
-export async function getRecentCrisesFromCH(): Promise<CrisisEvent[]> {
+export async function getRecentCrisesFromCH(timeRange: ResolvedTimeRange): Promise<CrisisEvent[]> {
   const query = `
-    WITH recent_crises AS (
+    WITH
+      toDateTime({start: String}) AS range_start,
+      toDateTime({end: String}) AS range_end,
+      recent_crises AS (
       SELECT
         event_id,
         severity,
@@ -337,7 +362,8 @@ export async function getRecentCrisesFromCH(): Promise<CrisisEvent[]> {
         anomaly_score,
         ifNull(evidence_post_ids, []) AS evidence_post_ids
       FROM ${SCHEMA}.dbt_fct_crisis_events
-      WHERE detected_at >= now() - INTERVAL 7 DAY
+      WHERE parseDateTimeBestEffortOrNull(toString(detected_at)) >= range_start
+        AND parseDateTimeBestEffortOrNull(toString(detected_at)) <= range_end
     )
     SELECT
       rc.event_id,
@@ -377,7 +403,7 @@ export async function getRecentCrisesFromCH(): Promise<CrisisEvent[]> {
     Omit<CrisisEvent, "severityRank"> & {
       evidence_posts: Array<Record<string, string>>;
     }
-  >(query);
+  >(query, timeParams(timeRange));
 
   return rows.map((row) => ({
     ...row,
@@ -394,9 +420,11 @@ export async function getRecentCrisesFromCH(): Promise<CrisisEvent[]> {
   }));
 }
 
-const getCrisisStatsCached = unstable_cache(
-  async (): Promise<CrisisStats> => {
-    const query = `
+export async function getCrisisStatsFromCH(timeRange: ResolvedTimeRange): Promise<CrisisStats> {
+  const query = `
+      WITH
+        toDateTime({start: String}) AS range_start,
+        toDateTime({end: String}) AS range_end
       SELECT
         count(*) AS total_24h,
         countIf(severity = 'HIGH') AS high_severity_count,
@@ -407,23 +435,17 @@ const getCrisisStatsCached = unstable_cache(
           mention_velocity,
           parseDateTimeBestEffortOrNull(toString(detected_at)) AS parsed_detected_at
         FROM ${SCHEMA}.dbt_fct_crisis_events
-        WHERE detected_at >= now() - INTERVAL 24 HOUR
       )
       WHERE parsed_detected_at IS NOT NULL
+        AND parsed_detected_at >= range_start
+        AND parsed_detected_at <= range_end
     `;
 
-    const rows = await queryClickhouse<Partial<CrisisStats>>(query);
-    const row = rows[0] ?? {};
-    return {
-      total_24h: Number(row.total_24h) || 0,
-      high_severity_count: Number(row.high_severity_count) || 0,
-      avg_velocity: Number(row.avg_velocity) || 0,
-    };
-  },
-  ["crises-stats", CACHE_KEY_REVISION],
-  { revalidate: ONE_HOUR },
-);
-
-export async function getCrisisStatsFromCH() { 
-  return getCrisisStatsCached();
+  const rows = await queryClickhouse<Partial<CrisisStats>>(query, timeParams(timeRange));
+  const row = rows[0] ?? {};
+  return {
+    total_24h: Number(row.total_24h) || 0,
+    high_severity_count: Number(row.high_severity_count) || 0,
+    avg_velocity: Number(row.avg_velocity) || 0,
+  };
 }

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useSearchParams } from "next/navigation";
 import { useNavigationLoading } from "@/components/layout/navigation-loading-provider";
 import {
   Radar,
@@ -25,7 +25,9 @@ const secondaryNav = [
 
 export function Sidebar() {
   const pathname = usePathname();
+  const searchParams = useSearchParams();
   const { startLoading } = useNavigationLoading();
+  const currentQuery = searchParams.toString();
 
   return (
     <aside className="w-64 bg-white border-r border-slate-200 flex flex-col h-screen fixed left-0 top-0 z-30">
@@ -56,7 +58,7 @@ export function Sidebar() {
           return (
             <Link
               key={item.href}
-              href={item.href}
+              href={currentQuery ? `${item.href}?${currentQuery}` : item.href}
               onClick={() => {
                 if (!isActive) startLoading();
               }}

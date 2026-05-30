@@ -1,62 +1,39 @@
-"""
-Text Preprocessing Pipeline cho Vietnamese Tech Trend Analysis.
-Pipeline: Raw Text → Clean Text → Tokenized Text → Ready for NLP
+"""Vietnamese text cleaning and tokenization utilities."""
 
-Member 4 — NLP Engineer
-"""
-
+import logging
 import re
 import unicodedata
-from typing import List, Optional
+from typing import List
 
 from preprocessing.slang_normalizer import SlangNormalizer
 from preprocessing.vncorenlp_tokenizer import VnCoreNLPTokenizer
 
+logger = logging.getLogger(__name__)
+
 
 class TextPreprocessor:
-    """
-    Pipeline xử lý văn bản tiếng Việt.
-
-    Các bước:
-        1. Lowercase
-        2. Remove HTML tags
-        3. Remove URLs
-        4. Remove emails
-        5. Remove emojis
-        6. Normalize unicode (NFC)
-        7. Normalize whitespace
-        8. Normalize teencode/slang → tiếng Việt chuẩn
-        9. Remove special characters (giữ dấu tiếng Việt)
-        10. Word segmentation (VnCoreNLP / underthesea)
-        11. Remove stopwords
-    """
+    """Clean raw text and produce tokenized text for sentiment/topic jobs."""
 
     def __init__(
         self,
         slang_dict_path: str = "data/slang_dict.json",
         stopwords_path: str = "data/stopwords_vi.txt",
         use_vncorenlp: bool = True,
-        vncorenlp_jar: str = "vncorenlp/VnCoreNLP-1.1.1.jar"
+        vncorenlp_jar: str = "vncorenlp/VnCoreNLP-1.1.1.jar",
     ):
-        # Slang normalizer
         self.slang_normalizer = SlangNormalizer(slang_dict_path)
-
-        # Tokenizer
         self.use_vncorenlp = use_vncorenlp
         if use_vncorenlp:
             self.tokenizer = VnCoreNLPTokenizer(jar_path=vncorenlp_jar)
         else:
-            # Fallback: underthesea (thuần Python, dễ cài hơn)
             from underthesea import word_tokenize
             self.word_tokenize = word_tokenize
 
-        # Stopwords
         self.stopwords = self._load_stopwords(stopwords_path)
         self.stopwords.update(self._build_custom_stopwords())
         self.topic_stopwords = set(self.stopwords)
         self.topic_stopwords.update(self._build_topic_only_stopwords())
 
-        # Regex patterns (compile 1 lần để tối ưu performance)
         self._html_pattern = re.compile(r"<[^>]+>")
         self._url_pattern = re.compile(
             r"http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|"
@@ -82,14 +59,12 @@ class TextPreprocessor:
             "]+",
             flags=re.UNICODE,
         )
-        # Giữ chữ cái tiếng Việt, số, khoảng trắng, dấu gạch dưới
         self._special_char_pattern = re.compile(
             r"[^\w\sàáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩ"
             r"òóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]",
             flags=re.IGNORECASE,
         )
         self._whitespace_pattern = re.compile(r"\s+")
-
 
     def remove_html(self, text: str) -> str:
         """Xóa tất cả HTML tags."""
@@ -102,11 +77,11 @@ class TextPreprocessor:
     def remove_emails(self, text: str) -> str:
         """Xóa email addresses."""
         return self._email_pattern.sub(" ", text)
-    
+
     def remove_mentions(self, text: str) -> str:
         """Xóa mentions."""
         return re.sub(r"@\w+", " ", text)
-    
+
     def remove_forum_quotes(self, text: str) -> str:
         """Xóa các đoạn trích dẫn (quote) rác của diễn đàn XenForo (như VOZ)."""
         return self._forum_quote_pattern.sub(" ", text)
@@ -114,7 +89,7 @@ class TextPreprocessor:
     def remove_source_specific_noise(self, text: str) -> str:
         """Xóa các từ đệm/noise đặc thù forum-social không mang nội dung chủ đề."""
         return self._source_noise_pattern.sub(" ", text)
-    
+
     def remove_emojis(self, text: str) -> str:
         """Xóa emojis."""
         return self._emoji_pattern.sub(" ", text)
@@ -166,7 +141,7 @@ class TextPreprocessor:
         """
         if not text or not isinstance(text, str):
             return ""
-        
+
         text = self.remove_forum_quotes(text)
         text = self.remove_html(text)
         text = self.normalize_whitespace(text)
@@ -188,7 +163,6 @@ class TextPreprocessor:
         else:
             return self.word_tokenize(text, format="text")
 
-
     def remove_stopwords(self, text: str) -> str:
         """Xóa stopwords tiếng Việt."""
         if not text:
@@ -204,7 +178,6 @@ class TextPreprocessor:
         words = text.split()
         filtered = [w for w in words if w not in self.topic_stopwords]
         return " ".join(filtered)
-
 
     def preprocess(self, text: str, remove_stopwords: bool = True) -> str:
         """
@@ -257,17 +230,15 @@ class TextPreprocessor:
         """
         return [self.preprocess(t, remove_stopwords) for t in texts]
 
-
     def _load_stopwords(self, path: str) -> set:
         """Load stopwords từ file text (mỗi dòng 1 từ)."""
         try:
             with open(path, "r", encoding="utf-8") as f:
-                # Đồng bộ với pipeline clean() vốn đã lowercase text trước khi tokenize.
                 stopwords = set(line.strip().lower() for line in f if line.strip())
-            print(f"[TextPreprocessor] Loaded {len(stopwords)} stopwords from {path}")
+            logger.info("[TextPreprocessor] Loaded %s stopwords from %s", len(stopwords), path)
             return stopwords
         except FileNotFoundError:
-            print(f"[TextPreprocessor] WARNING: Stopwords file not found: {path}")
+            logger.warning("[TextPreprocessor] Stopwords file not found: %s", path)
             return set()
 
     def _build_custom_stopwords(self) -> set:
@@ -305,7 +276,7 @@ class TextPreprocessor:
             # generic verbs / adjectives / discourse fillers that still dominate topics
             "mua", "dùng", "xài", "làm", "bị", "nhiều", "ngon", "chắc",
             "bảo", "nhìn", "cao", "tốt", "gần", "biết", "nay", "đấy",
-            "cả", "lấy", "cứ", "lắm", "việc", "bằng", "nghe", "mở", "về", "cần"
+            "cả", "lấy", "cứ", "lắm", "việc", "bằng", "nghe", "mở", "về", "cần",
             # residual noise from current corpus
             "webp", "ktc", "via", "thenextvoz", "đt",
         }
@@ -327,4 +298,3 @@ class TextPreprocessor:
                 continue
             filtered.append(token)
         return " ".join(filtered)
-    

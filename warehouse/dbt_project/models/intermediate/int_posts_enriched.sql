@@ -29,7 +29,7 @@ SELECT
     coalesce(n.sentiment_label, 'neutral') AS sentiment_label,
     coalesce(n.sentiment_score, 0.0) AS sentiment_score,
 
-    coalesce(t.topic_id, 0) AS topic_id,
+    coalesce(t.topic_id, -1) AS topic_id,
     coalesce(t.topic_probability, 0.0) AS topic_probability,
 
     multiIf(
