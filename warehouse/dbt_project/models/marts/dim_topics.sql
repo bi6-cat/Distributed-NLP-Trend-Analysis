@@ -15,7 +15,7 @@ SELECT
     min(h.hour_bucket)                                  AS first_seen,
     max(h.hour_bucket)                                  AS last_seen
 
-FROM {{ source('tech_radar', 'stg_topics') }} AS t FINAL
+FROM {{ ref('stg_topics') }} AS t
 LEFT JOIN {{ ref('int_topic_sentiment_hourly') }}       AS h
     ON t.topic_id = h.topic_id
 GROUP BY

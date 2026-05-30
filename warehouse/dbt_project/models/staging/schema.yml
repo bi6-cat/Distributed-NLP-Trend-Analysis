@@ -91,3 +91,14 @@ models:
       - name: post_id
       - name: topic_id
       - name: topic_probability
+      - name: model_type
+      - name: predicted_at
+  - name: stg_topics
+    description: Staging layer for BERTopic labels and keyword lookup.
+    columns:
+      - name: topic_id
+      - name: label
+      - name: top_keywords
+      - name: coherence_score
+      - name: model_version
+      - name: created_at

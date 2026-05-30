@@ -37,10 +37,10 @@ FROM (
         view_count, sentiment_label
     FROM {{ ref('int_posts_enriched') }}
 ) AS s
-LEFT JOIN {{ source('tech_radar', 'stg_topics') }} AS t FINAL
+INNER JOIN {{ ref('stg_topics') }} AS t
     ON s.topic_id = t.topic_id
 WHERE s.topic_id IS NOT NULL
-  AND s.topic_id != 0
+  AND s.topic_id != -1
 GROUP BY
     s.topic_id,
     t.label,
