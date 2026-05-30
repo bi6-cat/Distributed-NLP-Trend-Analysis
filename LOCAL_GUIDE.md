@@ -41,7 +41,7 @@ docker-compose up -d
 
 ## 3. Chay full pipeline dung Airflow UI
 
-1. Airflow UI: <http://localhost:8081>
+1. Airflow UI: <https://airflow.zett.site>
 2. Login: `admin/admin`
 3. Unpause DAG `full_processing_pipeline`
 4. Trigger DAG
@@ -83,9 +83,22 @@ docker-compose logs -f airflow-scheduler
 
 ## 5. Luu y Windows
 
-Khong dung `chmod` trong Windows CMD/PowerShell. Lenh `chmod` chi co trong Linux/Git Bash/WSL. Voi flow local hien tai, nen trigger pipeline bang Airflow UI thay vi chay shell script truc tiep.
-HDFS Web UI: http://localhost:9870
-Spark Master: http://localhost:8080
-Airflow UI: http://localhost:8081 (\�dmin\ / \�dmin)
-ClickHouse: http://localhost:8123
-Dashboard: \streamlit run dashboard/app.py
+Khong dung `chmod` trong Windows CMD/PowerShell. Lenh `chmod` chi co trong Linux/Git Bash/WSL. Voi flow hien tai, nen trigger pipeline bang Airflow UI thay vi chay shell script truc tiep.
+
+## 6. Service URLs
+
+- Dashboard: <https://dashboard.zett.site>
+- Airflow UI: <https://airflow.zett.site> (`admin`)
+- HDFS Web UI: <https://hdfs.zett.site>
+- Spark Master UI: <https://spark.zett.site>
+- ClickHouse HTTP: <https://clickhouse.zett.site>
+
+Port noi bo van giu nguyen nhu sau:
+
+```text
+Dashboard   -> localhost:3000
+Airflow UI  -> localhost:8081
+HDFS Web UI -> localhost:9870
+Spark UI    -> localhost:8080
+ClickHouse  -> localhost:8123
+```
