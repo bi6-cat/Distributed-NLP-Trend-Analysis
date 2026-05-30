@@ -199,12 +199,17 @@ def load_staged_posts(
             df = df[df["created_at"] >= cutoff]
             logger.info(f"Filtered to last {window_days} days: {len(df):,} rows")
 
-    # Build clean_text (giống notebook cell 4)
+    # Reuse the canonical topic-modeling text from cleaning_job whenever
+    # available. Only rebuild from other fields for older staged datasets.
     def _build_text(row) -> str:
+        topic = str(row.get("topic_text", "") or "").strip()
         title = str(row.get("title", "") or "").strip()
         seg   = str(row.get("segmented_text", "") or "").strip()
         body  = str(row.get("body", "") or "").strip()
-        text  = seg if seg else body
+        if topic:
+            text = topic
+        else:
+            text = seg if seg else body
         if title and title.lower() not in text.lower():
             text = f"{title} {text}"
         return text.strip()[:MAX_TEXT_LEN]

@@ -457,9 +457,13 @@ def load_data(
         if has_parquet:
             logger.info(f"[LOCAL] Reading parquet from {input_path}")
             df = spark.read.parquet(input_path)
-            # Map stg_posts_core schema → canonical schema
+            # Map stg_posts_core schema → canonical schema.
+            # `topic_text` is the canonical topic-modeling artifact emitted by
+            # cleaning_job. We keep it separate from raw-ish `text` so LDA can
+            # reliably reuse cleaned topic input when available, and only
+            # preprocess from source text as a fallback.
             text_col = next(
-                (c for c in ["topic_text", "segmented_text", "clean_text", "body", "title", "text"] if c in df.columns),
+                (c for c in ["body", "title", "text", "segmented_text", "clean_text", "topic_text"] if c in df.columns),
                 None,
             )
             if text_col is None:
@@ -472,7 +476,7 @@ def load_data(
                 _build_created_at_expr(df).alias("created_at"),
                 F.lit("").cast("string").alias("url"),
                 F.col(text_col).cast("string").alias("text"),
-                _pick_col_or_lit(df, ["topic_text", "clean_text", "segmented_text"], "").cast("string").alias("preprocessed_text"),
+                _pick_col_or_lit(df, ["topic_text"], "").cast("string").alias("preprocessed_text"),
             )
             df = df.filter(F.col("text").isNotNull() & (F.trim(F.col("text")) != ""))
             row_count = df.count()
@@ -585,15 +589,15 @@ def load_data(
             (
                 c
                 for c in [
-                    "topic_text",
                     "body",
-                    "clean_text",
-                    "segmented_text",
                     "title",
                     "content",
                     "tieu_de",
                     "noi_dung",
                     "text",
+                    "segmented_text",
+                    "clean_text",
+                    "topic_text",
                 ]
                 if c in df.columns
             ),
@@ -610,7 +614,7 @@ def load_data(
             _build_created_at_expr(df).alias("created_at"),
             _pick_col_or_lit(df, ["url", "video_url", "article_url"], "").cast("string").alias("url"),
             F.col(text_col).cast("string").alias("text"),
-            _pick_col_or_lit(df, ["topic_text", "segmented_text", "clean_text"], "").cast("string").alias("preprocessed_text"),
+            _pick_col_or_lit(df, ["topic_text"], "").cast("string").alias("preprocessed_text"),
         )
 
     # Loại bỏ rows rỗng
@@ -706,6 +710,7 @@ def build_tfidf_features(
         outputCol="tf_features",
         vocabSize=vocab_size,
         minDF=float(min_df),
+        maxDF=0.5,  # Loại bỏ các từ xuất hiện ở >50% số bài viết
     )
     cv_model: CountVectorizerModel = cv.fit(df)
     tf_df = cv_model.transform(df)
@@ -1213,7 +1218,7 @@ def main() -> None:
 
         if preprocessed_count > 0:
             logger.info(
-                f"Using preprocessed_text directly for tokenization ({preprocessed_count:,} docs)."
+                f"Using canonical topic_text directly from cleaning_job ({preprocessed_count:,} docs)."
             )
             df = (
                 df
