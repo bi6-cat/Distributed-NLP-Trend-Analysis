@@ -148,72 +148,84 @@ def step_compute_baseline(spark: SparkSession, core) -> None:
     print(f"[baseline] Wrote {n_hours} rows to HDFS hourly_baseline")
 
 
-FEATURES_IF = [
-    "comment_count", "velocity_ratio", "acceleration",
-    "user_diversity", "cross_source", "z_score", "unique_posts_ratio",
-]
+FEATURES_IF = ["vol_z", "neg_z", "mv_z"]
 
 
 def step_retrain_isolation_forest(spark: SparkSession, core, nlp) -> str:
-    print("\n[retrain] Step 2: retrain IsolationForest")
+    """Train IF trên vol_z/neg_z/mv_z tính từ lịch sử LOOKBACK_DAYS ngày."""
+    print("\n[retrain] Step 2: retrain IsolationForest (features: vol_z, neg_z, mv_z)")
+    import numpy as np
     from sklearn.ensemble import IsolationForest
+    from sklearn.pipeline import Pipeline
     from sklearn.preprocessing import StandardScaler
 
+    # Load hourly_baseline để tính z-scores
+    try:
+        baseline_pdf = spark.read.parquet(f"{HDFS_STG_BASE}/hourly_baseline").toPandas()
+        baseline_pdf = baseline_pdf.set_index("hour")
+    except Exception as e:
+        print(f"[IF] WARN: cannot load hourly_baseline ({e}), skip IF retrain.")
+        return ""
+
+    # Aggregate daily hourly counts + neg_ratio + unique_posts từ lịch sử
     core_h = (
         core
         .withColumn("date", to_date(col("created_at")))
         .withColumn("hour", spark_hour(col("created_at")))
     )
-    hourly_struct = (
+    nlp_joined = (
+        nlp.join(core_h.select("post_id", "date", "hour"), on="post_id", how="inner")
+        .withColumn("is_neg", when(col("sentiment_label") == "negative", 1.0).otherwise(0.0))
+    )
+    hourly_nlp = (
+        nlp_joined.groupBy("date", "hour")
+        .agg(avg("is_neg").alias("neg_ratio"))
+    )
+    hourly = (
         core_h.groupBy("date", "hour")
         .agg(
             count("*").alias("comment_count"),
             countDistinct("parent_id").alias("unique_posts"),
-            countDistinct("author").alias("unique_users"),
-            spark_sum(when(col("source") == "voz",       1).otherwise(0)).alias("voz_count"),
-            spark_sum(when(col("source") == "vnexpress", 1).otherwise(0)).alias("vne_count"),
         )
+        .join(hourly_nlp, on=["date", "hour"], how="left")
+        .withColumn("neg_ratio", coalesce(col("neg_ratio"), lit(0.0)).cast("float"))
+        .orderBy("date", "hour")
     )
-
-    hourly = hourly_struct.orderBy("date", "hour")
     pdf = hourly.toPandas()
     n_rows = len(pdf)
     print(f"[IF] Training rows: {n_rows}")
-    if n_rows < 24:
+    if n_rows < 48:
         print(f"[IF] WARN: too little data ({n_rows} rows), skip IF retrain.")
         return ""
 
-    pdf["user_diversity"]     = (pdf["unique_users"] / (pdf["comment_count"] + 1)).round(4)
-    pdf["cross_source"]       = (
-        pdf[["vne_count", "voz_count"]].min(axis=1) /
-        (pdf[["vne_count", "voz_count"]].max(axis=1) + 1)
-    ).round(4)
-    pdf["unique_posts_ratio"] = (pdf["unique_posts"] / (pdf["comment_count"] + 1)).round(4)
+    # Tính z-scores từ baseline
+    def _z(val, mean_col, std_col):
+        mu  = pdf["hour"].map(baseline_pdf[mean_col]).fillna(0.0)
+        std = pdf["hour"].map(baseline_pdf[std_col]).fillna(0.01).clip(lower=0.01)
+        return ((val - mu) / std).fillna(0.0)
 
-    roll3 = pdf["comment_count"].astype(float).rolling(window=3, min_periods=1).mean().shift(1)
-    vel   = (pdf["comment_count"] / (roll3 + 1)).round(4)
-    pdf["velocity_ratio"] = vel
-    pdf["acceleration"]   = vel.diff().fillna(0).round(4)
-    pdf["z_score"]        = 0.0
+    pdf["vol_z"] = _z(pdf["comment_count"], "baseline_median",   "baseline_std")
+    pdf["neg_z"] = _z(pdf["neg_ratio"],     "neg_ratio_mean",    "neg_ratio_std")
+    pdf["mv_z"]  = _z(pdf["unique_posts"],  "unique_posts_mean", "unique_posts_std")
 
-    x = pdf[FEATURES_IF].fillna(0).values
-    scaler = StandardScaler()
-    x_scaled = scaler.fit_transform(x)
+    X = pdf[FEATURES_IF].fillna(0).values
+    pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("if",     IsolationForest(
+            n_estimators  = 200,
+            contamination = IF_CONTAMINATION,
+            random_state  = 42,
+            n_jobs        = -1,
+        )),
+    ])
+    pipe.fit(X)
 
-    model = IsolationForest(
-        n_estimators=200,
-        contamination=IF_CONTAMINATION,
-        random_state=42,
-        n_jobs=-1,
-    )
-    model.fit(x_scaled)
-
-    artifact = {"scaler": scaler, "model": model, "features": FEATURES_IF, "trained_at": str(date.today())}
+    artifact = {"pipeline": pipe, "features": FEATURES_IF, "trained_at": str(date.today())}
     pkl_path = os.path.join(MODEL_LOCAL_DIR, "isolation_forest_hourly.pkl")
     with open(pkl_path, "wb") as fh:
         pickle.dump(artifact, fh)
 
-    print(f"[IF] Saved model: {pkl_path}")
+    print(f"[IF] Trained on {n_rows} rows | saved: {pkl_path}")
     return pkl_path
 
 
@@ -294,8 +306,6 @@ def main() -> None:
     nlp = load_nlp(spark).cache()
 
     try:
-        step_compute_baseline(spark, core)
-
         if_path = step_retrain_isolation_forest(spark, core, nlp)
         if if_path:
             trained_models.append(if_path)

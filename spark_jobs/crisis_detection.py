@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
-import pickle
 from datetime import date
 
 import numpy as np
@@ -31,6 +29,13 @@ from pyspark.sql.types import (
     StructType,
     TimestampType,
 )
+import pickle
+
+from sklearn.ensemble import IsolationForest
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
+IF_MODEL_PATH = os.environ.get("IF_MODEL_PATH", "/opt/airflow/models/isolation_forest_hourly.pkl")
 
 from spark_jobs.clickhouse_hdfs import query_df, tmp_hdfs_dir, write_parquet_and_ingest
 
@@ -38,198 +43,263 @@ HDFS_STG_BASE = os.environ.get(
     "HDFS_STG_BASE",
     "hdfs://namenode:9000/user/zett/staged",
 )
-
 HDFS_STG_POSTS_CORE = os.environ.get(
     "HDFS_STG_POSTS_CORE",
     "hdfs://namenode:9000/user/zett/staged/stg_posts_core",
 )
-IF_MODEL_PATH   = os.environ.get("IF_MODEL_PATH",  "/tmp/airflow_models/isolation_forest_hourly.pkl")
-CLF_MODEL_PATH  = os.environ.get("CLF_MODEL_PATH", "/tmp/airflow_models/crisis_classifier.pkl")
-_models_dir     = os.path.dirname(IF_MODEL_PATH)
-FEAT1_JSON_PATH = os.environ.get("FEAT1_JSON_PATH", os.path.join(_models_dir, "features_tier1.json"))
-FEAT2_JSON_PATH = os.environ.get("FEAT2_JSON_PATH", os.path.join(_models_dir, "features_tier2.json"))
-Z_SCORE_THRESHOLD = float(os.environ.get("Z_SCORE_THRESHOLD", "2.0"))
-TARGET_DATE       = os.environ.get("TARGET_DATE", str(date.today()))
+TARGET_DATE = os.environ.get("TARGET_DATE", str(date.today()))
 
-FEATURES_TIER1_DEFAULT = [
-    "comment_count", "velocity_ratio", "acceleration",
-    "user_diversity", "cross_source", "z_score", "unique_posts_ratio",
-]
-FEATURES_TIER2_DEFAULT = FEATURES_TIER1_DEFAULT + ["neg_ratio", "neg_score_avg", "voz_neg_ratio"]
+# ── Signal 1: Isolation Forest ────────────────────────────────────────────────
+IF_FEATURES      = ["vol_z", "neg_z", "mv_z"]
+IF_CONTAMINATION = 0.05
+IF_N_ESTIMATORS  = 200
+IF_MIN_CMTS      = 5
+
+# ── Signal 2: Global Spike ────────────────────────────────────────────────────
+GLOBAL_Z_THRESH = float(os.environ.get("Z_SCORE_THRESHOLD", "2.0"))
+
+# ── Signal 3: Per-Post Spike ──────────────────────────────────────────────────
+PPS_SIGMA    = 2.0
+PPS_MIN_CMTS = 5
+
+# ── Voting ────────────────────────────────────────────────────────────────────
+VOTING_THRESHOLD = 2
+NEG_RATIO_MIN    = 0.55
+
+# ── Severity (calibrated từ p97/p90 non-crisis hours) ────────────────────────
+SEVERITY_HIGH_THRESH = 0.2920
+SEVERITY_MED_THRESH  = 0.2469
 
 NLP_SCHEMA = StructType([
     StructField("post_id",         StringType(), False),
     StructField("sentiment_label", StringType(), True),
     StructField("sentiment_score", FloatType(),  True),
-    StructField("source",          StringType(), True),
 ])
 
 
-def _load_pkl(path: str):
-    if not os.path.exists(path):
-        print(f"[model] WARN: missing {path}, skip inference artifact.")
-        return None
-    with open(path, "rb") as fh:
-        return pickle.load(fh)
+def load_nlp(spark: SparkSession):
+    # Lấy toàn bộ stg_posts_nlp từ ClickHouse — join với HDFS core được thực hiện ở Step 5
+    pdf = query_df("SELECT post_id, sentiment_label, sentiment_score FROM stg_posts_nlp")
+    if pdf.empty:
+        print("[crisis] WARN: stg_posts_nlp is empty in ClickHouse — neg_ratio will be 0")
+        return spark.createDataFrame([], NLP_SCHEMA)
+    pdf["post_id"] = pdf["post_id"].astype(str)
+    print(f"[crisis] stg_posts_nlp loaded: {len(pdf):,} rows from ClickHouse")
+    return spark.createDataFrame(pdf, schema=NLP_SCHEMA)
 
 
-def _load_features(path: str, fallback: list) -> list:
-    if not os.path.exists(path):
-        print(f"[features] WARN: missing {path}, using default: {fallback}")
-        return fallback
-    with open(path) as fh:
-        return json.load(fh)
+def load_baseline(spark: SparkSession) -> pd.DataFrame:
+    """Đọc hourly_baseline từ HDFS (tính bởi compute_baseline.py)."""
+    try:
+        pdf = spark.read.parquet(f"{HDFS_STG_BASE}/hourly_baseline").toPandas()
+        # Fallback nếu baseline cũ chưa có các cột neg/unique
+        for col_name, default in [
+            ("neg_ratio_mean",    0.0),
+            ("neg_ratio_std",     0.01),
+            ("unique_posts_mean", 1.0),
+            ("unique_posts_std",  1.0),
+        ]:
+            if col_name not in pdf.columns:
+                pdf[col_name] = default
+        print(f"[crisis] hourly_baseline loaded: {len(pdf)} hours")
+        return pdf.set_index("hour")
+    except Exception as e:
+        print(f"[crisis] WARN: cannot load hourly_baseline ({e}) — z-scores default to 0")
+        return pd.DataFrame()
 
 
-def _if_predict(pdf: pd.DataFrame, pipeline, features: list) -> np.ndarray:
-    if pipeline is None:
-        return np.zeros(len(pdf), dtype=int)
-    X = pdf[features].fillna(0).values.astype(float)
-    return (pipeline.predict(X) == -1).astype(int)
-
-
-def _if_score(pdf: pd.DataFrame, pipeline, features: list) -> np.ndarray:
-    if pipeline is None:
-        return np.zeros(len(pdf), dtype=float)
-    X = pdf[features].fillna(0).values.astype(float)
-    return pipeline.decision_function(X).astype(float)
-
-
-def _clf_predict(pdf: pd.DataFrame, pipeline, features: list) -> np.ndarray:
-    if pipeline is None:
-        return np.zeros(len(pdf), dtype=int)
-    X = pdf[features].fillna(0).values.astype(float)
-    return pipeline.predict(X).astype(int)
-
-
-def build_all_events(
-    pdf: pd.DataFrame,
-    target_date: str,
-    post_ids_by_hour: dict[int, list[str]] | None = None,
-) -> pd.DataFrame:
-
-    def _severity(z_max: float) -> str:
-        if z_max > 4: return "HIGH"
-        if z_max > 2: return "MEDIUM"
-        return "LOW"
-
-    def _group(hours_df: pd.DataFrame) -> pd.DataFrame:
-        h = hours_df.sort_values("hour").reset_index(drop=True)
-        h["gap"]         = h["hour"].diff().fillna(0) > 1
-        h["event_group"] = h["gap"].cumsum()
-        return h
-
-    rows = []
-
-    crisis_hours = pdf[pdf["is_crisis"] == 1].copy()
-    if not crisis_hours.empty:
-        for _, grp in _group(crisis_hours).groupby("event_group"):
-            z_max = grp["z_score"].max()
-            evidence = []
-            if post_ids_by_hour:
-                for h in grp["hour"].tolist():
-                    evidence.extend(post_ids_by_hour.get(int(h), []))
-            rows.append({
-                "event_id":           hashlib.md5(
-                    f"CRISIS-{target_date}-{grp['hour'].min():02d}".encode()
-                ).hexdigest()[:16],
-                "detected_at":        f"{target_date} {grp['hour'].min():02d}:00:00",
-                "severity":           _severity(z_max),
-                "anomaly_score":      float(grp["if_score"].min()),
-                "trigger_conditions": ["global_spike=1", "if_spike=1", "is_crisis=1"],
-                "affected_topics":    [],
-                "neg_ratio":          float(grp["neg_ratio"].mean()),
-                "mention_velocity":   float(grp["velocity_ratio"].max()),
-                "evidence_post_ids":  evidence,
-            })
-
-    return pd.DataFrame(rows)
-
-
-
-def get_evidence_posts(core_with_time, nlp, crisis_hour_set,
-                       min_cmts=5, neg_threshold=0.55):
-    """
-    Lấy posts là evidence cho crisis:
-    - Có >= min_cmts comments trong giờ crisis
-    - neg_ratio >= neg_threshold
-    """
-    evidence_rows = (
+def get_evidence_posts(core_with_time, nlp, crisis_hour_set, min_cmts=5, neg_threshold=0.5):
+    return (
         core_with_time
         .filter(col("hour").isin(list(crisis_hour_set)))
         .filter(col("parent_id").isNotNull())
         .join(nlp.select("post_id", "sentiment_label"), on="post_id", how="inner")
-        .withColumn("is_neg",
-            when(col("sentiment_label") == "negative", 1.0).otherwise(0.0))
+        .withColumn("is_neg", when(col("sentiment_label") == "negative", 1.0).otherwise(0.0))
         .groupBy("hour", "parent_id")
         .agg(
             count("*").alias("cmt_count"),
-            avg("is_neg").alias("post_neg_ratio")
+            avg("is_neg").alias("post_neg_ratio"),
         )
         .filter(col("cmt_count") >= min_cmts)
         .filter(col("post_neg_ratio") >= neg_threshold)
         .orderBy("hour", col("cmt_count").desc())
         .collect()
     )
-    return evidence_rows
 
 
-def load_nlp(spark: SparkSession):
-    pdf = query_df(f"""
-        SELECT n.post_id, n.sentiment_label, n.sentiment_score, c.source
-        FROM stg_posts_nlp AS n
-        INNER JOIN stg_posts_core AS c ON c.post_id = n.post_id
-        WHERE toDate(c.created_at) = '{TARGET_DATE}'
-          AND c.parent_id IS NOT NULL
-    """)
-    if pdf.empty:
-        return spark.createDataFrame([], NLP_SCHEMA)
-    return spark.createDataFrame(pdf, schema=NLP_SCHEMA)
+# ── 3-Signal Crisis Logic (driver-side pandas) ───────────────────────────────
+
+def _add_zscores(pdf: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataFrame:
+    """
+    Tính vol_z, neg_z, mv_z từ hourly_baseline (μ, σ từ lịch sử toàn bộ).
+    z = (x - μ) / σ  — stable, không phụ thuộc số rows trong ngày.
+    """
+    pdf = pdf.copy()
+    if baseline.empty:
+        pdf["vol_z"] = 0.0
+        pdf["neg_z"] = 0.0
+        pdf["mv_z"]  = 0.0
+        return pdf
+
+    def _z(val_series, mean_col, std_col):
+        mu  = pdf["hour"].map(baseline[mean_col]).fillna(0.0)
+        std = pdf["hour"].map(baseline[std_col]).fillna(0.01).clip(lower=0.01)
+        return ((val_series - mu) / std).fillna(0.0)
+
+    pdf["vol_z"] = _z(pdf["comment_count"], "baseline_median",   "baseline_std")
+    pdf["neg_z"] = _z(pdf["neg_ratio"],     "neg_ratio_mean",    "neg_ratio_std")
+    pdf["mv_z"]  = _z(pdf["unique_posts"],  "unique_posts_mean", "unique_posts_std")
+    return pdf
 
 
-def load_baseline(spark: SparkSession):
-    try:
-        return spark.read.parquet(f"{HDFS_STG_BASE}/hourly_baseline")
-    except Exception:
-        print("[baseline] WARN: không đọc được hourly_baseline từ HDFS")
-        return spark.createDataFrame([], StructType([
-            StructField("hour",            IntegerType(), False),
-            StructField("baseline_median", FloatType(),   True),
-            StructField("baseline_std",    FloatType(),   True),
-        ]))
+def _load_or_fit_isolation_forest(pdf: pd.DataFrame) -> Pipeline:
+    if os.path.exists(IF_MODEL_PATH):
+        with open(IF_MODEL_PATH, "rb") as fh:
+            artifact = pickle.load(fh)
+        pipe = artifact["pipeline"]
+        print(f"[crisis] IF model loaded from {IF_MODEL_PATH} (trained {artifact.get('trained_at','?')})")
+        return pipe
+
+    print(f"[crisis] IF model not found at {IF_MODEL_PATH} — fitting on today's data")
+    normal = pdf[pdf["comment_count"] >= IF_MIN_CMTS]
+    if len(normal) < 5:
+        normal = pdf
+    X = normal[IF_FEATURES].fillna(0).values
+    pipe = Pipeline([
+        ("scaler", StandardScaler()),
+        ("if",     IsolationForest(
+            n_estimators  = IF_N_ESTIMATORS,
+            contamination = IF_CONTAMINATION,
+            random_state  = 42,
+        )),
+    ])
+    pipe.fit(X)
+    return pipe
 
 
-def load_recent_hourly(spark: SparkSession) -> pd.DataFrame:
-    try:
-        return (
-            spark.read.parquet(f"{HDFS_STG_BASE}/stg_crisis_hourly")
-            .filter(col("date") < TARGET_DATE)
-            .orderBy("date", "hour")
-            .limit(72)
-            .select("hour", "comment_count")
-        ).toPandas()
-    except Exception:
-        return pd.DataFrame()
+def _apply_signals(pdf: pd.DataFrame, baseline: pd.DataFrame) -> pd.DataFrame:
+    pdf = _add_zscores(pdf, baseline)
+
+    ifo = _load_or_fit_isolation_forest(pdf)
+    X_all = pdf[IF_FEATURES].fillna(0).values
+    pdf["if_score"]  = -ifo.decision_function(X_all)
+    pdf["signal_if"] = (ifo.predict(X_all) == -1).astype(int)
+
+    pdf["signal_global"] = (
+        (pdf["vol_z"] > GLOBAL_Z_THRESH) &
+        (pdf["comment_count"] >= IF_MIN_CMTS)
+    ).astype(int)
+
+    if "signal_post" not in pdf.columns:
+        pdf["signal_post"] = 0
+
+    pdf["votes"] = pdf["signal_if"] + pdf["signal_global"] + pdf["signal_post"]
+    pdf["is_crisis"] = (
+        (pdf["votes"] >= VOTING_THRESHOLD) &
+        (pdf["neg_ratio"] >= NEG_RATIO_MIN)
+    ).astype(int)
+    pdf["is_trending"] = (
+        (pdf["signal_global"] == 1) & (pdf["is_crisis"] == 0)
+    ).astype(int)
+
+    n_crisis   = pdf["is_crisis"].sum()
+    n_trending = pdf["is_trending"].sum()
+    print(f"[crisis] Voting ≥{VOTING_THRESHOLD}/3: {n_crisis} crisis hours | {n_trending} trending hours")
+    print(f"[crisis] vol_z range: [{pdf['vol_z'].min():.2f}, {pdf['vol_z'].max():.2f}] "
+          f"| neg_z: [{pdf['neg_z'].min():.2f}, {pdf['neg_z'].max():.2f}]")
+    return pdf
 
 
-def _compute_velocity(hourly_pdf: pd.DataFrame, history_pdf: pd.DataFrame) -> pd.DataFrame:
-    hourly_sorted = hourly_pdf.sort_values("hour").reset_index(drop=True)
+def _compute_pps(core_pdf: pd.DataFrame) -> pd.DataFrame:
+    if core_pdf.empty:
+        return pd.DataFrame(columns=["hour", "signal_post"])
 
-    if history_pdf is not None and not history_pdf.empty:
-        hist_counts  = history_pdf["comment_count"].astype(float).reset_index(drop=True)
-        today_counts = hourly_sorted["comment_count"].astype(float)
-        combined = pd.concat([hist_counts, today_counts], ignore_index=True)
-    else:
-        combined = hourly_sorted["comment_count"].astype(float).copy()
+    daily = (
+        core_pdf.groupby(["parent_id", "date"])
+        .size().rename("daily_cmts").reset_index()
+    )
+    daily_global = (
+        daily.groupby("date")["daily_cmts"]
+        .agg(["mean", "std"]).reset_index()
+    )
+    daily_global.columns = ["date", "global_mean", "global_std"]
+    daily_global["global_std"] = daily_global["global_std"].fillna(1.0)
 
-    roll3 = combined.rolling(window=3, min_periods=1).mean().shift(1)
-    vel   = (combined / (roll3 + 1)).round(4)
-    acc   = vel.diff().fillna(0).round(4)
+    daily = daily.merge(daily_global, on="date", how="left")
+    daily["post_thresh"] = daily["global_mean"] + PPS_SIGMA * daily["global_std"]
+    daily["post_spike"]  = (
+        (daily["daily_cmts"] > daily["post_thresh"]) &
+        (daily["daily_cmts"] >= PPS_MIN_CMTS)
+    )
 
-    n = len(hourly_sorted)
-    hourly_sorted["velocity_ratio"] = vel.values[-n:]
-    hourly_sorted["acceleration"]   = acc.values[-n:]
-    return hourly_sorted
+    spike_set = set(zip(
+        daily.loc[daily["post_spike"], "parent_id"].astype(str),
+        daily.loc[daily["post_spike"], "date"].astype(str),
+    ))
+    core_pdf = core_pdf.copy()
+    core_pdf["has_pps"] = core_pdf.apply(
+        lambda r: 1 if (str(r["parent_id"]), str(r["date"])) in spike_set else 0,
+        axis=1,
+    )
+    pps = (
+        core_pdf.groupby("hour")["has_pps"]
+        .max().reset_index()
+        .rename(columns={"has_pps": "signal_post"})
+    )
+    pps["signal_post"] = pps["signal_post"].astype(int)
+    print(f"[crisis] Per-Post Spike: {daily['post_spike'].sum()} posts spiked "
+          f"→ {pps['signal_post'].sum()} hours flagged")
+    return pps
+
+
+def build_events(pdf: pd.DataFrame, target_date: str, post_ids_by_hour: dict) -> pd.DataFrame:
+    rows = []
+    for _, row in pdf[pdf["is_crisis"] == 1].iterrows():
+        h = int(row["hour"])
+
+        vol_z_n = float(np.clip(row.get("vol_z", 0), 0, 5)) / 5
+        neg_z_n = float(np.clip(row.get("neg_z", 0), 0, 5)) / 5
+        neg_abs = float(np.clip((row.get("neg_ratio", 0) - 0.55) / 0.45, 0, 1))
+        mv_z_n  = float(np.clip(row.get("mv_z",  0), 0, 5)) / 5
+        anomaly_score = float(np.clip(
+            0.40 * vol_z_n + 0.35 * neg_z_n + 0.15 * neg_abs + 0.10 * mv_z_n,
+            0, 1,
+        ))
+
+        if anomaly_score >= SEVERITY_HIGH_THRESH:
+            severity = "HIGH"
+        elif anomaly_score >= SEVERITY_MED_THRESH:
+            severity = "MEDIUM"
+        else:
+            severity = "LOW"
+
+        triggers = []
+        if row.get("signal_if")     == 1: triggers.append("isolation_forest")
+        if row.get("signal_global") == 1: triggers.append(f"global_spike_z{row.get('vol_z', 0):.2f}")
+        if row.get("signal_post")   == 1: triggers.append("per_post_spike")
+
+        evidence = post_ids_by_hour.get(h, [])
+        raw_id   = f"{target_date}-{h:02d}_{evidence[0] if evidence else 'none'}"
+        event_id = "ce_" + hashlib.md5(raw_id.encode()).hexdigest()[:12]
+
+        rows.append({
+            "event_id":           event_id,
+            "detected_at":        f"{target_date} {h:02d}:00:00",
+            "severity":           severity,
+            "anomaly_score":      round(anomaly_score, 6),
+            "trigger_conditions": triggers,
+            "affected_topics":    [],
+            "neg_ratio":          round(float(row["neg_ratio"]), 6),
+            "mention_velocity":   round(float(row.get("unique_posts", 0)), 6),
+            "evidence_post_ids":  evidence,
+        })
+
+    events = pd.DataFrame(rows)
+    if not events.empty:
+        events = events.sort_values("detected_at").reset_index(drop=True)
+        print(f"[crisis] Events: {len(events)} | HIGH={(events['severity']=='HIGH').sum()} "
+              f"MEDIUM={(events['severity']=='MEDIUM').sum()} LOW={(events['severity']=='LOW').sum()}")
+    return events
 
 
 def main() -> None:
@@ -238,11 +308,12 @@ def main() -> None:
 
     print(f"[crisis] TARGET_DATE        : {TARGET_DATE}")
     print(f"[crisis] HDFS_STG_POSTS_CORE: {HDFS_STG_POSTS_CORE}")
-    print(f"[crisis] Z_SCORE_THRESHOLD  : {Z_SCORE_THRESHOLD}")
-    print(f"[crisis] IF_MODEL_PATH      : {IF_MODEL_PATH}")
-    print(f"[crisis] CLF_MODEL_PATH     : {CLF_MODEL_PATH}")
+    print(f"[crisis] GLOBAL_Z_THRESH    : {GLOBAL_Z_THRESH}")
+    print(f"[crisis] NEG_RATIO_MIN      : {NEG_RATIO_MIN}")
+    print(f"[crisis] VOTING_THRESHOLD   : {VOTING_THRESHOLD}/3")
 
-    print("[crisis] Step 1/9: read stg_posts_core from HDFS Parquet")
+    # ── Step 1: stg_posts_core từ HDFS ───────────────────────────────────────
+    print("[crisis] Step 1/8: read stg_posts_core from HDFS Parquet")
     core = (
         spark.read.parquet(HDFS_STG_POSTS_CORE)
         .select("post_id", "source", "author", "created_at", "parent_id")
@@ -256,15 +327,17 @@ def main() -> None:
         spark.stop()
         return
 
-    print("[crisis] Step 2/9: read stg_posts_nlp from ClickHouse")
+    # ── Step 2: stg_posts_nlp từ ClickHouse ──────────────────────────────────
+    print("[crisis] Step 2/8: read stg_posts_nlp from ClickHouse")
     nlp = load_nlp(spark)
     print(f"[crisis] stg_posts_nlp records: {nlp.count():,}")
 
-    print("[crisis] Step 3/9: read hourly_baseline from ClickHouse")
+    # ── Step 3: hourly_baseline từ HDFS ──────────────────────────────────────
+    print("[crisis] Step 3/8: read hourly_baseline from HDFS")
     baseline = load_baseline(spark)
-    print(f"[crisis] hourly_baseline rows: {baseline.count()}")
 
-    print("[crisis] Step 4/9: aggregate hourly structural features")
+    # ── Step 4: aggregate hourly structural features ──────────────────────────
+    print("[crisis] Step 4/8: aggregate hourly structural features")
     core_with_time = (
         core
         .withColumn("date", to_date(col("created_at")))
@@ -282,8 +355,9 @@ def main() -> None:
         )
     )
 
-    print("[crisis] Step 5/9: aggregate hourly sentiment features")
-    core_keys    = core_with_time.select("post_id", "date", "hour")
+    # ── Step 5: aggregate hourly sentiment features ───────────────────────────
+    print("[crisis] Step 5/8: aggregate hourly sentiment features")
+    core_keys     = core_with_time.select("post_id", "source", "date", "hour")
     nlp_with_time = (
         nlp.join(core_keys, on="post_id", how="inner")
         .withColumn("is_neg", when(col("sentiment_label") == "negative", 1.0).otherwise(0.0))
@@ -298,125 +372,99 @@ def main() -> None:
         )
     )
 
-    print("[crisis] Step 6/9: compute z_score and global_spike")
+    # ── Step 6: join và toPandas ──────────────────────────────────────────────
+    print("[crisis] Step 6/8: join features and collect to driver")
     hourly = (
         hourly_base
         .join(hourly_nlp, on=["date", "hour"], how="left")
-        .join(baseline.select("hour", "baseline_median", "baseline_std"), on="hour", how="left")
         .withColumn("neg_ratio",     coalesce(col("neg_ratio"),     lit(0.0)).cast("float"))
         .withColumn("neg_score_avg", coalesce(col("neg_score_avg"), lit(0.0)).cast("float"))
         .withColumn("voz_neg_ratio", coalesce(col("voz_neg_ratio"), lit(0.0)).cast("float"))
-        .withColumn(
-            "z_score",
-            when(
-                col("baseline_std").isNotNull() & (col("baseline_std") > 0),
-                ((col("comment_count") - col("baseline_median")) / col("baseline_std")).cast("float"),
-            ).otherwise(lit(None).cast("float")),
-        )
-        .withColumn("global_spike", when(col("z_score") > Z_SCORE_THRESHOLD, 1).otherwise(0))
     )
-
-    print("[crisis] Step 7/9: driver-side feature engineering and model inference")
     pdf = hourly.select(
         "date", "hour", "comment_count",
         "unique_posts", "unique_users", "vne_count", "voz_count",
-        "z_score", "global_spike",
         "neg_ratio", "neg_score_avg", "voz_neg_ratio",
     ).toPandas()
+    pdf = pdf.sort_values(["date", "hour"]).reset_index(drop=True)
 
-    pdf["user_diversity"]     = (pdf["unique_users"] / (pdf["comment_count"] + 1)).round(4)
-    pdf["cross_source"]       = (
-        pdf[["vne_count", "voz_count"]].min(axis=1) /
-        (pdf[["vne_count", "voz_count"]].max(axis=1) + 1)
-    ).round(4)
-    pdf["unique_posts_ratio"] = (pdf["unique_posts"] / (pdf["comment_count"] + 1)).round(4)
+    core_pdf = core_with_time.select("post_id", "parent_id", "date", "hour").toPandas()
+    core_pdf["date"] = core_pdf["date"].astype(str)
 
-    history_pdf = load_recent_hourly(spark)
-    if not history_pdf.empty:
-        print(f"[crisis] Loaded {len(history_pdf)} historical hours for velocity rolling window")
-    else:
-        print("[crisis] WARN: no historical data — velocity_ratio and acceleration default to 0")
-    pdf = _compute_velocity(pdf, history_pdf)
-    pdf["z_score"] = pdf["z_score"].fillna(0.0)
+    pps = _compute_pps(core_pdf)
+    pdf = pdf.merge(pps, on="hour", how="left")
+    pdf["signal_post"] = pdf["signal_post"].fillna(0).astype(int)
 
-    if_pipeline  = _load_pkl(IF_MODEL_PATH)
-    clf_pipeline = _load_pkl(CLF_MODEL_PATH)
-    features_if  = _load_features(FEAT1_JSON_PATH, FEATURES_TIER1_DEFAULT)
-    features_clf = _load_features(FEAT2_JSON_PATH, FEATURES_TIER2_DEFAULT)
-    print(f"[crisis] IF  features: {features_if}")
-    print(f"[crisis] CLF features: {features_clf}")
-
-    pdf["if_spike"] = _if_predict(pdf, if_pipeline, features_if)
-    pdf["if_score"] = _if_score(pdf, if_pipeline, features_if)
-    pdf["is_spike"] = ((pdf["global_spike"] == 1) & (pdf["if_spike"] == 1)).astype(int)
-
-    pdf["is_crisis"] = 0
-    spike_mask = pdf["is_spike"] == 1
-    if clf_pipeline is not None and spike_mask.sum() > 0:
-        pdf.loc[spike_mask, "is_crisis"] = _clf_predict(pdf[spike_mask], clf_pipeline, features_clf)
-    elif spike_mask.sum() > 0:
-        pdf.loc[spike_mask, "is_crisis"] = 1
+    # ── Step 7: 3-signal voting ───────────────────────────────────────────────
+    print("[crisis] Step 7/8: 3-signal voting (IF + GlobalSpike + PerPostSpike)")
+    pdf = _apply_signals(pdf, baseline)
 
     pdf["date"] = pdf["date"].astype(str)
-    for c in ("hour", "comment_count", "global_spike", "if_spike", "is_spike", "is_crisis"):
+    for c in ("hour", "comment_count", "signal_if", "signal_global", "signal_post",
+              "votes", "is_crisis", "is_trending"):
         pdf[c] = pdf[c].astype(int)
-    for c in ("z_score", "neg_ratio", "neg_score_avg"):
+    for c in ("neg_ratio", "neg_score_avg", "vol_z", "neg_z", "mv_z", "if_score"):
         pdf[c] = pdf[c].astype(float)
 
-    print("[crisis] Step 8/9: write stg_crisis_hourly to HDFS")
-    final_raw = spark.createDataFrame(
-        pdf[["date", "hour", "comment_count", "z_score",
-             "global_spike", "if_spike", "is_spike", "is_crisis",
+    # ── Step 8: write stg_crisis_hourly to HDFS ───────────────────────────────
+    print("[crisis] Step 8/8: write results to HDFS and ClickHouse")
+    final_spark = spark.createDataFrame(
+        pdf[["date", "hour", "comment_count",
+             "vol_z", "neg_z", "mv_z",
+             "signal_if", "signal_global", "signal_post",
+             "votes", "is_crisis", "is_trending",
              "neg_ratio", "neg_score_avg"]]
-    )
-    final = final_raw.select(
+    ).select(
         to_date(col("date")).alias("date"),
         col("hour").cast("int"),
         col("comment_count").cast("int"),
-        col("z_score").cast("float"),
-        col("global_spike").cast("int"),
-        col("if_spike").cast("int"),
-        col("is_spike").cast("int"),
+        col("vol_z").cast("float"),
+        col("neg_z").cast("float"),
+        col("mv_z").cast("float"),
+        col("signal_if").cast("int"),
+        col("signal_global").cast("int"),
+        col("signal_post").cast("int"),
+        col("votes").cast("int"),
         col("is_crisis").cast("int"),
+        col("is_trending").cast("int"),
         col("neg_ratio").cast("float"),
         col("neg_score_avg").cast("float"),
     )
-    n_rows   = final.count()
-    n_spike  = final.filter(col("is_spike") == 1).count()
-    n_crisis = final.filter(col("is_crisis") == 1).count()
-    print(f"[crisis] Result: {n_rows} hours | {n_spike} spike | {n_crisis} crisis")
-    final.write.mode("overwrite").parquet(
+    n_rows     = final_spark.count()
+    n_crisis   = final_spark.filter(col("is_crisis")   == 1).count()
+    n_trending = final_spark.filter(col("is_trending")  == 1).count()
+    print(f"[crisis] Result: {n_rows} hours | {n_crisis} crisis | {n_trending} trending")
+    final_spark.write.mode("overwrite").parquet(
         f"{HDFS_STG_BASE}/stg_crisis_hourly/date={TARGET_DATE}"
     )
-    print(f"[crisis] Wrote {n_rows} rows to HDFS stg_crisis_hourly/date={TARGET_DATE}")
-    final.orderBy("hour").show(24, truncate=False)
+    print(f"[crisis] Wrote {n_rows} rows → HDFS stg_crisis_hourly/date={TARGET_DATE}")
+    final_spark.orderBy("hour").show(24, truncate=False)
 
-    print("[crisis] Step 9/9: build and ingest stg_crisis_events")
-
+    # ── Step 9: build events và ingest ────────────────────────────────────────
     crisis_hour_set = set(int(h) for h in pdf.loc[pdf["is_crisis"] == 1, "hour"].tolist())
-
     post_ids_by_hour: dict[int, list[str]] = {}
     if crisis_hour_set:
         for row in get_evidence_posts(core_with_time, nlp, crisis_hour_set):
             post_ids_by_hour.setdefault(int(row["hour"]), []).append(str(row["parent_id"]))
-        print(f"[crisis] Crisis hours: {len(crisis_hour_set)} | evidence posts: {len(post_ids_by_hour)}")
+        print(f"[crisis] Crisis hours: {len(crisis_hour_set)} | evidence posts: "
+              f"{sum(len(v) for v in post_ids_by_hour.values())}")
 
-    events_pdf = build_all_events(pdf, TARGET_DATE, post_ids_by_hour=post_ids_by_hour)
+    events_pdf = build_events(pdf, TARGET_DATE, post_ids_by_hour)
 
     if not events_pdf.empty:
-        print(f"[crisis] Events: {len(events_pdf)} CRISIS")
-        print(events_pdf[["detected_at", "severity", "neg_ratio", "trigger_conditions"]].to_string())
+        print(events_pdf[["detected_at", "severity", "anomaly_score",
+                          "neg_ratio", "trigger_conditions"]].to_string())
 
         events_schema = StructType([
-            StructField("event_id",           StringType(),                False),
-            StructField("detected_at",        TimestampType(),             False),
-            StructField("severity",           StringType(),                True),
-            StructField("anomaly_score",      DoubleType(),                True),
-            StructField("neg_ratio",          FloatType(),                 True),
-            StructField("mention_velocity",   FloatType(),                 True),
-            StructField("trigger_conditions", ArrayType(StringType()),     True),
-            StructField("affected_topics",    ArrayType(IntegerType()),    True),
-            StructField("evidence_post_ids",  ArrayType(StringType()),     True),
+            StructField("event_id",           StringType(),             False),
+            StructField("detected_at",        TimestampType(),          False),
+            StructField("severity",           StringType(),             True),
+            StructField("anomaly_score",      DoubleType(),             True),
+            StructField("neg_ratio",          FloatType(),              True),
+            StructField("mention_velocity",   FloatType(),              True),
+            StructField("trigger_conditions", ArrayType(StringType()),  True),
+            StructField("affected_topics",    ArrayType(IntegerType()), True),
+            StructField("evidence_post_ids",  ArrayType(StringType()),  True),
         ])
         events_pdf["detected_at"] = pd.to_datetime(events_pdf["detected_at"])
         events_spark = spark.createDataFrame(
@@ -434,7 +482,8 @@ def main() -> None:
             truncate=False,
         )
     else:
-        print("[crisis] No events today.")
+        print("[crisis] No crisis events today.")
+
     spark.stop()
 
 
