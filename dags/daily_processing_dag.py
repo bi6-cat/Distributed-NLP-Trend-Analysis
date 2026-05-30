@@ -46,18 +46,14 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.operators.dummy import DummyOperator
 from airflow.providers.apache.spark.operators.spark_submit import SparkSubmitOperator
-from airflow.sensors.external_task import ExternalTaskSensor
-from airflow.utils.dates import days_ago
 
 # ── Cấu hình ──────────────────────────────────────────────────────────────────
 
-SPARK_MASTER      = "spark://spark-master:7077"
-CLICKHOUSE_HOST   = "clickhouse"
-CLICKHOUSE_DB     = "tech_radar"
+SPARK_MASTER        = "spark://spark-master:7077"
+CLICKHOUSE_HOST     = "clickhouse"
+CLICKHOUSE_DB       = "tech_radar"
 HDFS_STG_POSTS_CORE = "hdfs://namenode:9000/user/zett/staged/stg_posts_core"
-IF_MODEL_PATH     = "/opt/airflow/models/isolation_forest_hourly.pkl"
-CLF_MODEL_PATH    = "/opt/airflow/models/crisis_classifier.pkl"
-SPARK_SUBMIT_CONN = "spark_default"   # Airflow Connection ID cho Spark
+SPARK_SUBMIT_CONN   = "spark_default"
 
 default_args = {
     "owner":             "member4-nlp-engineer",
@@ -68,7 +64,7 @@ default_args = {
     "email_on_retry":    False,
     "retries":           2,
     "retry_delay":       timedelta(minutes=5),
-    "start_date":        days_ago(1),
+    "start_date":        datetime(2026, 2, 28),
 }
 
 # ── DAG ───────────────────────────────────────────────────────────────────────
@@ -88,37 +84,9 @@ with DAG(
 
     start = DummyOperator(task_id="start")
 
-    # ── Sensor 1: chờ M2 spark_cleaning xong ─────────────────────────────────
-    # execution_delta=2h: DAG này execution_date=04:00, upstream execution_date=02:00
-    # → sensor tìm run của daily_processing_pipeline có execution_date = 04:00 - 2h = 02:00
-    #
-    # VERIFY SAU DEPLOY: trigger manual cả 2 DAG cùng ngày, kiểm tra sensor pass.
-    # Nếu timeout → thử execution_delta=timedelta(0) hoặc dùng execution_date_fn:
-    #   execution_date_fn=lambda dt: dt.replace(hour=2, minute=0, second=0, microsecond=0)
-    wait_for_stg_core = ExternalTaskSensor(
-        task_id="wait_for_stg_core",
-        external_dag_id="daily_processing_pipeline",
-        external_task_id="spark_cleaning",
-        execution_delta=timedelta(hours=2),
-        timeout=3600,          # tối đa 60 phút chờ
-        poke_interval=60,      # kiểm tra mỗi 60 giây
-        mode="reschedule",     # nhả slot khi chờ, không block worker
-        soft_fail=False,
-    )
+    wait_for_stg_core = DummyOperator(task_id="wait_for_stg_core")
 
-    # ── Sensor 2: chờ M4 sentiment_analysis xong ─────────────────────────────
-    # Cùng execution_delta=2h như sensor 1 — sentiment_analysis nằm trong
-    # cùng DAG daily_processing_pipeline (schedule 02:00)
-    wait_for_sentiment = ExternalTaskSensor(
-        task_id="wait_for_sentiment",
-        external_dag_id="daily_processing_pipeline",
-        external_task_id="sentiment_analysis",
-        execution_delta=timedelta(hours=2),
-        timeout=3600,
-        poke_interval=60,
-        mode="reschedule",
-        soft_fail=False,
-    )
+    wait_for_sentiment = DummyOperator(task_id="wait_for_sentiment")
 
     # ── Compute Hourly Baseline ───────────────────────────────────────────────
     compute_baseline = SparkSubmitOperator(
@@ -166,10 +134,7 @@ with DAG(
             "CLICKHOUSE_USER":    "app",
             "CLICKHOUSE_PASS":    "",
             "HDFS_STG_POSTS_CORE": HDFS_STG_POSTS_CORE,
-            "IF_MODEL_PATH":      IF_MODEL_PATH,
-            "CLF_MODEL_PATH":     CLF_MODEL_PATH,
-            "Z_SCORE_THRESHOLD":  "2.0",
-            "TARGET_DATE":        "{{ dag_run.conf.get('target_date', '2026-03-02') }}",
+            "TARGET_DATE":        "{{ dag_run.conf.get('target_date', '2026-04-14') }}",
         },
         verbose=False,
     )

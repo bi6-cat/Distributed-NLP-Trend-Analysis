@@ -19,6 +19,7 @@ CLICKHOUSE_PASS = ""
 MODEL_LOCAL_DIR = "/tmp/airflow_models"
 HDFS_MODEL_DIR = "hdfs://namenode:9000/user/zett/models/crisis_detection"
 HDFS_STG_POSTS_CORE = "hdfs://namenode:9000/user/zett/staged/stg_posts_core"
+HDFS_STG_BASE = "hdfs://namenode:9000/user/zett/staged"
 WEBHDFS_HOST = "namenode"
 WEBHDFS_PORT = 9870
 HDFS_USER = "zett"
@@ -26,7 +27,6 @@ SPARK_SUBMIT_CONN = "spark_default"
 
 EXPECTED_MODELS = [
     "isolation_forest_hourly.pkl",
-    "crisis_classifier.pkl",
 ]
 
 default_args = {
@@ -105,6 +105,31 @@ with DAG(
         execution_timeout=timedelta(hours=2),
     )
 
+    compute_baseline = SparkSubmitOperator(
+        task_id="compute_baseline",
+        conn_id=SPARK_SUBMIT_CONN,
+        application="spark_jobs/compute_baseline.py",
+        name="compute_baseline_{{ ds }}",
+        conf={
+            "spark.master": SPARK_MASTER,
+            "spark.cores.max": "1",
+            "spark.executor.cores": "1",
+            "spark.executorEnv.PYTHONPATH": "/opt/airflow",
+        },
+        executor_memory="1g",
+        driver_memory="512m",
+        env_vars={
+            "PYTHONPATH":          "/opt/airflow",
+            "CLICKHOUSE_HOST":     CLICKHOUSE_HOST,
+            "CLICKHOUSE_DB":       CLICKHOUSE_DB,
+            "CLICKHOUSE_USER":     CLICKHOUSE_USER,
+            "CLICKHOUSE_PASS":     CLICKHOUSE_PASS,
+            "HDFS_STG_POSTS_CORE": HDFS_STG_POSTS_CORE,
+            "HDFS_STG_BASE":       HDFS_STG_BASE,
+        },
+        verbose=False,
+    )
+
     verify_hdfs = PythonOperator(
         task_id="verify_hdfs",
         python_callable=task_verify_hdfs,
@@ -113,4 +138,4 @@ with DAG(
 
     end = DummyOperator(task_id="end")
 
-    start >> retrain_models >> verify_hdfs >> end
+    start >> retrain_models >> [verify_hdfs, compute_baseline] >> end
