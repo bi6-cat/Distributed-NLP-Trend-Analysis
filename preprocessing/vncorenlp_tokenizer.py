@@ -1,5 +1,7 @@
+import logging
 import os
-from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class VnCoreNLPTokenizer:
@@ -16,9 +18,13 @@ class VnCoreNLPTokenizer:
         # Dùng absolute path để tránh lỗi relative path trên cluster workers
         self.jar_path   = os.path.abspath(jar_path)
         self._annotator = None   # lazy — chưa load
+        self._disabled = False
+        self._fallback = None
 
     def _get_annotator(self):
         """Load JAR lần đầu khi cần (lazy init)."""
+        if self._disabled:
+            return None
         if self._annotator is None:
             import vncorenlp
             self._annotator = vncorenlp.VnCoreNLP(
@@ -26,7 +32,7 @@ class VnCoreNLPTokenizer:
                 annotators="wseg",
                 max_heap_size="-Xmx512m",
             )
-            print(f"[VnCoreNLPTokenizer] Loaded JAR from {self.jar_path}")
+            logger.info("[VnCoreNLPTokenizer] Loaded JAR from %s", self.jar_path)
         return self._annotator
 
     def tokenize(self, text: str) -> str:
@@ -36,18 +42,26 @@ class VnCoreNLPTokenizer:
         """
         if not text or not text.strip():
             return ""
+        if self._disabled:
+            return self._fallback_tokenize(text)
         try:
             annotator = self._get_annotator()
+            if annotator is None:
+                return self._fallback_tokenize(text)
             sentences = annotator.tokenize(text)
             tokens = [token for sent in sentences for token in sent]
             return " ".join(tokens)
         except Exception as e:
-            print(f"[VnCoreNLPTokenizer] ERROR: {e}, fallback underthesea")
+            self._disabled = True
+            logger.warning("[VnCoreNLPTokenizer] unavailable (%s); fallback to underthesea", e)
             return self._fallback_tokenize(text)
 
     def _fallback_tokenize(self, text: str) -> str:
         try:
+            if self._fallback is not None:
+                return self._fallback(text, format="text")
             from underthesea import word_tokenize
+            self._fallback = word_tokenize
             return word_tokenize(text, format="text")
         except ImportError:
             return text

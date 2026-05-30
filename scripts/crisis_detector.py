@@ -1,101 +1,32 @@
-"""
-Task 3.5 — Crisis Detector: tổng hợp ≥ 2/3 điều kiện → Crisis Alert
-
-Ba điều kiện để xác định khủng hoảng trên một post:
-
-  Cond 1 — ISOLATION FOREST (post-level)
-      Post có chỉ số bất thường tổng thể: velocity cao, engagement đột biến,
-      neg_ratio vượt ngưỡng → IsolationForest đánh dấu is_anomaly=True.
-
-  Cond 2 — GLOBAL SPIKE (platform-level)
-      Ít nhất 1 comment của post này rơi vào giờ mà toàn platform có spike
-      (comment_count > rolling_mean + 2σ trên tất cả posts).
-
-  Cond 3 — PER-POST SPIKE (post-level time series)
-      Bản thân post đang nhận comments với tốc độ bất thường trong cửa sổ
-      thời gian của chính nó (per-post rolling threshold spike).
-
-  → crisis_score = số điều kiện thoả (0-3)
-  → is_crisis = crisis_score ≥ min_conditions  (mặc định 2)
-  → alert_level: HIGH (3/3) | MEDIUM (2/3) | NORMAL (< 2)
-
-Output schema (stg_crisis_alerts):
-  post_id, detected_at, alert_level, crisis_score, is_crisis,
-  cond_isolation_forest, cond_global_spike, cond_post_spike,
-  neg_ratio, velocity, comment_count, engagement_score, anomaly_score,
-  global_spike_buckets, post_spike_buckets
-
-Cách dùng:
-  1. CLI:
-       python scripts/crisis_detector.py \\
-           --comments data/comments.csv \\
-           --output output/crisis_alerts.csv
-
-  2. Import:
-       from scripts.crisis_detector import CrisisDetector
-
-       detector = CrisisDetector(min_conditions=2)
-       alerts   = detector.run(comments_df, sentiments_df)
-       # alerts: DataFrame với schema stg_crisis_alerts
-
-  3. Ghi ClickHouse (sau khi M2 setup xong):
-       detector.write_clickhouse(alerts, host="...", user="...", password="...")
-"""
-
 import os
 import sys
 import argparse
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
 import pandas as pd
-import numpy as np
 
-# Import từ models của Member 4
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from models.isolation_forest import CrisisDetector as IsoDetector, extract_features
+from models.isolation_forest import CrisisDetector as IsoDetector
 from models.rolling_threshold import RollingThreshold
 
-
-
-ALERT_LEVEL = {3: "HIGH", 2: "MEDIUM", 1: "LOW", 0: "NORMAL"}
+SEVERITY_MAP = {3: "HIGH", 2: "MEDIUM", 1: "LOW", 0: "NORMAL"}
 
 OUTPUT_COLUMNS = [
-    "post_id",
+    "event_id",
     "detected_at",
-    "alert_level",
-    "crisis_score", # là tổng số điều kiện thoả (0-3)
-    "is_crisis", 
-    "cond_isolation_forest",
-    "cond_global_spike",
-    "cond_post_spike",
-    # Features từ IsolationForest
-    "neg_ratio",
-    "pos_ratio",
-    "velocity",
-    "mention_count",
-    "engagement_score",
-    "comment_count",
+    "severity",
     "anomaly_score",
-    # Thống kê từ RollingThreshold
-    "global_spike_buckets",
-    "post_spike_buckets",
+    "trigger_conditions",
+    "affected_topics",
+    "neg_ratio",
+    "mention_velocity",
+    "evidence_post_ids",
 ]
 
 
-# ── CrisisDetector 
-
 class CrisisDetector:
-    """
-    Pipeline tổng hợp IsolationForest + RollingThreshold → Crisis Alert.
-
-    Args:
-        min_conditions : số điều kiện tối thiểu để phát alert (mặc định 2)
-        contamination  : tỉ lệ outlier cho IsolationForest (mặc định 0.05)
-        window         : rolling window tính bằng số buckets (mặc định 24)
-        n_sigma        : hệ số sigma cho rolling threshold (mặc định 2.0)
-        freq           : kích thước time bucket (mặc định '1h')
-    """
 
     def __init__(
         self,
@@ -109,33 +40,20 @@ class CrisisDetector:
         self.iso_detector   = IsoDetector(contamination=contamination)
         self.rolling        = RollingThreshold(window=window, n_sigma=n_sigma, freq=freq)
 
-    # Public API 
     def run(
         self,
         comments_df: pd.DataFrame,
         sentiments_df: Optional[pd.DataFrame] = None,
     ) -> pd.DataFrame:
-        """
-        Chạy toàn bộ pipeline phát hiện khủng hoảng.
-
-        Args:
-            comments_df  : raw comments (id_post, comment, time, reactions, ...)
-            sentiments_df: optional — output từ SentimentPredictor
-                           cần cột [post_id, sentiment_label]
-
-        Returns:
-            DataFrame theo schema stg_crisis_alerts, sắp xếp theo crisis_score giảm dần
-        """
         print("[CrisisDetector] Bước 1/3: IsolationForest...")
-        iso_results = self._run_isolation_forest(comments_df, sentiments_df)
+        iso_results = self.iso_detector.detect(comments_df, sentiments_df)
 
-        print("[CrisisDetector] Bước 2/3: Rolling Threshold (global + per-post)...")
-        global_spikes, per_post_spikes = self._run_rolling(comments_df, sentiments_df)
+        print("[CrisisDetector] Bước 2/3: Rolling Threshold...")
+        global_spikes = self.rolling.detect_global(comments_df, sentiments_df, metric="comment_count")
+        per_post_spikes = self.rolling.detect_per_post(comments_df, sentiments_df=sentiments_df, metric="comment_count")
 
-        print("[CrisisDetector] Bước 3/3: Tổng hợp điều kiện → Crisis Alert...")
-        alerts = self._combine(iso_results, global_spikes, per_post_spikes, comments_df)
-
-        return alerts
+        print("[CrisisDetector] Bước 3/3: Tổng hợp điều kiện...")
+        return self._combine(iso_results, global_spikes, per_post_spikes, comments_df)
 
     def run_from_files(
         self,
@@ -143,112 +61,132 @@ class CrisisDetector:
         posts_path: Optional[str] = None,
         sentiments_path: Optional[str] = None,
     ) -> pd.DataFrame:
-        """
-        Load CSV từ M1 → validate qua VozAdapter → run().
-
-        Args:
-            comments_path  : đường dẫn comments.csv
-            posts_path     : đường dẫn posts.csv (tuỳ chọn)
-                             nếu truyền → id_author, author_name được join vào output
-            sentiments_path: file sentiments CSV có cột [post_id, sentiment_label]
-        """
         from schemas.voz_adapter import VozAdapter
 
         adapter = VozAdapter()
-        print(f"[CrisisDetector] Đọc và validate data từ M1...")
-        comments_df, posts_df = adapter.from_csv(comments_path, posts_path)
-        print(f"[CrisisDetector] Comments hợp lệ: {len(comments_df)} rows")
-        if not posts_df.empty:
-            print(f"[CrisisDetector] Posts hợp lệ  : {len(posts_df)} rows")
+        comments_df, _ = adapter.from_csv(comments_path, posts_path)
+        print(f"[CrisisDetector] Comments: {len(comments_df)} rows")
 
         sentiments_df = None
         if sentiments_path and os.path.exists(sentiments_path):
-            print(f"[CrisisDetector] Đọc sentiments: {sentiments_path}")
             sentiments_df = pd.read_csv(sentiments_path)
 
-        alerts = self.run(comments_df, sentiments_df)
+        return self.run(comments_df, sentiments_df)
 
-        # Nếu có posts_df, join thêm id_author + author_name vào output
-        if not posts_df.empty and "id_author" in posts_df.columns:
-            author_info = (
-                posts_df[["id_post", "id_author", "author_name"]]
-                .drop_duplicates(subset=["id_post"])   # tránh tạo duplicate rows
-                .copy()
-            )
-            author_info = author_info.rename(columns={"id_post": "post_id"})
-            author_info["post_id"] = author_info["post_id"].astype(str)
-            alerts["post_id"] = alerts["post_id"].astype(str)
-            alerts = alerts.merge(author_info, on="post_id", how="left")
+    def run_from_clickhouse(
+        self,
+        host: str,
+        database: str = "tech_radar",
+        user: str = "default",
+        password: str = "",
+        write_back: bool = True,
+        limit: Optional[int] = None,
+    ) -> pd.DataFrame:
+        try:
+            import clickhouse_connect
+        except ImportError:
+            raise ImportError("Chạy: pip install clickhouse-connect")
 
-        return alerts
+        client = clickhouse_connect.get_client(host=host, database=database, username=user, password=password)
+
+        limit_clause = f"LIMIT {limit}" if limit else ""
+
+        print("[CrisisDetector] Đọc stg_posts_core (comments only)...")
+        posts_df = client.query_df(f"""
+            SELECT
+                parent_id      AS id_post,
+                body           AS comment,
+                created_at     AS time,
+                reaction_count AS reactions,
+                comment_count
+            FROM stg_posts_core
+            WHERE parent_id IS NOT NULL
+            {limit_clause}
+        """)
+        posts_df = posts_df.dropna(subset=["time"])
+        posts_df["time"] = pd.to_datetime(posts_df["time"]).dt.strftime("%b %d, %Y at %I:%M %p")
+        # _parse_reactions expect string "Ưng (3) | Haha (1)" — convert int → string
+        posts_df["reactions"] = posts_df["reactions"].apply(lambda x: f"({int(x)})" if pd.notna(x) else "")
+        print(f"[CrisisDetector] comments: {len(posts_df)} rows")
+
+        print("[CrisisDetector] Đọc stg_posts_nlp (comments only)...")
+        sentiments_df = client.query_df(f"""
+            SELECT c.parent_id AS post_id, n.sentiment_label
+            FROM stg_posts_nlp n
+            JOIN stg_posts_core c ON c.post_id = n.post_id
+            WHERE c.parent_id IS NOT NULL
+            {limit_clause}
+        """)
+        print(f"[CrisisDetector] stg_posts_nlp comments: {len(sentiments_df)} rows")
+
+        events = self.run(posts_df, sentiments_df if not sentiments_df.empty else None)
+
+        if write_back and not events.empty:
+            self.write_clickhouse(events, host=host, database=database, user=user, password=password)
+
+        return events
 
     def write_clickhouse(
         self,
         alerts: pd.DataFrame,
         host: str,
-        database: str = "default",
+        database: str = "tech_radar",
         user: str = "default",
         password: str = "",
-        table: str = "stg_crisis_alerts",
+        table: str = "stg_crisis_events",
+    ) -> None:
+        try:
+            import clickhouse_connect
+        except ImportError:
+            raise ImportError("Chạy: pip install clickhouse-connect")
+
+        client = clickhouse_connect.get_client(host=host, database=database, username=user, password=password)
+        df = alerts[OUTPUT_COLUMNS].copy()
+        if "detected_at" in df.columns:
+            df["detected_at"] = pd.to_datetime(df["detected_at"]).dt.tz_localize(None)
+        client.insert_df(table, df)
+        print(f"[CrisisDetector] Đã ghi {len(df)} events vào {table}")
+
+    def write_hourly_events(
+        self,
+        hourly_df: pd.DataFrame,
+        host: str,
+        database: str = "tech_radar",
+        user: str = "default",
+        password: str = "",
+        table: str = "stg_crisis_events",
     ) -> None:
         """
-        Ghi alerts vào ClickHouse (dùng sau khi M2 setup xong).
+        Ghi DataFrame hourly aggregation vào bảng stg_crisis_events.
 
-        Requires: pip install clickhouse-connect
+        hourly_df phải có các cột:
+            date, hour, comment_count, z_score,
+            global_spike, if_spike, is_spike, is_crisis,
+            neg_ratio, neg_score_avg
         """
         try:
             import clickhouse_connect
         except ImportError:
-            raise ImportError(
-                "clickhouse-connect chưa cài.\n"
-                "Chạy: pip install clickhouse-connect\n"
-                "Hoặc yêu cầu Member 2 setup ClickHouse trước."
-            )
+            raise ImportError("Chạy: pip install clickhouse-connect")
 
-        client = clickhouse_connect.get_client(
-            host=host, database=database, username=user, password=password
-        )
-        # Đảm bảo detected_at là string ISO để ClickHouse nhận
-        df = alerts.copy()
-        if "detected_at" in df.columns:
-            df["detected_at"] = df["detected_at"].astype(str)
+        HOURLY_COLUMNS = [
+            "date", "hour", "comment_count", "z_score",
+            "global_spike", "if_spike", "is_spike", "is_crisis",
+            "neg_ratio", "neg_score_avg",
+        ]
+        missing = [c for c in HOURLY_COLUMNS if c not in hourly_df.columns]
+        if missing:
+            raise ValueError(f"hourly_df thiếu cột: {missing}")
 
-        client.insert_df(table, df[OUTPUT_COLUMNS])
-        print(f"[CrisisDetector] Đã ghi {len(df)} alerts vào ClickHouse {table}")
-
-    # Internal steps
-
-    def _run_isolation_forest(
-        self,
-        comments_df: pd.DataFrame,
-        sentiments_df: Optional[pd.DataFrame],
-    ) -> pd.DataFrame:
-        """
-        Chạy IsolationForest → trả DataFrame với index=post_id.
-        Columns: neg_ratio, pos_ratio, velocity, mention_count,
-                 engagement_score, comment_count, anomaly_score, is_anomaly
-        """
-        return self.iso_detector.detect(comments_df, sentiments_df)
-
-    def _run_rolling(
-        self,
-        comments_df: pd.DataFrame,
-        sentiments_df: Optional[pd.DataFrame],
-    ):
-        """
-        Chạy RollingThreshold global + per-post.
-
-        Returns:
-            global_spikes    : DataFrame index=bucket, cột is_spike
-            per_post_spikes  : dict {post_id: DataFrame}
-        """
-        global_spikes = self.rolling.detect_global(
-            comments_df, sentiments_df, metric="comment_count"
-        )
-        per_post_spikes = self.rolling.detect_per_post(
-            comments_df, sentiments_df=sentiments_df, metric="comment_count"
-        )
-        return global_spikes, per_post_spikes
+        client = clickhouse_connect.get_client(host=host, database=database, username=user, password=password)
+        df = hourly_df[HOURLY_COLUMNS].copy()
+        df["date"] = pd.to_datetime(df["date"]).dt.date
+        df["hour"] = df["hour"].astype("uint8")
+        df["comment_count"] = df["comment_count"].astype("uint32")
+        for col in ("global_spike", "if_spike", "is_spike", "is_crisis"):
+            df[col] = df[col].astype("uint8")
+        client.insert_df(table, df)
+        print(f"[CrisisDetector] Đã ghi {len(df)} hourly events vào {table}")
 
     def _combine(
         self,
@@ -257,216 +195,124 @@ class CrisisDetector:
         per_post_spikes: dict,
         comments_df: pd.DataFrame,
     ) -> pd.DataFrame:
-        """
-        Kết hợp 3 nguồn tín hiệu → bảng crisis_alerts.
-        """
         from models.rolling_threshold import _parse_time_series
 
-        df = comments_df.copy()
-        df = df.rename(columns={"id_post": "post_id"})
-        df["dt"]     = _parse_time_series(df["time"])
-        df["bucket"] = df["dt"].dt.floor(self.rolling.freq)
+        df = comments_df.copy().rename(columns={"id_post": "post_id"})
+        df["bucket"] = _parse_time_series(df["time"]).dt.floor(self.rolling.freq)
 
-        # Tập hợp các spike buckets toàn cục
-        global_spike_buckets = set(
-            global_spikes[global_spikes["is_spike"]].index.tolist()
-        )
+        global_spike_buckets = set(global_spikes[global_spikes["is_spike"]].index.tolist())
 
         records = []
         for post_id in iso_results.index:
-            # --- Condition 1: IsolationForest ---
             cond1 = bool(iso_results.loc[post_id, "is_anomaly"])
+            cond2 = len(set(df[df["post_id"] == post_id]["bucket"].dropna()) & global_spike_buckets) > 0
+            cond3 = post_id in per_post_spikes and int(per_post_spikes[post_id]["is_spike"].sum()) > 0
 
-            # --- Condition 2: Global spike ---
-            # Post có ít nhất 1 comment trong giờ bị đánh dấu global spike
-            post_buckets = set(
-                df[df["post_id"] == post_id]["bucket"].dropna().tolist()
-            )
-            global_hits = len(post_buckets & global_spike_buckets)
-            cond2 = global_hits > 0
-
-            # --- Condition 3: Per-post spike ---
-            post_spike_count = 0
-            if post_id in per_post_spikes:
-                post_spike_count = int(per_post_spikes[post_id]["is_spike"].sum())
-            cond3 = post_spike_count > 0
-
-            # --- Crisis score & level ---
-            score = int(cond1) + int(cond2) + int(cond3)
-            is_crisis = score >= self.min_conditions
+            score    = int(cond1) + int(cond2) + int(cond3)
+            severity = SEVERITY_MAP.get(score, "NORMAL")
+            triggers = (["isolation_forest"] if cond1 else []) + \
+                       (["global_spike"]     if cond2 else []) + \
+                       (["per_post_spike"]   if cond3 else [])
 
             records.append({
-                "post_id":               post_id,
-                "detected_at":           datetime.now(timezone.utc).isoformat(),
-                "alert_level":           ALERT_LEVEL.get(score, "NORMAL"),
-                "crisis_score":          score,
-                "is_crisis":             is_crisis,
-                "cond_isolation_forest": cond1,
-                "cond_global_spike":     cond2,
-                "cond_post_spike":       cond3,
-                # Features từ IsolationForest
-                "neg_ratio":             float(iso_results.loc[post_id, "neg_ratio"]),
-                "pos_ratio":             float(iso_results.loc[post_id, "pos_ratio"]),
-                "velocity":              float(iso_results.loc[post_id, "velocity"]),
-                "mention_count":         float(iso_results.loc[post_id, "mention_count"]),
-                "engagement_score":      float(iso_results.loc[post_id, "engagement_score"]),
-                "comment_count":         float(iso_results.loc[post_id, "comment_count"]),
-                "anomaly_score":         float(iso_results.loc[post_id, "anomaly_score"]),
-                # Thống kê rolling
-                "global_spike_buckets":  global_hits,
-                "post_spike_buckets":    post_spike_count,
+                "event_id":           str(uuid.uuid4()),
+                "detected_at":        datetime.now(timezone.utc).isoformat(),
+                "severity":           severity,
+                "anomaly_score":      float(iso_results.loc[post_id, "anomaly_score"]),
+                "trigger_conditions": triggers,
+                "affected_topics":    [],
+                "neg_ratio":          float(iso_results.loc[post_id, "neg_ratio"]),
+                "mention_velocity":   float(iso_results.loc[post_id, "velocity"]),
+                "evidence_post_ids":  [str(post_id)],
+                "_crisis_score":      score,
+                "_is_crisis":         score >= self.min_conditions,
             })
 
-        alerts = pd.DataFrame(records, columns=OUTPUT_COLUMNS)
-        alerts = alerts.sort_values(["crisis_score", "anomaly_score"],
-                                    ascending=[False, True])
-        return alerts.reset_index(drop=True)
+        events = pd.DataFrame(records)
+        return events.sort_values(["_crisis_score", "anomaly_score"], ascending=[False, True]).reset_index(drop=True)
 
 
-#  Report 
-
-def print_report(alerts: pd.DataFrame, top_n: int = 10) -> None:
-    """In báo cáo tổng hợp crisis alerts."""
-    total      = len(alerts)
-    n_crisis   = alerts["is_crisis"].sum()
-    n_high     = (alerts["alert_level"] == "HIGH").sum()
-    n_medium   = (alerts["alert_level"] == "MEDIUM").sum()
+def print_report(events: pd.DataFrame, top_n: int = 10) -> None:
+    total    = len(events)
+    n_crisis = events["_is_crisis"].sum() if "_is_crisis" in events.columns else events["severity"].isin(["HIGH", "MEDIUM"]).sum()
+    n_high   = (events["severity"] == "HIGH").sum()
+    n_medium = (events["severity"] == "MEDIUM").sum()
 
     print(f"\n{'='*65}")
-    print(f"  CRISIS DETECTION REPORT — TỔNG HỢP 3 ĐIỀU KIỆN")
+    print(f"  CRISIS DETECTION REPORT")
     print(f"{'='*65}")
-    print(f"  Tổng posts phân tích : {total}")
-    print(f"  Posts là crisis      : {n_crisis}  ({n_crisis/total*100:.1f}%)")
-    print(f"    └─ HIGH  (3/3)     : {n_high}")
-    print(f"    └─ MEDIUM(2/3)     : {n_medium}")
+    print(f"  Tổng posts  : {total}")
+    print(f"  Crisis      : {n_crisis} ({n_crisis/total*100:.1f}%)")
+    print(f"    HIGH (3/3): {n_high}")
+    print(f"    MED  (2/3): {n_medium}")
     print(f"{'='*65}")
 
-    crisis_posts = alerts[alerts["is_crisis"]]
-    if crisis_posts.empty:
+    crisis_events = events[events["severity"].isin(["HIGH", "MEDIUM"])]
+    if crisis_events.empty:
         print("  Không phát hiện crisis nào.\n")
         return
 
-    print(f"\n  Top {min(top_n, len(crisis_posts))} crisis posts:\n")
-    display_cols = [
-        "post_id", "alert_level", "crisis_score",
-        "cond_isolation_forest", "cond_global_spike", "cond_post_spike",
-        "velocity", "comment_count", "global_spike_buckets", "post_spike_buckets",
-    ]
-    disp = crisis_posts[display_cols].head(top_n)
-    # Rename cho gọn
-    disp = disp.rename(columns={
-        "cond_isolation_forest": "cond_iso",
-        "cond_global_spike":     "cond_glob",
-        "cond_post_spike":       "cond_post",
-        "global_spike_buckets":  "g_spikes",
-        "post_spike_buckets":    "p_spikes",
-    })
+    disp = crisis_events[["event_id", "severity", "anomaly_score", "neg_ratio", "mention_velocity", "trigger_conditions"]].head(top_n).copy()
+    disp["event_id"] = disp["event_id"].str[:8] + "..."
+    disp["trigger_conditions"] = disp["trigger_conditions"].apply(lambda x: ",".join(x) if isinstance(x, list) else x)
+    print(f"\n  Top {min(top_n, len(crisis_events))} crisis events:\n")
     print(disp.to_string(index=False))
+
+    print("\n  Tần suất trigger conditions:")
+    for name, label in [("isolation_forest", "IsolationForest"), ("global_spike", "GlobalSpike"), ("per_post_spike", "PerPostSpike")]:
+        n = crisis_events["trigger_conditions"].apply(lambda x: name in x if isinstance(x, list) else False).sum()
+        print(f"    {label:20s}: {n}/{n_crisis} ({n/max(n_crisis,1)*100:.0f}%)")
     print()
 
-    # Phân tích điều kiện
-    print("  Phân tích tần suất điều kiện (trên crisis posts):")
-    for cond_col, label in [
-        ("cond_isolation_forest", "IsolationForest"),
-        ("cond_global_spike",     "GlobalSpike"),
-        ("cond_post_spike",       "PostSpike"),
-    ]:
-        n = crisis_posts[cond_col].sum()
-        print(f"    {label:20s}: {n}/{n_crisis} ({n/n_crisis*100:.0f}%)")
-    print()
-
-
-#  CLI 
 
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8")
 
-    parser = argparse.ArgumentParser(
-        description="Crisis Detector — tổng hợp IsolationForest + RollingThreshold"
-    )
-    parser.add_argument(
-        "--comments",
-        default="data/comments.csv",
-        help="Đường dẫn tới comments.csv",
-    )
-    parser.add_argument(
-        "--posts",
-        default=None,
-        help="Đường dẫn tới posts.csv (tuỳ chọn, để join id_author + author_name)",
-    )
-    parser.add_argument(
-        "--sentiments",
-        default=None,
-        help="File sentiments CSV có cột [post_id, sentiment_label] (tuỳ chọn)",
-    )
-    parser.add_argument(
-        "--min_conditions",
-        type=int,
-        default=2,
-        help="Số điều kiện tối thiểu để phát crisis alert (mặc định: 2)",
-    )
-    parser.add_argument(
-        "--contamination",
-        type=float,
-        default=0.05,
-        help="Contamination cho IsolationForest (mặc định: 0.05)",
-    )
-    parser.add_argument(
-        "--window",
-        type=int,
-        default=24,
-        help="Rolling window (mặc định: 24 buckets)",
-    )
-    parser.add_argument(
-        "--sigma",
-        type=float,
-        default=2.0,
-        help="Hệ số sigma cho rolling threshold (mặc định: 2.0)",
-    )
-    parser.add_argument(
-        "--freq",
-        default="1h",
-        help="Time bucket size (mặc định: 1h)",
-    )
-    parser.add_argument(
-        "--output",
-        default=None,
-        help="Lưu kết quả ra CSV (tuỳ chọn)",
-    )
-    parser.add_argument(
-        "--top",
-        type=int,
-        default=10,
-        help="Số crisis posts in ra (mặc định: 10)",
-    )
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--comments",       default="data/comments.csv")
+    parser.add_argument("--posts",          default=None)
+    parser.add_argument("--sentiments",     default=None)
+    parser.add_argument("--min_conditions", type=int,   default=2)
+    parser.add_argument("--contamination",  type=float, default=0.05)
+    parser.add_argument("--window",         type=int,   default=24)
+    parser.add_argument("--sigma",          type=float, default=2.0)
+    parser.add_argument("--freq",           default="1h")
+    parser.add_argument("--output",         default=None)
+    parser.add_argument("--top",            type=int,   default=10)
+    
+    # Clickhouse args
+    parser.add_argument("--clickhouse-host", default=None, help="Host của ClickHouse để đọc/ghi trực tiếp (thay vì CSV)")
+    parser.add_argument("--clickhouse-db",   default="tech_radar")
+    parser.add_argument("--clickhouse-user", default="root")
+    parser.add_argument("--clickhouse-pass", default="root")
+    parser.add_argument("--clickhouse-limit", type=int, default=None, help="Giới hạn số lượng records khi truy vấn ClickHouse")
     args = parser.parse_args()
 
     detector = CrisisDetector(
-        min_conditions = args.min_conditions,
-        contamination  = args.contamination,
-        window         = args.window,
-        n_sigma        = args.sigma,
-        freq           = args.freq,
+        min_conditions=args.min_conditions,
+        contamination=args.contamination,
+        window=args.window,
+        n_sigma=args.sigma,
+        freq=args.freq,
     )
 
-    alerts = detector.run_from_files(
-        comments_path   = args.comments,
-        posts_path      = args.posts,
-        sentiments_path = args.sentiments,
-    )
-
-    print_report(alerts, top_n=args.top)
-
-    if args.output:
-        os.makedirs(os.path.dirname(args.output) or ".", exist_ok=True)
-        alerts.to_csv(args.output, index=False, encoding="utf-8-sig")
-        print(f"[CrisisDetector] Đã lưu: {args.output}")
-    else:
-        # Luôn lưu mặc định vào output/
-        default_out = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "output", "crisis_alerts.csv"
+    if args.clickhouse_host:
+        print(f"[CrisisDetector] Chế độ ClickHouse (Host: {args.clickhouse_host})")
+        events = detector.run_from_clickhouse(
+            host=args.clickhouse_host,
+            database=args.clickhouse_db,
+            user=args.clickhouse_user,
+            password=args.clickhouse_pass,
+            write_back=True,
+            limit=args.clickhouse_limit
         )
-        os.makedirs(os.path.dirname(default_out), exist_ok=True)
-        alerts.to_csv(default_out, index=False, encoding="utf-8-sig")
-        print(f"[CrisisDetector] Đã lưu mặc định: {default_out}")
+    else:
+        print("[CrisisDetector] Chế độ File CSV/Local")
+        events = detector.run_from_files(args.comments, args.posts, args.sentiments)
+        
+    print_report(events, top_n=args.top)
+
+    out = args.output or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "output", "crisis_events.csv")
+    os.makedirs(os.path.dirname(out), exist_ok=True)
+    events.to_csv(out, index=False, encoding="utf-8-sig")
+    print(f"[CrisisDetector] Đã lưu: {out}")

@@ -765,14 +765,7 @@ def crawl_thread_daily(
     try:
         ensure_runtime_available(started_at, max_runtime_seconds)
         soup = load_page(driver, thread_url)
-        source_total_pages = get_last_page(soup)
-        last_page = 1
-
-        if source_total_pages > 1:
-            logger.info(
-                f"THREAD HAS {source_total_pages} COMMENT PAGES. "
-                "ONLY CRAWL FIRST COMMENT PAGE."
-            )
+        last_page = get_last_page(soup)
 
         last_crawled = int(state.get("last_page", 0) or 0)
 
@@ -785,8 +778,8 @@ def crawl_thread_daily(
 
             logger.info(f"DAILY THREAD PAGE {p}/{last_page}: {page_url}")
 
-            page_soup = soup if p == 1 else load_page(driver, page_url)
-            post, comments = parse_posts(page_soup, driver, page_url)
+            soup = load_page(driver, page_url)
+            post, comments = parse_posts(soup, driver, page_url)
 
             parsed_id = str(post.get("id_post") or id_post)
             post["id_post"] = parsed_id
@@ -804,7 +797,6 @@ def crawl_thread_daily(
                 "done": False,
                 "last_page": p,
                 "total_pages": last_page,
-                "source_total_pages": source_total_pages,
             }
             save_daily_checkpoint(checkpoint)
 
@@ -818,7 +810,6 @@ def crawl_thread_daily(
             "done": True,
             "last_page": last_page,
             "total_pages": last_page,
-            "source_total_pages": source_total_pages,
         }
         save_daily_checkpoint(checkpoint)
 
@@ -908,72 +899,63 @@ def crawl_forum_daily(
 
     new_threads = 0
 
-    ensure_runtime_available(started_at, max_runtime_seconds)
-    page_url = build_page_url(forum_url, 1)
-    logger.info(f"DAILY FORUM FIRST PAGE ONLY: {page_url}")
+    for p in range(1, max_forum_pages + 1):
+        ensure_runtime_available(started_at, max_runtime_seconds)
+        page_url = build_page_url(forum_url, p)
+        logger.info(f"DAILY FORUM PAGE {p}/{max_forum_pages}: {page_url}")
 
-    try:
-        soup = load_page(driver, page_url)
-    except Exception as e:
-        logger.error(f"ERROR DAILY FORUM PAGE {page_url}: {e}")
-        return new_threads
-
-    threads = get_threads(soup, skip_sticky=skip_sticky)
-    logger.info(f"THREADS FOUND: {len(threads)}")
-
-    if not threads:
-        logger.info(f"No thread found, stop forum: {forum_url}")
-        return new_threads
-
-    thread_url = None
-    id_post = None
-
-    for candidate_url in threads:
-        candidate_id = extract_post_id_from_url(candidate_url)
-        if candidate_id:
-            thread_url = candidate_url
-            id_post = candidate_id
+        try:
+            soup = load_page(driver, page_url)
+        except Exception as e:
+            logger.error(f"ERROR DAILY FORUM PAGE {page_url}: {e}")
             break
 
-        logger.warning(f"Skip thread without id_post: {candidate_url}")
+        threads = get_threads(soup, skip_sticky=skip_sticky)
+        logger.info(f"THREADS FOUND: {len(threads)}")
 
-    if not thread_url or not id_post:
-        logger.info(f"No valid first thread found, stop forum: {forum_url}")
-        return new_threads
+        if not threads:
+            logger.info(f"No thread found, stop forum: {forum_url}")
+            break
 
-    logger.info(f"FIRST FORUM THREAD: {thread_url} | id_post={id_post}")
+        for thread_url in threads:
+            ensure_runtime_available(started_at, max_runtime_seconds)
+            id_post = extract_post_id_from_url(thread_url)
 
-    if str(id_post) in existing_post_ids:
-        logger.info(
-            f"MEET OLD FIRST id_post={id_post}. "
-            f"Stop forum and move to next forum: {forum_url}"
-        )
-        return new_threads
+            if not id_post:
+                logger.warning(f"Skip thread without id_post: {thread_url}")
+                continue
 
-    ok = crawl_thread_daily(
-        driver=driver,
-        thread_url=thread_url,
-        checkpoint=checkpoint,
-        existing_post_ids=existing_post_ids,
-        started_at=started_at,
-        max_runtime_seconds=max_runtime_seconds,
-    )
+            if str(id_post) in existing_post_ids:
+                logger.info(
+                    f"MEET OLD id_post={id_post}. "
+                    f"Stop forum and move to next forum: {forum_url}"
+                )
+                return new_threads
 
-    if ok:
-        new_threads += 1
-        thread_counter["count"] += 1
+            ok = crawl_thread_daily(
+                driver=driver,
+                thread_url=thread_url,
+                checkpoint=checkpoint,
+                existing_post_ids=existing_post_ids,
+                started_at=started_at,
+                max_runtime_seconds=max_runtime_seconds,
+            )
 
-    if (
-        LONG_SLEEP_EVERY_THREADS > 0
-        and thread_counter["count"] > 0
-        and thread_counter["count"] % LONG_SLEEP_EVERY_THREADS == 0
-    ):
-        sleep_time = random.uniform(LONG_SLEEP_MIN, LONG_SLEEP_MAX)
-        logger.info(
-            f"LONG SLEEP after "
-            f"{thread_counter['count']} daily threads: {sleep_time:.2f}s"
-        )
-        time.sleep(sleep_time)
+            if ok:
+                new_threads += 1
+                thread_counter["count"] += 1
+
+            if (
+                LONG_SLEEP_EVERY_THREADS > 0
+                and thread_counter["count"] > 0
+                and thread_counter["count"] % LONG_SLEEP_EVERY_THREADS == 0
+            ):
+                sleep_time = random.uniform(LONG_SLEEP_MIN, LONG_SLEEP_MAX)
+                logger.info(
+                    f"LONG SLEEP after "
+                    f"{thread_counter['count']} daily threads: {sleep_time:.2f}s"
+                )
+                time.sleep(sleep_time)
 
     return new_threads
 

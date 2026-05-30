@@ -1,98 +1,104 @@
-# 🚀 Hướng Dẫn Vận Hành Hệ Thống (Local Environment)
+# Local Guide: Chay Pipeline Bang Docker Compose
 
-Tài liệu này hướng dẫn cách sử dụng các script PowerShell để quản lý cụm máy ảo và chạy pipeline xử lý dữ liệu.
+Tai lieu nay dung cho moi truong local Windows/Docker Compose.
 
----
+## 1. Docker mount va vi tri file
 
-## 1. Các Script Chính
+`docker-compose.yml` mount ca repo vao Airflow/Spark:
 
-| Script | Công dụng | Tần suất dùng |
-| :--- | :--- | :--- |
-| `.\deploy_cluster.ps1` | Cài đặt toàn bộ Hadoop, Spark, ClickHouse, Airflow... | Chỉ chạy 1 lần khi mới clone dự án |
-| `.\start_cluster.ps1` | Khởi động các máy ảo và bật dịch vụ (HDFS, Spark, CH) | Mỗi khi bắt đầu làm việc |
-| `.\clean_project.ps1` | Xóa sạch dữ liệu trên HDFS, ClickHouse và file tạm local | Khi muốn chạy lại từ đầu (reset) |
-| `.\run_pipeline.ps1` | Chạy toàn bộ luồng: Ingest -> Spark Cleaning -> ClickHouse | Khi muốn xử lý dữ liệu mới |
-
-> [!IMPORTANT]
-> **Quy tắc vàng:**
-> * **Chỉ chạy `.\deploy_cluster.ps1` một lần duy nhất** khi bạn mới cài dự án vào máy. Quá trình này rất lâu vì nó tải và cài đặt hàng GB phần mềm.
-> * **Từ lần thứ 2 trở đi**, bạn chỉ cần chạy `.\start_cluster.ps1` để bật máy ảo và các dịch vụ. Không bao giờ chạy lại `deploy` trừ khi bạn muốn cài lại toàn bộ hệ thống.
-
----
-
-## 2. Quy Trình Chạy Pipeline Chuẩn
-
-Để chạy dự án một cách an toàn và sạch sẽ nhất, hãy thực hiện theo thứ tự sau:
-
-### Bước 1: Khởi động hệ thống
-Mở PowerShell (quyền Admin nếu cần) tại thư mục project:
-```powershell
-.\start_cluster.ps1
+```text
+./ -> /opt/airflow
+./ -> /opt/spark/work-dir
 ```
 
-### Bước 2: Dọn dẹp dữ liệu cũ (Tùy chọn)
-Nếu bạn muốn xóa sạch dữ liệu cũ để chạy lại bản mới nhất:
-```powershell
-.\clean_project.ps1
+Vi vay cac path local can dat theo convention code hien tai:
+
+```text
+crawlers/data/                         -> /opt/airflow/crawlers/data
+data/stopwords_vi.txt                  -> /opt/airflow/data/stopwords_vi.txt
+data/slang_dict.json                   -> /opt/airflow/data/slang_dict.json
+models/phobert_finetuned/final/        -> /opt/airflow/models/phobert_finetuned/final
 ```
 
-### Bước 3: Thực thi Pipeline xử lý
-Lệnh này sẽ tự động làm 3 việc: Upload dữ liệu thô -> Chạy Spark xử lý -> Đẩy vào ClickHouse.
+Neu model hien co o `models/phobert_finetuned_v2/final`, co 2 cach:
+
+- Copy/rename thanh `models/phobert_finetuned/final` de dung default env.
+- Hoac sua `.env`: `LOCAL_SENTIMENT_MODEL_PATH=/opt/airflow/models/phobert_finetuned_v2/final`.
+
+## 2. Start cluster
+
 ```powershell
-.\run_pipeline.ps1
+docker-compose up -d
+docker-compose ps
 ```
 
----
+Neu can reset sach Docker volume:
 
-## 3. Chạy Lẻ Từng Công Việc (Nâng cao)
+```powershell
+docker-compose down -v
+docker-compose up -d
+```
 
-Nếu pipeline bị lỗi ở một bước, bạn có thể chạy lại riêng bước đó:
+## 3. Chay full pipeline dung Airflow UI
 
-*   **Chỉ Ingest (Đẩy file CSV từ local lên HDFS):**
-    ```powershell
-    python crawlers/upload_to_hdfs.py
-    ```
+1. Airflow UI: <https://airflow.zett.site>
+2. Login: `admin/admin`
+3. Unpause DAG `full_processing_pipeline`
+4. Trigger DAG
 
-*   **Chỉ chạy Spark Job (Làm sạch & Dedup):**
-    ```powershell
-    vagrant ssh master -c "bash /vagrant/scripts/spark_submit_cluster.sh"
-    ```
+DAG se tu chay:
 
-*   **Chỉ nạp dữ liệu vào ClickHouse (HDFS -> ClickHouse):**
-    ```powershell
-    vagrant ssh master -c "bash /vagrant/scripts/ingest_hdfs_to_clickhouse.sh"
-    ```
+```text
+validate_runtime_mounts
+  -> crawl_sources
+  -> upload_reference_files_to_hdfs
+  -> spark_cleaning
+  -> ClickHouse ingest/dbt tasks
+```
 
----
+## 4. Lenh kiem tra nhanh
 
-## 4. Quản lý Dữ liệu Thử nghiệm (Crawlers)
+Kiem tra mount trong container:
 
-Dữ liệu thô dùng để chạy thử pipeline được lưu tại thư mục local: `crawlers/data/`. Mặc định đã có sẵn ít dữ liệu để chạy thử.
+```powershell
+docker exec airflow-scheduler ls /opt/airflow/crawlers/data/voz
+docker exec airflow-scheduler ls /opt/airflow/data/stopwords_vi.txt
+docker exec airflow-scheduler ls /opt/airflow/data/slang_dict.json
+docker exec airflow-scheduler ls /opt/airflow/models/phobert_finetuned/final
+```
 
-### Cách lấy dữ liệu mới:
-Hãy copy dataset vào thư mục này, hoặc thực hiện các bước sau để cào mới dữ liệu trực tiếp từ các website:
+Kiem tra HDFS sau khi DAG chay:
 
-1. **Kích hoạt môi trường ảo (venv):**
-   ```powershell
-   .\venv\Scripts\activate
-   ```
+```powershell
+docker exec namenode hdfs dfs -ls /user/root/ref
+docker exec namenode hdfs dfs -find /user/root/raw_data -type f
+docker exec namenode hdfs dfs -find /user/root/staged/stg_posts_core -name "*.parquet"
+```
 
-2. **Chạy các bản Crawler:**
-   * **VOZ:** `python crawlers/voz.py`
-   * **VatVo:** `python crawlers/vatvo.py`
-   * **VnExpress:** `python crawlers/vnexpress.py`
+Theo doi log:
 
-Dữ liệu sau khi cào sẽ tự động lưu vào `crawlers/data/voz/comments.csv`, v.v. Sau đó bạn có thể chạy `.\run_pipeline.ps1` để xử lý đống dữ liệu mới này.
+```powershell
+docker-compose logs -f airflow-scheduler
+```
 
+## 5. Luu y Windows
 
----
+Khong dung `chmod` trong Windows CMD/PowerShell. Lenh `chmod` chi co trong Linux/Git Bash/WSL. Voi flow hien tai, nen trigger pipeline bang Airflow UI thay vi chay shell script truc tiep.
 
-## 5. Kiểm tra Hệ thống (Web UI)
+## 6. Service URLs
 
-*   **HDFS Web UI:** [http://192.168.56.11:9870](http://192.168.56.11:9870) (Xem file trên kho)
-*   **Spark Master UI:** [http://192.168.56.11:8080](http://192.168.56.11:8080) (Theo dõi job đang chạy)
-*   **ClickHouse HTTP:** [http://192.168.56.14:8123](http://192.168.56.14:8123) (Cơ sở dữ liệu đích)
+- Dashboard: <https://dashboard.zett.site>
+- Airflow UI: <https://airflow.zett.site> (`admin`)
+- HDFS Web UI: <https://hdfs.zett.site>
+- Spark Master UI: <https://spark.zett.site>
+- ClickHouse HTTP: <https://clickhouse.zett.site>
 
----
+Port noi bo van giu nguyen nhu sau:
 
-> **Lưu ý:** Luôn đảm bảo bạn đang ở trong môi trường ảo Python (`venv`) trước khi chạy các script liên quan đến crawler.
+```text
+Dashboard   -> localhost:3000
+Airflow UI  -> localhost:8081
+HDFS Web UI -> localhost:9870
+Spark UI    -> localhost:8080
+ClickHouse  -> localhost:8123
+```

@@ -1,349 +1,268 @@
-"""
-spark_jobs/cleaning_job.py — M2: Spark Cleaning, Schema Normalisation & Dedup Job
-
-Luồng:
-    HDFS /user/zett/raw_data/
-        ├── voz/comments.csv + posts.csv      → VozAdapter
-        ├── vatvo/articles.csv                → VatVoAdapter
-        └── vnexpress/post_vnexpress.csv
-                    /comment_vnexpress.csv    → VnExpressAdapter
-                                ↓
-              TextPreprocessor.clean() (lazy init trong mapPartitions)
-                                ↓
-              MinHashDeduplicator (driver-side LSH, Jaccard ≥ 0.8)
-                                ↓
-    Output Parquet: /user/zett/staged/stg_posts_core/
-
-Cách chạy trên cluster (từ master node):
-    spark-submit \\
-        --master spark://192.168.56.11:7077 \\
-        --num-executors 2 \\
-        --executor-cores 2 \\
-        --executor-memory 4g \\
-        --driver-memory 2g \\
-        --py-files dist/nlp_trend.zip \\
-        --conf spark.executorEnv.NLP_SLANG_DICT=hdfs:///user/zett/ref/slang_dict.json \\
-        --conf spark.executorEnv.NLP_STOPWORDS=hdfs:///user/zett/ref/stopwords_vi.txt \\
-        spark_jobs/cleaning_job.py
-
-    # Bỏ qua bước dedup (test nhanh):
-        spark_jobs/cleaning_job.py --no-dedup
-
-Biến môi trường (tuỳ chỉnh qua --conf spark.executorEnv.*):
-    HDFS_BASE       : hdfs://192.168.56.11:9000
-    NLP_SLANG_DICT  : path slang_dict.json trên HDFS
-    NLP_STOPWORDS   : path stopwords_vi.txt trên HDFS
-    HDFS_OUTPUT     : đường dẫn HDFS ghi kết quả Parquet
-"""
+"""Spark job that normalizes raw crawler CSVs into stg_posts_core Parquet."""
 
 import argparse
 import logging
 import os
+import re
 import sys
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
+from pyspark import StorageLevel
 from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, expr, trim, when
 from pyspark.sql.types import (
-    StructType, StructField,
-    StringType, IntegerType, LongType, TimestampType
+    StructField,
+    LongType,
+    StringType,
+    StructType,
+    TimestampType,
 )
 
-# ── Config (override bằng env var hoặc spark-submit --conf) ──────────────────
-HDFS_BASE  = os.environ.get("HDFS_BASE",    "hdfs://192.168.56.11:9000")
-HDFS_RAW   = os.environ.get("HDFS_INPUT",   f"{HDFS_BASE}/user/zett/raw_data")
-HDFS_OUT   = os.environ.get("HDFS_OUTPUT",  f"{HDFS_BASE}/user/zett/staged/stg_posts_core")
+# Config is intentionally env-driven because Airflow injects these values.
+HDFS_BASE  = os.environ.get("HDFS_BASE",    "hdfs://namenode:9000")
+HDFS_USER  = os.environ.get("HDFS_USER", os.environ.get("HADOOP_USER_NAME", "root"))
+HDFS_HOME  = os.environ.get("HDFS_HOME", f"/user/{HDFS_USER}")
+HDFS_RAW   = os.environ.get("HDFS_INPUT",   f"{HDFS_BASE}{HDFS_HOME}/raw_data")
+HDFS_OUT   = os.environ.get(
+    "HDFS_OUTPUT",
+    os.environ.get("HDFS_STG_POSTS_CORE", f"{HDFS_BASE}{HDFS_HOME}/staged/stg_posts_core"),
+)
 
-SLANG_PATH = os.environ.get("NLP_SLANG_DICT", f"{HDFS_BASE}/user/zett/ref/slang_dict.json")
-STOP_PATH  = os.environ.get("NLP_STOPWORDS",  f"{HDFS_BASE}/user/zett/ref/stopwords_vi.txt")
+SLANG_PATH = os.environ.get("NLP_SLANG_DICT", f"{HDFS_BASE}{HDFS_HOME}/ref/slang_dict.json")
+STOP_PATH  = os.environ.get("NLP_STOPWORDS",  f"{HDFS_BASE}{HDFS_HOME}/ref/stopwords_vi.txt")
+TOKENIZER_BACKEND = os.environ.get("NLP_TOKENIZER", "underthesea").strip().lower()
+VNCORENLP_JAR = os.environ.get("NLP_VNCORENLP_JAR", "vncorenlp/VnCoreNLP-1.1.1.jar")
+WEBHDFS_HOST = os.environ.get("WEBHDFS_HOST", "namenode:9870")
 
-# ── Output Schema (khớp với ClickHouse stg_posts_core) ───────────────────────
 OUTPUT_SCHEMA = StructType([
     StructField("post_id",        StringType(),  False),
     StructField("source",         StringType(),  False),
-    StructField("author",         StringType(),  True),
+    StructField("author",         StringType(),  True),   # ingested as author_name
     StructField("title",          StringType(),  True),
-    StructField("body",           StringType(),  True),   # clean_html() output
-    StructField("clean_text",     StringType(),  True),   # clean() output
-    StructField("segmented_text", StringType(),  True),   # preprocess() output
+    StructField("body",           StringType(),  True),
+    StructField("clean_text",     StringType(),  True),
+    StructField("segmented_text", StringType(),  True),
+    StructField("topic_text",     StringType(),  True),
     StructField("parent_id",      StringType(),  True),
-    StructField("reaction_count", IntegerType(), True),
-    StructField("view_count",     IntegerType(), True),
-    StructField("comment_count",  IntegerType(), True),
-    StructField("created_at",     TimestampType(), True), 
+    StructField("reaction_count", LongType(),    True),
+    StructField("view_count",     LongType(),    True),
+    StructField("comment_count",  LongType(),    True),
+    StructField("created_at",     TimestampType(), True),
     StructField("crawled_at",     TimestampType(), False),
 ])
 
 
-# ── Worker function (chạy trên mỗi Spark executor) ───────────────────────────
-def process_voz_comments(iterator, slang_path: str, stop_path: str, crawled_ts: int):
-    """
-    Lazy init: import Adapter + TextPreprocessor bên trong worker.
-    Nhận iterator các Spark Row (VOZ comments CSV).
-    Yield tuple theo OUTPUT_SCHEMA.
-    """
-    import sys
-    import os as _os
+RAW_INPUTS = (
+    ("voz_comments", "voz/comments.csv"),
+    ("voz_posts", "voz/posts.csv"),
+    ("vatvo_articles", "vatvo/articles.csv"),
+    ("vnexpress_posts", "vnexpress/post_vnexpress.csv"),
+    ("vnexpress_comments", "vnexpress/comment_vnexpress.csv"),
+)
 
-    # Đảm bảo worker tìm được package preprocessing/ và schemas/
-    try:
-        from pyspark import SparkFiles
-        root = SparkFiles.getRootDirectory()
-        if root not in sys.path:
-            sys.path.insert(0, root)
-    except Exception:
-        pass
 
-    from schemas.voz_adapter import VozAdapter
-    from preprocessing.text_cleaner import TextPreprocessor
-
-    adapter      = VozAdapter()
-    preprocessor = TextPreprocessor(
-        slang_dict_path=_resolve_hdfs(slang_path),
-        stopwords_path =_resolve_hdfs(stop_path),
-        use_vncorenlp=False,
+def _text_outputs(preprocessor, content: str) -> tuple[str, str, str, str]:
+    return (
+        preprocessor.clean_html(content),
+        preprocessor.clean(content),
+        preprocessor.preprocess(content),
+        preprocessor.preprocess_for_topic(content),
     )
 
-    rows = list(iterator)
-    raw_dicts = [r.asDict() for r in rows]
-    df = adapter.comments_to_df(raw_dicts)
 
-    for _, row in df.iterrows():
-        content = str(row.get("comment", "") or "")
-        body    = preprocessor.clean_html(content)
-        clean_t = preprocessor.clean(content)
-        seg     = preprocessor.preprocess(content)
-        yield (
-            str(row.get("comment_id", "")),
-            str(row.get("source", "voz")),
-            str(row.get("user", "") or ""),
-            None,                                        # title
-            body,
-            clean_t,
-            seg,
-            str(row.get("id_post", "") or ""),           # parent_id
-            int(row.get("reaction_count", 0) or 0),
-            None,                                        # view_count
-            None,                                        # comment_count
-            _to_datetime(row.get("created_at")),
-            _to_datetime(crawled_ts),
-        )
-
-
-def process_voz_posts(iterator, slang_path: str, stop_path: str, crawled_ts: int):
-    """Xử lý VOZ posts CSV."""
-    import sys
-
-    try:
-        from pyspark import SparkFiles
-        root = SparkFiles.getRootDirectory()
-        if root not in sys.path:
-            sys.path.insert(0, root)
-    except Exception:
-        pass
-
-    from schemas.voz_adapter import VozAdapter
-    from preprocessing.text_cleaner import TextPreprocessor
-
-    adapter      = VozAdapter()
-    preprocessor = TextPreprocessor(
-        slang_dict_path=_resolve_hdfs(slang_path),
-        stopwords_path =_resolve_hdfs(stop_path),
-        use_vncorenlp=False,
+def _out(
+    row,
+    preprocessor,
+    *,
+    content: str,
+    post_id,
+    source: str,
+    author=None,
+    title=None,
+    parent_id=None,
+    reaction_count=None,
+    view_count=None,
+    comment_count=None,
+    created_at=None,
+    crawled_ts: int,
+):
+    body, clean_text, segmented_text, topic_text = _text_outputs(preprocessor, content)
+    return (
+        str(post_id or ""),
+        str(row.get("source", source) or source),
+        str(author or ""),
+        title,
+        body,
+        clean_text,
+        segmented_text,
+        topic_text,
+        None if parent_id is None else str(parent_id or ""),
+        _safe_int(reaction_count),
+        _safe_int(view_count),
+        _safe_int(comment_count),
+        _to_datetime(created_at),
+        _to_datetime(crawled_ts),
     )
 
-    rows = list(iterator)
-    raw_dicts = [r.asDict() for r in rows]
-    df = adapter.posts_to_df(raw_dicts)
 
-    for _, row in df.iterrows():
-        content = str(row.get("title", "") or "")
-        body    = preprocessor.clean_html(content)
-        clean_t = preprocessor.clean(content)
-        seg     = preprocessor.preprocess(content)
-        yield (
-            str(row.get("id_post", "")),
-            str(row.get("source", "voz")),
-            str(row.get("author_name", "") or ""),
-            content,                                     # title
-            body,
-            clean_t,
-            seg,
-            None,                                        # parent_id (post gốc)
-            None,                                        # reaction_count
-            _safe_int(row.get("view_count")),
-            _safe_int(row.get("comment_count")),
-            _to_datetime(row.get("created_at")),
-            _to_datetime(crawled_ts),
-        )
+def _build_voz_comment(row, preprocessor, crawled_ts: int):
+    return _out(
+        row,
+        preprocessor,
+        content=str(row.get("comment", "") or ""),
+        post_id=row.get("comment_id"),
+        source="voz",
+        author=row.get("user"),
+        parent_id=row.get("id_post"),
+        reaction_count=row.get("reaction_count", 0),
+        created_at=row.get("created_at"),
+        crawled_ts=crawled_ts,
+    )
 
 
-def process_vatvo(iterator, slang_path: str, stop_path: str, crawled_ts: int):
-    """Xử lý VatVo articles CSV."""
-    import sys
+def _build_voz_post(row, preprocessor, crawled_ts: int):
+    title = str(row.get("title", "") or "")
+    return _out(
+        row,
+        preprocessor,
+        content=title,
+        post_id=row.get("id_post"),
+        source="voz",
+        author=row.get("author_name"),
+        title=title,
+        view_count=row.get("view_count"),
+        comment_count=row.get("comment_count"),
+        created_at=row.get("created_at"),
+        crawled_ts=crawled_ts,
+    )
 
-    try:
-        from pyspark import SparkFiles
-        root = SparkFiles.getRootDirectory()
-        if root not in sys.path:
-            sys.path.insert(0, root)
-    except Exception:
-        pass
 
+def _build_vatvo_article(row, preprocessor, crawled_ts: int):
+    return _out(
+        row,
+        preprocessor,
+        content=str(row.get("content", "") or ""),
+        post_id=row.get("post_id"),
+        source="vatvo",
+        author=row.get("author"),
+        title=str(row.get("title", "") or ""),
+        created_at=row.get("created_at"),
+        crawled_ts=crawled_ts,
+    )
+
+
+def _build_vnexpress_post(row, preprocessor, crawled_ts: int):
+    return _out(
+        row,
+        preprocessor,
+        content=str(row.get("body", "") or ""),
+        post_id=row.get("post_id"),
+        source="vnexpress",
+        author=row.get("author") or "VnExpress",
+        title=str(row.get("title", "") or ""),
+        reaction_count=row.get("reaction_count"),
+        view_count=row.get("view_count"),
+        comment_count=row.get("comment_count"),
+        created_at=row.get("created_at"),
+        crawled_ts=crawled_ts,
+    )
+
+
+def _build_vnexpress_comment(row, preprocessor, crawled_ts: int):
+    return _out(
+        row,
+        preprocessor,
+        content=str(row.get("body", "") or ""),
+        post_id=row.get("post_id"),
+        source="vnexpress",
+        author=row.get("author"),
+        parent_id=row.get("parent_id"),
+        reaction_count=row.get("reaction_count"),
+        created_at=row.get("created_at"),
+        crawled_ts=crawled_ts,
+    )
+
+
+def _source_adapter(source_key: str):
     from schemas.vatvo_adapter import VatVoAdapter
+    from schemas.vnexpress_adapter import VnExpressAdapter
+    from schemas.voz_adapter import VozAdapter
+
+    adapters = {
+        "voz_comments": (VozAdapter(), "comments_to_df", _build_voz_comment),
+        "voz_posts": (VozAdapter(), "posts_to_df", _build_voz_post),
+        "vatvo_articles": (VatVoAdapter(), "articles_to_df", _build_vatvo_article),
+        "vnexpress_posts": (VnExpressAdapter(), "posts_to_df", _build_vnexpress_post),
+        "vnexpress_comments": (VnExpressAdapter(), "comments_to_df", _build_vnexpress_comment),
+    }
+    return adapters[source_key]
+
+
+def process_partition(iterator, source_key: str, slang_path: str, stop_path: str, crawled_ts: int):
+    rows = [r.asDict() for r in iterator]
+    if not rows:
+        return iter(())
+
+    _ensure_worker_path()
+
     from preprocessing.text_cleaner import TextPreprocessor
 
-    adapter      = VatVoAdapter()
+    adapter, method_name, build_row = _source_adapter(source_key)
     preprocessor = TextPreprocessor(
         slang_dict_path=_resolve_hdfs(slang_path),
-        stopwords_path =_resolve_hdfs(stop_path),
-        use_vncorenlp=False,
+        stopwords_path=_resolve_hdfs(stop_path),
+        use_vncorenlp=TOKENIZER_BACKEND == "vncorenlp",
+        vncorenlp_jar=_resolve_hdfs(VNCORENLP_JAR),
     )
-
-    rows = list(iterator)
-    raw_dicts = [r.asDict() for r in rows]
-    df = adapter.articles_to_df(raw_dicts)
-
-    for _, row in df.iterrows():
-        content = str(row.get("content", "") or "")
-        body    = preprocessor.clean_html(content)
-        clean_t = preprocessor.clean(content)
-        seg     = preprocessor.preprocess(content)
-        yield (
-            str(row.get("post_id", "")),
-            str(row.get("source", "vatvo")),
-            str(row.get("author", "") or ""),
-            str(row.get("title", "") or ""),
-            body,
-            clean_t,
-            seg,
-            None,                                        # parent_id
-            None,                                        # reaction_count
-            None,                                        # view_count
-            None,                                        # comment_count
-            _to_datetime(row.get("created_at")),
-            _to_datetime(crawled_ts),
-        )
+    df = getattr(adapter, method_name)(rows)
+    return (build_row(row, preprocessor, crawled_ts) for _, row in df.iterrows())
 
 
-def process_vnexpress_posts(iterator, slang_path: str, stop_path: str, crawled_ts: int):
-    """Xử lý VnExpress posts CSV."""
-    import sys
-
+def _ensure_worker_path() -> None:
     try:
         from pyspark import SparkFiles
+
         root = SparkFiles.getRootDirectory()
         if root not in sys.path:
             sys.path.insert(0, root)
     except Exception:
         pass
 
-    from schemas.vnexpress_adapter import VnExpressAdapter
-    from preprocessing.text_cleaner import TextPreprocessor
-
-    adapter      = VnExpressAdapter()
-    preprocessor = TextPreprocessor(
-        slang_dict_path=_resolve_hdfs(slang_path),
-        stopwords_path =_resolve_hdfs(stop_path),
-        use_vncorenlp=False,
-    )
-
-    rows = list(iterator)
-    raw_dicts = [r.asDict() for r in rows]
-    df = adapter.posts_to_df(raw_dicts)
-
-    for _, row in df.iterrows():
-        content = str(row.get("body", "") or "")
-        body    = preprocessor.clean_html(content)
-        clean_t = preprocessor.clean(content)
-        seg     = preprocessor.preprocess(content)
-        yield (
-            str(row.get("post_id", "")),
-            str(row.get("source", "vnexpress")),
-            str(row.get("author", "VnExpress")),
-            str(row.get("title", "") or ""),
-            body,
-            clean_t,
-            seg,
-            None,                                        # parent_id
-            _safe_int(row.get("reaction_count")),
-            _safe_int(row.get("view_count")),
-            _safe_int(row.get("comment_count")),
-            _to_datetime(row.get("created_at")),
-            _to_datetime(crawled_ts),
-        )
-
-
-def process_vnexpress_comments(iterator, slang_path: str, stop_path: str, crawled_ts: int):
-    """Xử lý VnExpress comments CSV."""
-    import sys
-
-    try:
-        from pyspark import SparkFiles
-        root = SparkFiles.getRootDirectory()
-        if root not in sys.path:
-            sys.path.insert(0, root)
-    except Exception:
-        pass
-
-    from schemas.vnexpress_adapter import VnExpressAdapter
-    from preprocessing.text_cleaner import TextPreprocessor
-
-    adapter      = VnExpressAdapter()
-    preprocessor = TextPreprocessor(
-        slang_dict_path=_resolve_hdfs(slang_path),
-        stopwords_path =_resolve_hdfs(stop_path),
-        use_vncorenlp=False,
-    )
-
-    rows = list(iterator)
-    raw_dicts = [r.asDict() for r in rows]
-    df = adapter.comments_to_df(raw_dicts)
-
-    for _, row in df.iterrows():
-        content = str(row.get("body", "") or "")
-        body    = preprocessor.clean_html(content)
-        clean_t = preprocessor.clean(content)
-        seg     = preprocessor.preprocess(content)
-        yield (
-            str(row.get("post_id", "")),
-            str(row.get("source", "vnexpress")),
-            str(row.get("author", "") or ""),
-            None,                                        # title
-            body,
-            clean_t,
-            seg,
-            str(row.get("parent_id", "") or ""),
-            _safe_int(row.get("reaction_count")),
-            None,                                        # view_count
-            None,                                        # comment_count
-            _to_datetime(row.get("created_at")),
-            _to_datetime(crawled_ts),
-        )
-
-
-# ── Helper functions ──────────────────────────────────────────────────────────
 
 def _safe_int(val) -> int | None:
-    """Chuyển giá trị sang int, trả None nếu không hợp lệ."""
+    """
+    Chuyển giá trị sang int, trả None nếu không hợp lệ.
+    Xử lý được "Views\\n13,430" → 13430 (lấy số cuối cùng, khớp build_stg_core).
+    """
     if val is None:
         return None
+    s = str(val).replace(",", "").strip()
+    nums = re.findall(r"\d+", s)
+    if not nums:
+        return None
     try:
-        return int(float(str(val)))
-    except (ValueError, TypeError):
+        return int(nums[-1])
+    except ValueError:
         return None
 
-def _to_datetime(ts_val):
-    from datetime import datetime, timezone
+
+def _to_datetime(ts_val) -> datetime | None:
+    """
+    Unix timestamp int/float → datetime UTC. Trả None nếu không hợp lệ.
+    Adapter luôn trả về int timestamp — không trả Epoch giả khi None
+    để tránh ghi dữ liệu rác vào ClickHouse.
+    """
     if ts_val is None:
-        return datetime.fromtimestamp(0, tz=timezone.utc)
+        return None
     try:
-        ts = float(str(ts_val))
-        return datetime.fromtimestamp(ts, tz=timezone.utc)
-    except (ValueError, TypeError):
-        return datetime.fromtimestamp(0, tz=timezone.utc)
+        return datetime.fromtimestamp(float(str(ts_val)), tz=timezone.utc)
+    except (ValueError, TypeError, OSError):
+        return None
 
 
 def _resolve_hdfs(path: str) -> str:
@@ -352,6 +271,7 @@ def _resolve_hdfs(path: str) -> str:
     Cần thiết vì TextPreprocessor đọc file bằng open() — không hiểu HDFS URI.
     """
     import os
+    import shutil
     import subprocess
 
     if not path.startswith("hdfs://"):
@@ -360,12 +280,29 @@ def _resolve_hdfs(path: str) -> str:
     filename = path.split("/")[-1]
     local    = f"/tmp/{filename}"
 
-    if not os.path.exists(local):
+    if os.path.exists(local):
+        return local
+
+    hdfs_bin = shutil.which("hdfs")
+    if hdfs_bin:
         try:
-            subprocess.run(["hdfs", "dfs", "-get", path, local],
+            subprocess.run([hdfs_bin, "dfs", "-get", path, local],
                            check=True, capture_output=True)
+            return local
         except Exception as e:
-            print(f"[WARN] Không copy được {path} về /tmp: {e}")
+            logger.warning("[HDFS] CLI copy failed for %s -> %s: %s", path, local, e)
+
+    try:
+        parsed = urllib.parse.urlparse(path)
+        open_url = (
+            f"http://{WEBHDFS_HOST}/webhdfs/v1{parsed.path}"
+            f"?op=OPEN&user.name={urllib.parse.quote(HDFS_USER)}"
+        )
+        with urllib.request.urlopen(open_url, timeout=60) as response, open(local, "wb") as fh:
+            fh.write(response.read())
+        return local
+    except Exception as e:
+        logger.warning("[HDFS] WebHDFS copy failed for %s -> %s: %s", path, local, e)
     return local
 
 
@@ -378,127 +315,108 @@ def _parse_args() -> argparse.Namespace:
         "--no-dedup",
         action="store_true",
         default=False,
-        help="Bỏ qua bước MinHash LSH deduplication (dùng khi test nhanh)",
+        help="Bỏ qua bước MinHash LSH deduplication (mặc định: dedup đang bật)",
     )
-    # spark-submit truyền thêm các args không liên quan — bỏ qua
     args, _ = parser.parse_known_args()
     return args
 
 
 def main():
-    # Fix encoding tiếng Việt trên terminal Windows
     if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
         import io
+
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
         sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
     cli_args = _parse_args()
     enable_dedup = not cli_args.no_dedup
 
-    spark = SparkSession.builder \
-        .appName("M2_CleaningJob") \
-        .getOrCreate()
-
+    spark = SparkSession.builder.appName("M2_CleaningJob").getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
 
     crawled_ts = int(datetime.now(timezone.utc).timestamp())
+    parallelism = spark.sparkContext.defaultParallelism
+    read_partitions = max(parallelism * 2, 8)
 
-    print(f"[INFO] HDFS RAW    : {HDFS_RAW}")
-    print(f"[INFO] HDFS OUTPUT : {HDFS_OUT}")
-    print(f"[INFO] Slang dict  : {SLANG_PATH}")
-    print(f"[INFO] Stopwords   : {STOP_PATH}")
+    logger.info("[Config] raw=%s output=%s", HDFS_RAW, HDFS_OUT)
+    logger.info("[Config] slang=%s stopwords=%s", SLANG_PATH, STOP_PATH)
+    logger.info("[Config] tokenizer=%s vncorenlp_jar=%s", TOKENIZER_BACKEND, VNCORENLP_JAR)
+    logger.info("[Config] parallelism=%s read_partitions=%s dedup=%s", parallelism, read_partitions, enable_dedup)
 
-    # ── Đọc 5 file CSV từ HDFS ───────────────────────────────────────────────
-    sc = spark.sparkContext
-    read_csv = lambda path: (
-        spark.read
-             .option("header", "true")
-             .option("multiLine", "true")
-             .option("quote", '"')
-             .option("escape", '"')
-             .option("encoding", "UTF-8")
-             .csv(path)
-             .repartition(sc.defaultParallelism * 2)  # Ép Spark chia nhỏ data để chạy trên nhiều Worker
+    def read_csv(relative_path: str):
+        return (
+            spark.read
+            .option("header", "true")
+            .option("multiLine", "true")
+            .option("quote", '"')
+            .option("escape", '"')
+            .option("encoding", "UTF-8")
+            .csv(f"{HDFS_RAW}/{relative_path}")
+            .repartition(read_partitions)
+        )
+
+    rdds = (
+        read_csv(path).rdd.mapPartitions(
+            lambda it, key=source_key: process_partition(it, key, SLANG_PATH, STOP_PATH, crawled_ts)
+        )
+        for source_key, path in RAW_INPUTS
     )
-
-    voz_comments_raw = read_csv(f"{HDFS_RAW}/voz/comments.csv")
-    voz_posts_raw    = read_csv(f"{HDFS_RAW}/voz/posts.csv")
-    vatvo_raw        = read_csv(f"{HDFS_RAW}/vatvo/articles.csv")
-    vne_posts_raw    = read_csv(f"{HDFS_RAW}/vnexpress/post_vnexpress.csv")
-    vne_cmts_raw     = read_csv(f"{HDFS_RAW}/vnexpress/comment_vnexpress.csv")
-
-    print(f"[INFO] VOZ comments : {voz_comments_raw.count():,}")
-    print(f"[INFO] VOZ posts    : {voz_posts_raw.count():,}")
-    print(f"[INFO] VatVo        : {vatvo_raw.count():,}")
-    print(f"[INFO] VnE posts    : {vne_posts_raw.count():,}")
-    print(f"[INFO] VnE comments : {vne_cmts_raw.count():,}")
-
-    # ── mapPartitions → process qua Adapter + TextPreprocessor ───────────────
-
-    voz_c_rdd  = voz_comments_raw.rdd.mapPartitions(
-        lambda it: process_voz_comments(it, SLANG_PATH, STOP_PATH, crawled_ts))
-    voz_p_rdd  = voz_posts_raw.rdd.mapPartitions(
-        lambda it: process_voz_posts(it, SLANG_PATH, STOP_PATH, crawled_ts))
-    vatvo_rdd  = vatvo_raw.rdd.mapPartitions(
-        lambda it: process_vatvo(it, SLANG_PATH, STOP_PATH, crawled_ts))
-    vne_p_rdd  = vne_posts_raw.rdd.mapPartitions(
-        lambda it: process_vnexpress_posts(it, SLANG_PATH, STOP_PATH, crawled_ts))
-    vne_c_rdd  = vne_cmts_raw.rdd.mapPartitions(
-        lambda it: process_vnexpress_comments(it, SLANG_PATH, STOP_PATH, crawled_ts))
-
-    # ── Union tất cả nguồn → DataFrame duy nhất ──────────────────────────────
-    all_rdd = sc.union([voz_c_rdd, voz_p_rdd, vatvo_rdd, vne_p_rdd, vne_c_rdd])
+    all_rdd = spark.sparkContext.union(list(rdds))
     result_df = spark.createDataFrame(all_rdd, OUTPUT_SCHEMA)
 
-    # Lọc body rỗng (do adapter skip hoặc content quá ngắn)
+    def _log_stage_count(label: str, df) -> None:
+        logger.info("[CleanAudit] %s: %s rows", label, f"{df.count():,}")
+
     result_df = result_df.filter(
-        result_df.body.isNotNull() & (result_df.body != "")
+        col("body").isNotNull()
+        & (trim(col("body")) != "")
+        & col("segmented_text").isNotNull()
+        & (trim(col("segmented_text")) != "")
+        & col("topic_text").isNotNull()
+        & (trim(col("topic_text")) != "")
     )
+    _log_stage_count("after text filters", result_df)
 
-    # ── Fix 1: Xóa chính xác các bản ghi trùng lặp 100% (do lỗi crawler) ──────
     result_df = result_df.dropDuplicates()
+    _log_stage_count("after exact dedup", result_df)
 
-    # ── Fix 2: Cấp UUID cho các bản ghi bị lỗi post_id = "None" ───────────────
-    from pyspark.sql.functions import col, expr, when
     result_df = result_df.withColumn(
         "post_id",
-        when(col("post_id").isNull() | (col("post_id") == "None"), expr("uuid()")).otherwise(col("post_id"))
+        when(
+            col("post_id").isNull() | (trim(col("post_id")) == "") | (col("post_id") == "None"),
+            expr("uuid()"),
+        ).otherwise(col("post_id")),
     )
+    result_df = result_df.persist(StorageLevel.MEMORY_AND_DISK)
+    _log_stage_count("after post_id normalization", result_df)
 
-    # Cần cache() vì pipeline rất nặng (NLP) và uuid() là non-deterministic
-    result_df = result_df.cache()
-
-    before_dedup = result_df.count()
-    logger.info(f"[Cleaning] Tổng bản ghi sau clean (đã drop exact duplicates): {before_dedup:,}")
-
-    # Thống kê theo nguồn (trước dedup)
-    result_df.groupBy("source").count().orderBy("source").show()
-
-    # ── MinHash LSH Deduplication ─────────────────────────────────────────────
     if enable_dedup:
-        logger.info("[Dedup] Bắt đầu MinHash LSH dedup (threshold=0.8, num_perm=128, k=5)...")
+        logger.info("[Dedup] Starting Spark MinHashLSH dedup...")
+
         from algorithms.minhash_dedup import MinHashDeduplicator
 
-        deduplicator = MinHashDeduplicator(num_perm=128, threshold=0.8, k=5)
+        target_partitions = max(parallelism * 3, 8)
+        result_df = result_df.repartition(target_partitions)
+        result_df = result_df.persist(StorageLevel.MEMORY_AND_DISK)
+
+        spark.sparkContext.setCheckpointDir(f"{HDFS_BASE}/tmp/spark-checkpoints")
+        result_df = result_df.checkpoint()
+        result_df.count()
+
+        deduplicator = MinHashDeduplicator(
+            num_perm=128,
+            threshold=0.85,
+            k=5,
+        )
         result_df = deduplicator.fit_transform(result_df, spark)
+        _log_stage_count("after MinHashLSH dedup", result_df)
+        logger.info("[Dedup] Completed MinHashLSH dedup")
 
-        after_dedup = result_df.count()
-        removed    = before_dedup - after_dedup
-        pct        = removed / max(before_dedup, 1) * 100
-        logger.info(f"[Dedup] Kết quả: {before_dedup:,} → {after_dedup:,} bản ghi "
-                    f"(loại {removed:,} duplicates, {pct:.1f}%)")
-        total = after_dedup
-    else:
-        logger.info("[Dedup] Bỏ qua (--no-dedup flag được bật)")
-        total = before_dedup
+    result_df.write.mode("overwrite").partitionBy("source").parquet(HDFS_OUT)
 
-    # ── Ghi ra HDFS Parquet ───────────────────────────────────────────────────
-    result_df.write \
-        .mode("overwrite") \
-        .partitionBy("source") \
-        .parquet(HDFS_OUT)
+    logger.info(f"[DONE] Đã ghi Parquet → {HDFS_OUT}")
+    logger.info("[INGEST] Direct ClickHouse ingest is disabled in cleaning_job; DAG handles it.")
 
-    logger.info(f"[DONE] Đã ghi {total:,} bản ghi → {HDFS_OUT}")
     spark.stop()
 
 

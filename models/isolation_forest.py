@@ -1,13 +1,10 @@
 """
 Task 3.3 — Isolation Forest: phát hiện bất thường / khủng hoảng
 
-Mỗi post được biểu diễn bằng vector 6 features tổng hợp từ comments:
-  - neg_ratio       : tỉ lệ comment Negative / tổng
-  - pos_ratio       : tỉ lệ comment Positive / tổng
-  - velocity        : số comments/giờ cao nhất (peak hourly rate)
-  - mention_count   : trung bình số @mention mỗi comment
-  - engagement_score: tổng reactions (lượt Ưng, Haha, v.v.)
-  - comment_count   : tổng số comments của post
+Mỗi post được biểu diễn bằng vector 3 features tổng hợp từ comments:
+  - neg_ratio    : tỉ lệ comment Negative / tổng
+  - velocity     : số comments/giờ cao nhất (peak hourly rate)
+  - comment_count: tổng số comments của post
 
 Isolation Forest từ sklearn sẽ đánh dấu post nào là bất thường (is_anomaly=True).
 
@@ -24,11 +21,9 @@ Cách dùng:
        detector = CrisisDetector(contamination=0.05)
        results_df = detector.detect(comments_df, sentiments_df)
        # results_df columns: post_id, neg_ratio, pos_ratio, velocity,
-       #                     mention_count, engagement_score, comment_count,
-       #                     anomaly_score, is_anomaly
+       #                     comment_count, anomaly_score, is_anomaly
 """
 
-import re
 import os
 import argparse
 import numpy as np
@@ -44,10 +39,7 @@ from sklearn.preprocessing import StandardScaler
 
 FEATURES = [
     "neg_ratio",
-    "pos_ratio",
     "velocity",
-    "mention_count",
-    "engagement_score",
     "comment_count",
 ]
 
@@ -65,23 +57,6 @@ def _parse_time(time_str: str) -> Optional[datetime]:
     except ValueError:
         return None
 
-
-def _parse_reactions(reactions_str) -> int:
-    """
-    Trích tổng số reactions từ chuỗi kiểu 'Ưng (3)' hay 'Haha (1) | Ưng (2)'.
-    Trả 0 nếu NaN hoặc không parse được.
-    """
-    if not isinstance(reactions_str, str):
-        return 0
-    counts = re.findall(r"\((\d+)\)", reactions_str)
-    return sum(int(c) for c in counts)
-
-
-def _count_mentions(text: str) -> int:
-    """Đếm số @mention trong một comment."""
-    if not isinstance(text, str):
-        return 0
-    return len(re.findall(r"@\w+", text))
 
 
 def _compute_velocity(times: pd.Series) -> float:
@@ -112,25 +87,19 @@ def extract_features(
     Tổng hợp features theo từng post_id.
 
     Args:
-        comments_df   : DataFrame với cột [id_post, comment, time, reactions]
-        sentiments_df : DataFrame với cột [post_id, comment_idx, sentiment_label]
-                        Nếu None → neg_ratio/pos_ratio = 0 (dùng khi không có model)
+        comments_df   : DataFrame với cột [id_post, comment, time]
+        sentiments_df : DataFrame với cột [post_id, sentiment_label]
+                        Nếu None → neg_ratio = 0 (dùng khi không có model)
 
     Returns:
-        DataFrame index=post_id với 6 cột FEATURES
+        DataFrame index=post_id với 3 cột FEATURES
     """
     df = comments_df.copy()
     df = df.rename(columns={"id_post": "post_id"})
 
-    # ── reactions & mentions ──────────────────────────────────────────────────
-    df["reactions_count"] = df["reactions"].apply(_parse_reactions)
-    df["n_mentions"]      = df["comment"].apply(_count_mentions)
-
     # ── aggregate per post ────────────────────────────────────────────────────
     agg = df.groupby("post_id").agg(
-        comment_count   = ("comment",         "count"),
-        engagement_score= ("reactions_count", "sum"),
-        mention_count   = ("n_mentions",      "mean"),
+        comment_count = ("comment", "count"),
     )
 
     # velocity (peak hourly rate)
@@ -148,19 +117,17 @@ def extract_features(
         if "id_post" in sent.columns and "post_id" not in sent.columns:
             sent = sent.rename(columns={"id_post": "post_id"})
 
+        sent["sentiment_label"] = sent["sentiment_label"].str.lower()
         sent_agg = sent.groupby("post_id")["sentiment_label"].value_counts(
             normalize=True
         ).unstack(fill_value=0.0)
 
-        for col in ("Negative", "Positive"):
-            if col not in sent_agg.columns:
-                sent_agg[col] = 0.0
+        if "negative" not in sent_agg.columns:
+            sent_agg["negative"] = 0.0
 
-        agg["neg_ratio"] = sent_agg["Negative"].reindex(agg.index, fill_value=0.0)
-        agg["pos_ratio"] = sent_agg["Positive"].reindex(agg.index, fill_value=0.0)
+        agg["neg_ratio"] = sent_agg["negative"].reindex(agg.index, fill_value=0.0).round(5)
     else:
         agg["neg_ratio"] = 0.0
-        agg["pos_ratio"] = 0.0
 
     return agg[FEATURES].fillna(0.0)
 
@@ -297,8 +264,7 @@ def print_report(results: pd.DataFrame, top_n: int = 10) -> None:
         return
 
     print(f"\n  Top {min(top_n, len(anomalies))} posts bất thường nhất:\n")
-    cols_display = ["anomaly_score", "neg_ratio", "velocity",
-                    "engagement_score", "comment_count"]
+    cols_display = ["anomaly_score", "neg_ratio", "velocity", "comment_count"]
     cols_display = [c for c in cols_display if c in anomalies.columns]
     print(anomalies[cols_display].head(top_n).to_string(float_format="{:.3f}".format))
     print()

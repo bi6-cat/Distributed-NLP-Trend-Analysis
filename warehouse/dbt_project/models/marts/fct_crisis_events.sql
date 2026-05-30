@@ -7,7 +7,6 @@
 }}
 
 WITH exploded_topics AS (
-    -- Split array of topic IDs into separate rows
     SELECT
         event_id,
         arrayJoin(affected_topics) AS tid
@@ -15,18 +14,16 @@ WITH exploded_topics AS (
 ),
 
 with_labels AS (
-    -- Join with topics table to get topic labels
     SELECT
         ex.event_id,
         ex.tid,
         coalesce(t.label, concat('topic_', toString(ex.tid))) AS tid_label
     FROM exploded_topics AS ex
-    LEFT JOIN {{ source('tech_radar', 'stg_topics') }} AS t 
+    LEFT JOIN {{ ref('stg_topics') }} AS t
         ON ex.tid = t.topic_id
 ),
 
 collapsed_labels AS (
-    -- Collapse topic labels back into an array per event
     SELECT
         event_id,
         groupArray(tid_label) AS affected_topic_labels
@@ -48,7 +45,7 @@ SELECT
 
     c.affected_topic_labels,
 
-    -- Rank for sorting on Dashboard
+    -- Numeric rank keeps severity sortable in dashboards.
     multiIf(
         e.severity = 'HIGH',   3,
         e.severity = 'MEDIUM', 2,
