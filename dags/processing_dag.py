@@ -42,7 +42,6 @@ HDFS_STG_TOPICS: str = os.getenv("HDFS_STG_TOPICS", f"{HDFS_STAGED_ROOT}/stg_top
 HDFS_STG_POSTS_NLP: str = os.getenv("HDFS_STG_POSTS_NLP", f"{HDFS_STAGED_ROOT}/stg_posts_nlp")
 HDFS_STG_KEYWORD_FREQ: str = os.getenv("HDFS_STG_KEYWORD_FREQ", f"{HDFS_STAGED_ROOT}/stg_keyword_freq")
 HDFS_STG_CRISIS_EVENTS: str = os.getenv("HDFS_STG_CRISIS_EVENTS", f"{HDFS_STAGED_ROOT}/stg_crisis_events")
-HDFS_CMS_STATE_PATH: str = "/data/results/cms/cms_state.pkl"
 HDFS_CMS_TOPK_PATH:  str = "/data/results/cms/top_keywords.json"
 
 # ── Đường dẫn local (Docker volume /opt/airflow) ──
@@ -55,7 +54,6 @@ LOCAL_STOPWORDS_PATH: str = os.getenv("LOCAL_STOPWORDS_PATH", "/opt/airflow/data
 LOCAL_SLANG_DICT_PATH: str = os.getenv("LOCAL_SLANG_DICT_PATH", "/opt/airflow/data/slang_dict.json")
 NLP_TOKENIZER: str = os.getenv("NLP_TOKENIZER", "underthesea")
 NLP_VNCORENLP_JAR: str = os.getenv("NLP_VNCORENLP_JAR", "/opt/airflow/vncorenlp/VnCoreNLP-1.1.1.jar")
-LOCAL_CMS_STATE_PATH: str = "output/cms/cms_state.pkl"
 LOCAL_CMS_TOPK_PATH:  str = "output/cms/top_keywords.json"
 
 # Alias cho CMS tasks
@@ -63,8 +61,6 @@ HDFS_STAGED_PATH: str = STAGED_HDFS_PATH
 LOCAL_STAGED_PATH: str = "data/fake/"
 
 # ── CMS Config ──
-CMS_DEPTH: int = 5       # d = 5 hàm hash
-CMS_WIDTH: int = 2048    # w = 2048 chiều rộng
 CMS_TOP_K: int = 50      # Xuất top-50 keywords
 
 # ── Chế độ chạy ──
@@ -231,76 +227,6 @@ default_args: Dict[str, Any] = {
 }
 
 
-# ============================================================================
-# HELPER FUNCTIONS — CMS Operations
-# ============================================================================
-
-def _get_cms_state_path() -> str:
-    """Lấy đường dẫn CMS state tùy chế độ (local/HDFS)."""
-    return LOCAL_CMS_STATE_PATH if USE_LOCAL else HDFS_CMS_STATE_PATH
-
-
-def _load_cms_state() -> "CountMinSketch":
-    """
-    Load CMS state từ pickle file.
-
-    Nếu file không tồn tại (lần chạy đầu tiên), tạo CMS mới.
-    Strategy: pickle trên local/HDFS — đơn giản, đủ cho Phase 2.
-    Phase 3: có thể migrate sang ClickHouse BLOB nếu cần.
-
-    Returns:
-        CountMinSketch đã khôi phục hoặc mới.
-    """
-    import sys
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    from algorithms.count_min_sketch import CountMinSketch
-
-    state_path = _get_cms_state_path()
-
-    if USE_LOCAL:
-        if os.path.exists(state_path):
-            with open(state_path, "rb") as f:
-                cms = CountMinSketch.deserialize(f.read())
-            logger.info(f"Loaded CMS state from {state_path} "
-                        f"(total_count={cms.total_count:,})")
-            return cms
-    else:
-        # TODO [Member 2]: Implement HDFS read
-        # from hdfs import InsecureClient
-        # client = InsecureClient("http://master-node:9870")
-        # with client.read(state_path) as reader:
-        #     cms = CountMinSketch.deserialize(reader.read())
-        # return cms
-        pass
-
-    logger.info(f"No existing CMS state — creating new (d={CMS_DEPTH}, w={CMS_WIDTH})")
-    return CountMinSketch(d=CMS_DEPTH, w=CMS_WIDTH)
-
-
-def _save_cms_state(cms) -> None:
-    """
-    Lưu CMS state ra pickle file.
-
-    Args:
-        cms: CountMinSketch cần lưu.
-    """
-    state_path = _get_cms_state_path()
-
-    if USE_LOCAL:
-        os.makedirs(os.path.dirname(state_path), exist_ok=True)
-        with open(state_path, "wb") as f:
-            f.write(cms.serialize())
-        logger.info(f"Saved CMS state → {state_path} "
-                    f"(total_count={cms.total_count:,})")
-    else:
-        # TODO [Member 2]: Implement HDFS write
-        # from hdfs import InsecureClient
-        # client = InsecureClient("http://master-node:9870")
-        # with client.write(state_path, overwrite=True) as writer:
-        #     writer.write(cms.serialize())
-        pass
-
-
 def _tokenize_text(text: str, stopwords: set, slang_dict: dict) -> List[str]:
     """
     Tokenize văn bản tiếng Việt (tái sử dụng logic từ lda_job.py).
@@ -347,14 +273,10 @@ def _tokenize_text(text: str, stopwords: set, slang_dict: dict) -> List[str]:
     ]
 
 
-# ============================================================================
-# AIRFLOW TASK FUNCTIONS — CMS Keyword Streaming
-# ============================================================================
-
 def _load_stg_posts_core_window(window_minutes: int = 15):
     """
-    Đọc stg_posts_core và filter 15 phút gần nhất theo crawled_at.
-    Dùng chung cho task_read_new_data (CMS streaming).
+    Đọc stg_posts_core và filter theo window gần nhất theo crawled_at.
+    Dùng chung cho CMS keyword counting.
 
     Local: đọc parquet dir STAGED_LOCAL_PATH.
     Cluster: đọc qua WebHDFS từ STAGED_HDFS_PATH.
@@ -438,200 +360,6 @@ def _load_stg_posts_core_window(window_minutes: int = 15):
         return _filter_and_select(df)
 
 
-def task_read_new_data(**context) -> None:
-    """
-    Task 1: Đọc stg_posts_core incremental (15 phút gần nhất).
-
-    Nguồn: stg_posts_core — cùng bảng cleaning_job ghi, LDA + BERTopic đọc.
-    Push XCom:
-        new_texts   — list[str] text content (tối đa 10K)
-        new_sources — list[str] source per text (voz/tinhte/vnexpress/youtube)
-    """
-    df = _load_stg_posts_core_window(window_minutes=15)
-    # Giới hạn 10K để tránh quá tải XCom (lưu trong Airflow metadata DB)
-    df = df.head(10000)
-    texts   = df["text"].tolist()
-    sources = df["source"].tolist()
-    logger.info(f"New data: {len(texts):,} texts | sources: {df['source'].value_counts().to_dict()}")
-    context["ti"].xcom_push(key="new_texts",   value=texts)
-    context["ti"].xcom_push(key="new_sources", value=sources)
-
-
-def task_run_cms_update(**context) -> Dict[str, Any]:
-    """
-    Task 2: Cập nhật Count-Min Sketch với keywords từ dữ liệu mới.
-
-    Pipeline:
-        1. Load CMS state cũ từ pickle (hoặc tạo mới nếu lần đầu)
-        2. Pull texts mới từ XCom (task trước đó)
-        3. Tokenize → đếm mỗi keyword vào CMS
-        4. Lưu CMS state mới ra pickle
-
-    Returns:
-        Dict chứa thống kê: total_count, n_new_tokens, ...
-    """
-    import sys
-    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-    # Load tài nguyên NLP
-    stopwords_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "data", "stopwords_vi.txt",
-    )
-    slang_path = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-        "data", "slang_dict.json",
-    )
-
-    stopwords: set = set()
-    try:
-        with open(stopwords_path, "r", encoding="utf-8") as f:
-            stopwords = {line.strip().lower() for line in f if line.strip()}
-    except FileNotFoundError:
-        logger.warning(f"Stopwords not found: {stopwords_path}")
-
-    slang_dict: dict = {}
-    try:
-        with open(slang_path, "r", encoding="utf-8") as f:
-            slang_dict = json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        logger.warning(f"Slang dict not found or invalid: {slang_path}")
-
-    # 1. Load CMS state cũ
-    cms = _load_cms_state()
-    count_before = cms.total_count
-
-    # 2. Pull texts + sources từ XCom
-    texts: List[str] = context["ti"].xcom_pull(
-        task_ids="read_new_data", key="new_texts"
-    ) or []
-    sources: List[str] = context["ti"].xcom_pull(
-        task_ids="read_new_data", key="new_sources"
-    ) or ["unknown"] * len(texts)
-    logger.info(f"Pulled {len(texts):,} texts from XCom")
-
-    if not texts:
-        logger.info("No new texts — skipping CMS update.")
-        context["ti"].xcom_push(key="cms_updated", value=False)
-        return {"total_count": cms.total_count, "n_new_tokens": 0}
-
-    # 3. Tokenize & update CMS; track per-source keyword sets
-    n_new_tokens = 0
-    # source_keywords: {source: set_of_unique_keywords}
-    source_keywords: Dict[str, set] = {}
-
-    for text, src in zip(texts, sources):
-        tokens = _tokenize_text(text, stopwords, slang_dict)
-        for token in tokens:
-            cms.add(token)
-            n_new_tokens += 1
-            source_keywords.setdefault(src, set()).add(token)
-
-    # 4. Lưu CMS state mới
-    _save_cms_state(cms)
-
-    # Push candidates cho export: {source: [unique_keywords]}
-    source_kw_export = {src: list(kws)[:2000] for src, kws in source_keywords.items()}
-    all_unique = list({kw for kws in source_keywords.values() for kw in kws})
-    context["ti"].xcom_push(key="source_keywords", value=source_kw_export)
-    context["ti"].xcom_push(key="unique_keywords", value=all_unique[:5000])
-    context["ti"].xcom_push(key="cms_updated", value=True)
-
-    stats = {
-        "total_count": cms.total_count,
-        "count_before": count_before,
-        "n_new_tokens": n_new_tokens,
-        "n_unique_keywords": len(all_unique),
-        "epsilon": cms.epsilon,
-        "delta": cms.delta,
-    }
-    logger.info(f"CMS updated: +{n_new_tokens:,} tokens, "
-                f"total={cms.total_count:,}")
-    return stats
-
-
-def task_export_top_keywords(**context) -> Optional[List[Dict]]:
-    """
-    Task 3: Xuất top-K keywords per source từ CMS → ClickHouse stg_keyword_freq.
-
-    Schema: keyword | window_start | window_end | estimated_count | source
-    Mỗi source (voz/tinhte/vnexpress/youtube) có top-K riêng trong cùng window.
-    """
-    import pandas as pd
-
-    cms_updated = context["ti"].xcom_pull(task_ids="run_cms_update", key="cms_updated")
-    if not cms_updated:
-        logger.info("CMS was not updated — skipping export.")
-        return None
-
-    cms = _load_cms_state()
-
-    # source_keywords: {source: [unique_keywords]} từ task trước
-    source_keywords: Dict[str, List[str]] = context["ti"].xcom_pull(
-        task_ids="run_cms_update", key="source_keywords"
-    ) or {}
-
-    if not source_keywords:
-        logger.warning("No source_keywords in XCom.")
-        return None
-
-    execution_date = context.get("execution_date") or datetime.now(tz=timezone.utc)
-    window_end   = execution_date if isinstance(execution_date, datetime) else datetime.now(tz=timezone.utc)
-    window_start = window_end - timedelta(minutes=15)
-    # strip tz for ClickHouse DateTime (no timezone support)
-    ws = window_start.replace(tzinfo=None)
-    we = window_end.replace(tzinfo=None)
-
-    # Build per-source top-K rows (spec: stg_keyword_freq)
-    results: List[Dict] = []
-    for src, candidates in source_keywords.items():
-        for keyword, count in cms.top_k(candidates, k=CMS_TOP_K):
-            results.append({
-                "keyword":         keyword,
-                "window_start":    ws,
-                "window_end":      we,
-                "estimated_count": int(count),
-                "source":          src,
-            })
-
-    if not results:
-        logger.warning("top_k returned no results.")
-        return None
-
-    # ── Ghi ClickHouse stg_keyword_freq ──
-    ch_host = os.environ.get("CLICKHOUSE_HOST", "clickhouse")
-    try:
-        import clickhouse_connect
-        client = clickhouse_connect.get_client(
-            host=ch_host, port=CLICKHOUSE_PORT,
-            username=os.environ.get("CLICKHOUSE_USER", "root"),
-            password=os.environ.get("CLICKHOUSE_PASSWORD", "root"),
-            database=CLICKHOUSE_DB,
-        )
-        df_out = pd.DataFrame(results)
-        df_out["estimated_count"] = df_out["estimated_count"].astype("int64")
-        client.insert_df(CLICKHOUSE_TABLE, df_out)
-        logger.info(f"Inserted {len(df_out)} rows → {CLICKHOUSE_DB}.{CLICKHOUSE_TABLE}")
-    except Exception as exc:
-        # Fallback local JSON khi test mà chưa có ClickHouse
-        logger.warning(f"ClickHouse unavailable ({exc}) — writing fallback JSON")
-        os.makedirs(os.path.dirname(LOCAL_CMS_TOPK_PATH), exist_ok=True)
-        with open(LOCAL_CMS_TOPK_PATH, "w", encoding="utf-8") as f:
-            json.dump(
-                [{**r, "window_start": r["window_start"].isoformat(),
-                       "window_end":   r["window_end"].isoformat()} for r in results],
-                f, ensure_ascii=False, indent=2,
-            )
-        logger.info(f"Fallback JSON → {LOCAL_CMS_TOPK_PATH}")
-
-    # Log top-5 cho monitoring
-    logger.info("Top-5 keywords:")
-    for i, r in enumerate(results[:5], start=1):
-        logger.info(f"  #{i}: {r['keyword']} ({r['estimated_count']:,})")
-
-    return results
-
-
 # cms_keyword_streaming DAG đã được gộp vào full_processing_pipeline
 # (task cms_keyword_counting chạy sau spark_cleaning, song song với LDA + sentiment)
 
@@ -653,8 +381,7 @@ def task_run_cms_daily() -> None:
             — top-K keywords per source (voz/tinhte/vnexpress/youtube)
             — fallback ghi JSON local nếu ClickHouse chưa sẵn sàng
 
-    Reuses: _load_stg_posts_core_window, _tokenize_text,
-            _load_cms_state, _save_cms_state, cms.top_k
+    Reuses: _load_stg_posts_core_window, _tokenize_text, cms.top_k
     """
     import sys as _sys
     import pandas as _pd
@@ -698,7 +425,6 @@ def task_run_cms_daily() -> None:
             source_cms[src].add(token)
             source_keywords.setdefault(src, set()).add(token)
 
-    _save_cms_state(_load_cms_state())
     total_unique = sum(len(v) for v in source_keywords.values())
     logger.info(f"[CMS] CMS updated — {total_unique:,} unique tokens across {len(source_cms)} sources")
 

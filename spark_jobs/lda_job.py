@@ -86,7 +86,7 @@ _TEXT_PREPROCESSOR = None
 # ============================================================================
 # HẰNG SỐ MẶC ĐỊNH
 # ============================================================================
-DEFAULT_K: int = 12              # Giảm số topics để bớt fragmented trên corpus hiện tại
+DEFAULT_K: int = 20              # Giảm số topics để bớt fragmented trên corpus hiện tại
 DEFAULT_MAX_ITER: int = 60       # Tăng nhẹ để hội tụ ổn định hơn trên local processed data
 DEFAULT_OPTIMIZER: str = "em"    # "em" ổn định hơn "online" cho batch
 DEFAULT_VOCAB_SIZE: int = 4_000  # Giảm nhiễu từ hiếm trên tập processed hiện tại
