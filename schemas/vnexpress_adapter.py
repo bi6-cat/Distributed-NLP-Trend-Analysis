@@ -1,15 +1,4 @@
-"""
-schemas/vnexpress_adapter.py — Chuyển đổi raw data VnExpress → UniversalSocialPost
-
-  POST (post_vnexpress.csv):
-    id_post, link_post, post_time, post_content
-    post_time dạng: "Thứ tư, 29/4/2026, 07:00 (GMT+7)"
-
-  COMMENT (comment_vnexpress.csv):
-    id_post, user_id, user_name, comment_content, comment_time, reaction_detail
-    comment_time dạng: "07:28 29/04/2026"
-    reaction_detail dạng: '{"Thích": 28}'
-"""
+"""Adapter for VnExpress post and comment crawler rows."""
 
 from __future__ import annotations
 
@@ -17,219 +6,155 @@ import hashlib
 import json
 import logging
 import re
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import pandas as pd
-from pydantic import ValidationError
 
 from schemas.models import UniversalSocialPost
 
 logger = logging.getLogger(__name__)
 
 _TZ_ICT = timezone(timedelta(hours=7))
-
-# "29/4/2026, 07:00" — phần sau khi bỏ "Thứ X, "
-_POST_TIME_RE  = re.compile(r"(\d{1,2}/\d{1,2}/\d{4}),\s*(\d{2}:\d{2})")
-# "07:28 29/04/2026"
-_CMT_TIME_FMT  = "%H:%M %d/%m/%Y"
+_POST_TIME_RE = re.compile(r"(\d{1,2}/\d{1,2}/\d{4}),\s*(\d{2}:\d{2})")
+_COMMENT_TIME_FMT = "%H:%M %d/%m/%Y"
 
 
-def _parse_post_time(time_str: str) -> Optional[int]:
-    """Parse "Thứ tư, 29/4/2026, 07:00 (GMT+7)" → Unix timestamp (giây)."""
-    if not isinstance(time_str, str):
+def _normalize_numeric_id(value: object) -> str:
+    try:
+        return str(int(float(str(value))))
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"invalid id: {value!r}")
+
+
+def _parse_post_time(value: object) -> Optional[int]:
+    if not isinstance(value, str):
         return None
-    m = _POST_TIME_RE.search(time_str)
-    if not m:
-        logger.warning("Không parse được post_time VnExpress: %r", time_str)
+    match = _POST_TIME_RE.search(value)
+    if not match:
         return None
     try:
-        dt = datetime.strptime(f"{m.group(1)} {m.group(2)}", "%d/%m/%Y %H:%M")
+        dt = datetime.strptime(f"{match.group(1)} {match.group(2)}", "%d/%m/%Y %H:%M")
         return int(dt.replace(tzinfo=_TZ_ICT).timestamp())
     except ValueError:
-        logger.warning("Lỗi parse post_time VnExpress: %r", time_str)
         return None
 
 
-def _parse_comment_time(time_str: str) -> Optional[int]:
-    """Parse "07:28 29/04/2026" → Unix timestamp (giây)."""
-    if not isinstance(time_str, str):
+def _parse_comment_time(value: object) -> Optional[int]:
+    if not isinstance(value, str):
         return None
     try:
-        dt = datetime.strptime(time_str.strip(), _CMT_TIME_FMT)
+        dt = datetime.strptime(value.strip(), _COMMENT_TIME_FMT)
         return int(dt.replace(tzinfo=_TZ_ICT).timestamp())
     except ValueError:
-        logger.warning("Không parse được comment_time VnExpress: %r", time_str)
         return None
 
 
-def _parse_reactions(reaction_detail) -> int:
-    """Parse '{"Thích": 28}' → 28. Trả 0 nếu lỗi."""
-    if not reaction_detail or (isinstance(reaction_detail, float)):
+def _parse_reactions(value: object) -> int:
+    if not value or isinstance(value, float):
         return 0
     try:
-        d = json.loads(str(reaction_detail))
-        return sum(int(v) for v in d.values() if str(v).isdigit())
+        data = json.loads(str(value))
+        return sum(int(v) for v in data.values() if str(v).isdigit())
     except Exception:
         return 0
 
 
-def _make_comment_id(id_post, user_id, comment_time: str) -> str:
-    key = f"vnexpress_{id_post}_{user_id}_{comment_time}"
-    return hashlib.md5(key.encode()).hexdigest()[:12]
+def _make_comment_id(post_id: object, user_id: object, created_time: object) -> str:
+    key = f"vnexpress_{post_id}_{user_id}_{created_time}"
+    return hashlib.md5(key.encode("utf-8")).hexdigest()[:12]
 
 
 class VnExpressAdapter:
-    """
-    Adapter chuyển đổi M1 VnExpress raw CSV → DataFrame chuẩn cho M4 pipeline.
-
-    Args:
-        strict: nếu True, raise lỗi ngay khi có record invalid thay vì skip
-    """
+    """Convert VnExpress raw dictionaries into validated pandas rows."""
 
     def __init__(self, strict: bool = False):
         self.strict = strict
 
     def posts_to_df(self, raw_posts: list[dict]) -> pd.DataFrame:
-        """
-        Input keys : id_post, link_post, post_time, post_content
-        Output     : DataFrame với post_id, source, author, title, body,
-                     created_at, url, reaction_count, view_count, comment_count
-        """
-        rows, n_skip = [], 0
-        for raw in raw_posts:
-            try:
-                rows.append(self._convert_post(raw))
-            except Exception as e:
-                n_skip += 1
-                logger.warning("Skip post id_post=%s: %s", raw.get("id_post"), e)
-                if self.strict:
-                    raise
-        if n_skip:
-            logger.warning("Bỏ qua %d/%d post VnExpress không hợp lệ.", n_skip, len(raw_posts))
-        return pd.DataFrame(rows) if rows else pd.DataFrame()
+        rows = self._convert_many(raw_posts, self._convert_post, "VnExpress post")
+        return pd.DataFrame(rows)
 
     def comments_to_df(self, raw_comments: list[dict]) -> pd.DataFrame:
-        """
-        Input keys : id_post, user_id, user_name, comment_content, comment_time, reaction_detail
-        Output     : DataFrame với post_id, source, author, body,
-                     created_at, parent_id, reaction_count
-        """
-        rows, n_skip = [], 0
-        for raw in raw_comments:
+        rows = self._convert_many(raw_comments, self._convert_comment, "VnExpress comment")
+        return pd.DataFrame(rows)
+
+    def _convert_many(self, records: list[dict], convert, label: str) -> list[dict]:
+        rows = []
+        for raw in records:
             try:
-                rows.append(self._convert_comment(raw))
-            except Exception as e:
-                n_skip += 1
-                logger.warning("Skip comment id_post=%s user=%s: %s",
-                               raw.get("id_post"), raw.get("user_id"), e)
+                rows.append(convert(raw))
+            except Exception as exc:
+                logger.warning("Skip invalid %s id_post=%s: %s", label, raw.get("id_post"), exc)
                 if self.strict:
                     raise
-        if n_skip:
-            logger.warning("Bỏ qua %d/%d comment VnExpress không hợp lệ.", n_skip, len(raw_comments))
-        return pd.DataFrame(rows) if rows else pd.DataFrame()
-
-    def from_csv(
-        self,
-        posts_path: str,
-        comments_path: Optional[str] = None,
-    ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Load CSV → (posts_df, comments_df).
-        comments_df là DataFrame rỗng nếu không truyền comments_path.
-        """
-        posts_df = self.posts_to_df(
-            pd.read_csv(posts_path, encoding="utf-8").to_dict("records")
-        )
-        comments_df = pd.DataFrame()
-        if comments_path:
-            comments_df = self.comments_to_df(
-                pd.read_csv(comments_path, encoding="utf-8").to_dict("records")
-            )
-        return posts_df, comments_df
-
-    # ── Internal ──────────────────────────────────────────────────────────────
+        return rows
 
     def _convert_post(self, raw: dict) -> dict:
-        id_post    = str(raw.get("id_post", ""))
-        content    = str(raw.get("post_content", "") or "").strip()
-        url        = str(raw.get("link_post", "") or "")
-        time_str   = str(raw.get("post_time", "") or "")
-        created_at = _parse_post_time(time_str)
+        post_id = _normalize_numeric_id(raw.get("id_post"))
+        content = str(raw.get("post_content", "") or "").strip()
+        url = str(raw.get("link_post", "") or "")
+        created_at = _parse_post_time(raw.get("post_time", ""))
 
-        if not content:
-            raise ValueError("post_content rỗng")
         if created_at is None:
-            raise ValueError(f"Không parse được post_time: {time_str!r}")
-
-        try:
-            normalized_id = str(int(float(id_post)))
-        except (ValueError, OverflowError):
-            raise ValueError(f"id_post không hợp lệ: {id_post!r}")
+            raise ValueError(f"cannot parse post_time: {raw.get('post_time')!r}")
 
         post = UniversalSocialPost(
-            post_id    = normalized_id,
-            source     = "vnexpress",
-            post_type  = "article",
-            author     = "VnExpress",
-            content    = content,
-            created_at = created_at,
-            url        = url,
+            post_id=post_id,
+            source="vnexpress",
+            post_type="article",
+            author="VnExpress",
+            content=content,
+            created_at=created_at,
+            url=url,
         )
         return {
-            "post_id":       post.post_id,
-            "source":        post.source,
-            "author":        post.author,
-            "title":         None,
-            "body":          post.content,
-            "created_at":    created_at,
-            "url":           url,
-            "parent_id":     None,
+            "post_id": post.post_id,
+            "source": post.source,
+            "author": post.author,
+            "title": None,
+            "body": post.content,
+            "created_at": created_at,
+            "url": url,
+            "parent_id": None,
             "reaction_count": 0,
-            "view_count":    None,
+            "view_count": None,
             "comment_count": None,
         }
 
     def _convert_comment(self, raw: dict) -> dict:
-        id_post    = str(raw.get("id_post", ""))
-        try:
-            parent_id = str(int(float(id_post)))
-        except (ValueError, OverflowError):
-            raise ValueError(f"id_post không hợp lệ: {id_post!r}")
-        user_id    = str(raw.get("user_id", ""))
-        user_name  = str(raw.get("user_name", "") or "")
-        content    = str(raw.get("comment_content", "") or "").strip()
-        time_str   = str(raw.get("comment_time", "") or "")
-        created_at = _parse_comment_time(time_str)
-        reactions  = _parse_reactions(raw.get("reaction_detail"))
-        comment_id = _make_comment_id(id_post, user_id, time_str)
+        parent_id = _normalize_numeric_id(raw.get("id_post"))
+        user_id = str(raw.get("user_id", "") or "")
+        user_name = str(raw.get("user_name", "") or "").strip() or "unknown"
+        content = str(raw.get("comment_content", "") or "").strip()
+        time_raw = raw.get("comment_time", "")
+        created_at = _parse_comment_time(time_raw)
+        reactions = _parse_reactions(raw.get("reaction_detail"))
 
-        if not content:
-            raise ValueError("comment_content rỗng")
         if created_at is None:
-            raise ValueError(f"Không parse được comment_time: {time_str!r}")
+            raise ValueError(f"cannot parse comment_time: {time_raw!r}")
 
         post = UniversalSocialPost(
-            post_id        = comment_id,
-            source         = "vnexpress",
-            post_type      = "comment",
-            author         = user_name or "unknown",
-            content        = content,
-            created_at     = created_at,
-            url            = f"https://vnexpress.net/{id_post}",
-            parent_post_id = parent_id,
-            reaction_count = reactions,
+            post_id=_make_comment_id(parent_id, user_id, time_raw),
+            source="vnexpress",
+            post_type="comment",
+            author=user_name,
+            content=content,
+            created_at=created_at,
+            url=f"https://vnexpress.net/{parent_id}",
+            parent_post_id=parent_id,
+            reaction_count=reactions,
         )
         return {
-            "post_id":        post.post_id,
-            "source":         post.source,
-            "author":         post.author,
-            "title":          None,
-            "body":           post.content,
-            "created_at":     created_at,
-            "url":            post.url,
-            "parent_id":      post.parent_post_id,
+            "post_id": post.post_id,
+            "source": post.source,
+            "author": post.author,
+            "title": None,
+            "body": post.content,
+            "created_at": created_at,
+            "url": post.url,
+            "parent_id": post.parent_post_id,
             "reaction_count": reactions,
-            "view_count":     None,
-            "comment_count":  None,
+            "view_count": None,
+            "comment_count": None,
         }
